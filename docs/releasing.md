@@ -109,3 +109,11 @@ The release job runs only when the repository variable `RELEASE_ENABLED` is `tru
 (Settings → Secrets and variables → Actions → Variables). Set it after the bootstrap
 publish and the Trusted Publisher setup above; until then pushes to `main` run the full
 CI gate and skip the release without creating tags.
+
+## Trusted Publisher permissions
+
+npm creates new trusted publishers with **staged publishing only** (since 2026-09-03):
+a CI publish then fails with `E403 OIDC permission denied for this action`. Each package
+needs direct publishing allowed (`createPackage`). `scripts/trust-packages.sh` configures
+all packages with `npm trust github … --allow-publish --allow-stage-publish`, replacing a
+staged-only configuration of the same workflow (npm allows one per workflow).
