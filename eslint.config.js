@@ -32,4 +32,13 @@ export default tseslint.config(
     files: ['*.js', '*.config.ts', 'tsup.base.ts', 'packages/*/tsup.config.ts'],
     ...tseslint.configs.disableTypeChecked,
   },
+  {
+    // Release tooling: plain Node ESM, outside the TypeScript project.
+    files: ['*.mjs', 'scripts/**/*.mjs'],
+    ...tseslint.configs.disableTypeChecked,
+    languageOptions: {
+      ...tseslint.configs.disableTypeChecked.languageOptions,
+      globals: { process: 'readonly', console: 'readonly' },
+    },
+  },
 );

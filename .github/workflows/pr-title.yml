@@ -1,0 +1,49 @@
+name: PR title
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+# The workflow never checks out or runs PR code, which is what makes
+# pull_request_target safe here.
+permissions: {}
+
+jobs:
+  conventional-title:
+    name: conventional PR title
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Validate PR title
+        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Keep in sync with commitlint.config.mjs.
+          types: |
+            feat
+            fix
+            perf
+            revert
+            docs
+            test
+            refactor
+            style
+            build
+            ci
+            chore
+          scopes: |
+            core
+            nestjs
+            postgres
+            mongodb
+            kafka
+            rabbitmq
+            testing
+            repo
+            ci
+            deps
+            release
+          requireScope: false

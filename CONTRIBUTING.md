@@ -32,8 +32,7 @@ pnpm test
 | `pnpm test:integration` | Integration project only, needs Docker                             |
 | `pnpm coverage`         | All tests with V8 coverage; fails below the thresholds             |
 | `pnpm mutation`         | Stryker mutation testing                                           |
-| `pnpm changeset`        | Create a changeset                                                 |
-| `pnpm release`          | Build and `changeset publish` (run by CI only, never locally)      |
+| `pnpm release:dry-run`  | semantic-release dry run (needs a GitHub token, see docs)          |
 
 ## Test strategy
 
@@ -67,23 +66,20 @@ chore(deps): bump testcontainers
 
 Common types: `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci`, `chore`. Mark breaking changes with `!` (`feat(core)!: ...`) and a `BREAKING CHANGE:` footer.
 
-## Changesets
+## Versioning and releases
 
-Every user-visible change needs a changeset:
+There are no changesets. The version is computed from Conventional Commits on `main`, and PRs are squash-merged, so **the PR title is the commit that counts**. A workflow checks it, and a husky `commit-msg` hook runs commitlint on local commits (`pnpm install` enables the hook through the `prepare` script).
 
-```bash
-pnpm changeset
-```
+| Commit                                                      | Release (while below 1.0.0) |
+| ----------------------------------------------------------- | --------------------------- |
+| `feat`                                                      | minor                       |
+| `fix`, `perf`, `revert`                                     | patch                       |
+| `!` or a `BREAKING CHANGE:` footer                          | minor (major from 1.0.0)    |
+| `docs`, `chore`, `test`, `ci`, `build`, `refactor`, `style` | no release                  |
 
-Pick the affected packages and the bump type (all `@relaybus/*` packages are versioned together through the `fixed` group), and write the summary for the changelog. Docs-only, CI-only and test-only changes need no changeset.
+Allowed scopes: `core`, `nestjs`, `postgres`, `mongodb`, `kafka`, `rabbitmq`, `testing`, `repo`, `ci`, `deps`, `release`. A scope is optional.
 
-## Release process
-
-Releases are automated; contributors do not publish.
-
-1. Merged PRs with changesets accumulate on `main`.
-2. The Release workflow keeps a "chore: version packages" PR up to date with version bumps and changelogs.
-3. A maintainer merges that PR. The workflow re-runs the full test gate, publishes to npm with provenance through npm Trusted Publishing, pushes tags and creates GitHub releases.
+All packages always share one version. Contributors never publish and never edit version fields. Dependabot PRs use `chore(deps)` and therefore do not release; a maintainer retitles one to `fix(deps): ...` when a dependency change must ship. See [docs/releasing.md](docs/releasing.md) for how releases work, prerelease channels and troubleshooting.
 
 See [docs/ci-cd.md](docs/ci-cd.md) for the details of each workflow.
 

@@ -190,6 +190,10 @@ Every default can be changed; see each package's README for the full option list
 - Adversarial reviews whose findings were fixed with regression tests.
 - Mutation testing, CodeQL, OpenSSF Scorecard and npm provenance in CI.
 
+## Releases
+
+Every push to `main` with releasable [Conventional Commits](https://www.conventionalcommits.org/) publishes all `@relaybus/*` packages to npm with one shared version, computed by semantic-release. While the version is below 1.0.0 a breaking change bumps the minor version. There is no committed changelog: the [GitHub Releases](https://github.com/berkcansavur/relaybus/releases) page is the changelog. Prereleases are published from the `next` and `beta` branches under the matching npm dist-tags. Details: [docs/releasing.md](docs/releasing.md).
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues: [SECURITY.md](SECURITY.md).

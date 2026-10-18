@@ -7,7 +7,8 @@ All automation lives in `.github/`. Every third-party action is pinned to a full
 | File                    | Trigger                                   | Purpose                                                                                   |
 | ----------------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------- |
 | `ci.yml`                | push to `main`, pull requests, reusable   | quality, tests with coverage, build checks, NestJS compatibility, aggregate `CI pass` job |
-| `release.yml`           | push to `main`                            | Runs `ci.yml` as a gate, then Changesets: "Version Packages" PR or npm publish            |
+| `release.yml`           | push to `main`, `next`, `beta`            | Runs `ci.yml` as a gate, then semantic-release: tag, npm publish (OIDC), GitHub Release   |
+| `pr-title.yml`          | pull requests (`pull_request_target`)     | Fails PRs whose title is not a valid Conventional Commit (type and scope allow-lists)     |
 | `codeql.yml`            | push, PR, weekly                          | CodeQL static analysis (`javascript-typescript`, `security-extended`)                     |
 | `dependency-review.yml` | pull requests                             | Fails PRs that add dependencies with known vulnerabilities (moderate and above)           |
 | `scorecard.yml`         | weekly, push to `main`, branch rule edits | OpenSSF Scorecard, published results and SARIF upload to code scanning                    |
@@ -25,26 +26,18 @@ All automation lives in `.github/`. Every third-party action is pinned to a full
 
 ### release.yml flow
 
-1. `gate` calls `ci.yml` (Codecov upload skipped). The release job needs it to pass.
-2. `changesets/action` runs. If unreleased changesets exist it opens or updates a "chore: version packages" PR (it pushes through the GitHub API, so commits are verified). When that PR is merged, the next run finds no changesets and runs `pnpm release` (build, then `changeset publish`), pushes tags and creates GitHub releases.
-3. Publishing authenticates with npm Trusted Publishing (OIDC). The job has `id-token: write` and upgrades npm to `>= 11.5.1`. Provenance is on through `publishConfig.provenance` and `NPM_CONFIG_PROVENANCE`.
+1. `gate` calls `ci.yml` (Codecov upload skipped). The `release` job needs it to pass.
+2. The `release` job runs in its own job (never inside a called workflow, because npm Trusted Publishing checks the calling workflow filename) in the GitHub environment `npm-publish`. It checks out the full history, installs npm 11.20.0 (>= 11.5.1 is required for OIDC) and runs `semantic-release`.
+3. semantic-release reads the commits since the last `v*` tag, computes the next version, and if there is one: `scripts/set-version.mjs` writes it into every `packages/*/package.json` (CI workspace only), the packages are built, `scripts/publish-packages.mjs` runs `pnpm pack` (which rewrites `workspace:` ranges) and `npm publish <tarball> --provenance --tag <channel>` for `core`, `testing`, then the rest, skipping versions already on npm. Finally the tag and the GitHub Release are created. No commit is pushed to `main`.
+4. `concurrency: release` serializes releases and never cancels a started one.
 
-Fallback without Trusted Publishing: create an npm automation token, add it as the repository secret `NPM_TOKEN`, and uncomment the `NODE_AUTH_TOKEN` line in `release.yml`. Remove both once Trusted Publishing works.
-
-Note: `changeset publish` calls `pnpm publish`, which hands the tarball to the `npm` binary. That is why the npm upgrade step matters. After the first real release, confirm the packages show a provenance badge; if publishing fails with an auth error, check the Trusted Publisher fields below first (workflow filename must be exactly `release.yml`).
+Full rules, prerelease channels and recovery steps: [releasing.md](releasing.md).
 
 ## What the owner must do manually
 
-### 1. npm organization and Trusted Publishers
+### 1. npm organization, bootstrap and Trusted Publishers
 
-1. Create the npm organization `relaybus` on npmjs.com (Add Organization, free plan for public packages).
-2. A package must exist before a Trusted Publisher can be attached. For the very first publish of each new package either publish `0.0.0`/first version once from your machine with `npm publish --access public` (2FA), or use the placeholder approach npm documents for new packages.
-3. For each of `@relaybus/core`, `@relaybus/nestjs`, `@relaybus/postgres`, `@relaybus/mongodb`, `@relaybus/kafka`, `@relaybus/rabbitmq`, `@relaybus/testing`: open the package on npmjs.com, Settings, "Trusted Publisher", choose GitHub Actions and enter:
-   - Organization or user: `berkcansavur`
-   - Repository: `relaybus`
-   - Workflow filename: `release.yml`
-   - Environment: leave empty (or the environment name if you add `environment:` to the release job)
-4. Optionally set "Require two-factor authentication and disallow tokens" on each package once OIDC publishing works.
+Follow [releasing.md](releasing.md#bootstrap-one-time): create the npm org `relaybus`, publish the `0.0.0` placeholders with `scripts/bootstrap-npm.sh`, attach a Trusted Publisher to each package (workflow `release.yml`, environment `npm-publish`), and create the `v0.0.0` tag.
 
 ### 2. Codecov
 
@@ -55,16 +48,17 @@ Note: `changeset publish` calls `pnpm publish`, which hands the tarball to the `
 ### 3. Repository settings (Settings in GitHub)
 
 - General: enable "Allow squash merging" only, default message "Pull request title"; enable "Automatically delete head branches".
-- Actions, General: "Workflow permissions" = Read repository contents; enable "Allow GitHub Actions to create and approve pull requests" (required for the Version Packages PR). Restrict allowed actions to "Allow actions created by GitHub and verified creators" or an allow-list; SHA pinning policy can be required here.
+- Actions, General: "Workflow permissions" = Read repository contents; Restrict allowed actions to "Allow actions created by GitHub and verified creators" or an allow-list; SHA pinning policy can be required here.
 - Rules, Rulesets, new branch ruleset targeting `main`:
   - Require a pull request before merging (1 approval once there is a second maintainer; code owner review optional)
-  - Require status checks: `CI pass`, `analyze (javascript-typescript)`, `dependency review`; require branches to be up to date
+  - Require status checks: `CI pass`, `analyze (javascript-typescript)`, `dependency review`, `conventional PR title`; require branches to be up to date
   - Require linear history
   - Block force pushes and deletions
   - Signed commits are not required
 - Code security: enable Dependency graph, Dependabot alerts, Dependabot security updates, Secret scanning with push protection, and Private vulnerability reporting (needed by `SECURITY.md`). CodeQL is configured by `codeql.yml`, so leave "default setup" off.
 - Discussions: enable if you keep the link in `ISSUE_TEMPLATE/config.yml`.
-- Optionally create an `npm-publish` environment with required reviewers for a manual approval before publishing; then add `environment: npm-publish` to the `release` job and the same name in the npm Trusted Publisher form.
+- Settings, Environments: create `npm-publish` (the `release` job uses it and the npm Trusted Publisher form must name it). Required reviewers are optional and add a manual approval before every publish; restrict deployment branches to `main`, `next` and `beta`.
+- Rulesets: tags matching `v*` must be creatable by the Actions integration (the release workflow pushes them). Do not require signed commits for tags.
 
 ### 4. Mutation testing dependencies
 
