@@ -125,7 +125,7 @@ interface DeliveryRow {
  * - **Fenced state changes.** Complete, reschedule, bury and extend only apply
  *   with the epoch of the lane lease that claimed the delivery. A lane taken
  *   over by another worker gets a new epoch, which fences everything the
- *   previous holder still runs. Completion takes a shared lock on the lane
+ *   previous holder still runs. Completion takes a key-share lock on the lane
  *   row, so it cannot interleave with a takeover.
  * - **Attempts survive crashes.** A claim records which deliveries it put in
  *   flight in the lane row. If the holder dies, the next holder charges one
@@ -143,6 +143,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   readonly #setupLockKey: string;
   readonly #purgeBatchSize: number;
   readonly #completionHistory: boolean;
+  readonly #logger: RelayBusLogger;
   #ownedPool: Pool | undefined;
 
   constructor(options: PostgresEventStoreOptions<TTransaction>) {
@@ -166,6 +167,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     this.#setupLockKey = this.#statements.setupLockKey;
     this.#purgeBatchSize = purgeBatchSize;
     this.#completionHistory = names.completionHistory;
+    this.#logger = options.logger ?? console;
     if (options.executor !== undefined) {
       this.#executor = options.executor;
     } else {
@@ -258,41 +260,81 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   }
 
   /**
-   * Claims up to `limit` due deliveries in one transaction. It first claims from
-   * the lanes this owner already holds, then takes free lanes with due work,
-   * a few at a time (4, 8, 16, ...) so a worker holds only as many lanes as it
-   * needs, and finally records the batch in the lane rows. See
-   * {@link PostgresStatements.claim} for the rules a delivery must satisfy.
-   * Lanes taken for nothing (everything in them is blocked or not yet due) are
-   * handed back at the end.
+   * Claims up to `limit` due deliveries in two steps. The first is one
+   * statement on the lanes this owner already holds ({@link PostgresStatements.claimHeld}):
+   * a backlog that fills the batch costs one round trip. When it does not, a
+   * transaction continues: the slow claim on held lanes whose scan window was
+   * full of blocked followers, then free lanes with due work, taken a few at
+   * a time (4, 8, 16, ...) so a worker holds only as many lanes as it needs,
+   * and the batch is recorded in the lane rows. Lanes taken for nothing
+   * (everything in them is blocked or not yet due) are handed back. The step
+   * that fails after the first one has recorded deliveries returns those
+   * instead of failing: a recorded delivery nobody received would be held
+   * for a whole lease. See {@link PostgresStatements.claim} for the rules a
+   * delivery must satisfy.
    */
   async claim(request: ClaimRequest): Promise<ClaimedDelivery[]> {
     if (request.handlers.length === 0 || !(request.limit > 0)) {
       return [];
     }
+    const heldRows = await this.#executor.query(this.#statements.claimHeld, [
+      request.now.toISOString(),
+      JSON.stringify(request.handlers),
+      request.limit,
+      request.leaseOwner,
+      request.leaseExpiresAt.toISOString(),
+    ]);
+    const claimed = heldRows.filter((row) => row['delivery_id'] !== null);
+    if (claimed.length < request.limit) {
+      const blockedLanes =
+        heldRows[0]!['window_saturated'] === true
+          ? (JSON.parse(heldRows[0]!['held_lanes'] as string) as number[])
+          : [];
+      try {
+        claimed.push(...(await this.#claimMore(request, claimed.length, blockedLanes)));
+      } catch (error) {
+        if (claimed.length === 0) {
+          throw error;
+        }
+        this.#logger.error(
+          `[PostgresEventStore](claim) Taking more lanes failed, returning the deliveries already claimed | claimed=${claimed.length} | error=${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    return claimed.map((row) => mapClaimedDelivery(row, request.leaseExpiresAt));
+  }
+
+  /**
+   * Second step of {@link PostgresEventStore.claim}, in one transaction: the slow
+   * claim on the held lanes in `blockedLanes`, then free lanes. `alreadyClaimed`
+   * deliveries of the first step are in flight, so they are not picked again.
+   */
+  async #claimMore(
+    request: ClaimRequest,
+    alreadyClaimed: number,
+    blockedLanes: readonly number[],
+  ): Promise<PostgresRow[]> {
     const now = request.now.toISOString();
     const leaseExpiresAt = request.leaseExpiresAt.toISOString();
     const handlers = JSON.stringify(request.handlers);
     return this.#executor.transaction(async (transaction) => {
-      const heldLanes = await this.#executor.query(
-        this.#statements.lockHeldLanes,
-        [request.leaseOwner, now],
-        transaction,
-      );
-      const lanes = new Set(heldLanes.map((row) => readCount(row, 'lane')));
       const claimed: PostgresRow[] = [];
-      const pickFrom = async (laneIds: readonly number[]): Promise<void> => {
-        claimed.push(
-          ...(await this.#pickDeliveries(
-            [now, handlers, request.limit - claimed.length, JSON.stringify(laneIds)],
-            transaction,
-          )),
+      const remaining = (): number => request.limit - alreadyClaimed - claimed.length;
+      const takenLanes = new Set<number>();
+      if (blockedLanes.length > 0) {
+        const locked = await this.#executor.query(
+          this.#statements.lockHeldLanes,
+          [request.leaseOwner, now],
+          transaction,
         );
-      };
-      if (lanes.size > 0) {
-        await pickFrom([...lanes]);
+        const slowRows = await this.#executor.query(
+          this.#statements.claimBehindBlockedKeys,
+          [now, handlers, remaining(), JSON.stringify(locked.map((row) => readCount(row, 'lane')))],
+          transaction,
+        );
+        claimed.push(...slowRows.filter((row) => row['delivery_id'] !== null));
       }
-      for (let laneCount = INITIAL_LANES_PER_ROUND; claimed.length < request.limit;) {
+      for (let laneCount = INITIAL_LANES_PER_ROUND; remaining() > 0;) {
         const taken = await this.#executor.query(
           this.#statements.takeFreeLanes,
           [now, handlers, laneCount, request.leaseOwner, leaseExpiresAt],
@@ -301,15 +343,20 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
         if (taken.length === 0) {
           break;
         }
-        const takenLanes = taken.map((row) => readCount(row, 'lane'));
-        for (const lane of takenLanes) {
-          lanes.add(lane);
+        const lanes = taken.map((row) => readCount(row, 'lane'));
+        for (const lane of lanes) {
+          takenLanes.add(lane);
         }
-        await pickFrom(takenLanes);
+        claimed.push(
+          ...(await this.#pickDeliveries(
+            [now, handlers, remaining(), JSON.stringify(lanes)],
+            transaction,
+          )),
+        );
         laneCount *= 2;
       }
-      await this.#recordClaim(claimed, lanes, request, transaction);
-      return claimed.map((row) => mapClaimedDelivery(row, request.leaseExpiresAt));
+      await this.#recordClaim(claimed, takenLanes, request, transaction);
+      return claimed;
     });
   }
 
@@ -506,7 +553,8 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     }
     const oldestDue = await this.#executor.query(this.#statements.oldestDue, [now.toISOString()]);
     return {
-      pending: stored['pending']! - processing,
+      // The counts come from separate statements; a delivery that finishes in between must not make this negative.
+      pending: Math.max(0, stored['pending']! - processing),
       processing,
       completed,
       dead: stored['dead']!,

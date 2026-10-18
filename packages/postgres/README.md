@@ -173,8 +173,8 @@ tool, run it as one transaction with the workers stopped. Running 0.1.0 and the 
   flight twice or out of order.
 - **Fenced.** A lease token is `<lane>:<epoch>`. `complete`, `completeMany`, `reschedule`, `bury`, `release` and
   `extendLease` apply only while the lane still has that epoch and lists the delivery as in flight; a worker that lost
-  its lane changes nothing. Completion takes a shared lock on the lane row until the transaction ends, so a takeover
-  (which needs the row exclusively) and a transactional handler's completion cannot both succeed: the handler's writes
+  its lane changes nothing. Completion takes a `FOR KEY SHARE` lock on the lane row until the transaction ends, so a takeover
+  (which locks the row `FOR UPDATE`) and a transactional handler's completion cannot both succeed: the handler's writes
   and the deletion of its delivery commit together, or the takeover redelivers it.
 - **Attempts survive crashes.** An attempt is recorded when it ends: a failure adds one to `attempts` (`reschedule`,
   `bury`), a graceful `release` adds nothing, and a lane that is taken over charges one attempt to every delivery its
@@ -204,6 +204,9 @@ tool, run it as one transaction with the workers stopped. Running 0.1.0 and the 
   without deliveries or records, including events created before the earliest cutoff you passed that never had one (a publish
   whose delivery was purged in the same instant, or an event with no subscriber). Configure it through the bus `retention` option (`retention.completed` is therefore the horizon of event deduplication and of the events' storage). Delete rows through `purge` only; events are
   removed by cascade or by purge, never by hand while publishers are active.
+- **Deduplication horizon.** An event remembers its handlers only as long as the event row exists. Once `purge` deletes
+  the event (older than `retention.completed` and without deliveries), a broker redelivery or publish retry with the same
+  id is a new event and runs its handlers again; keep `retention.completed` longer than any redelivery window.
 - **Lock duration.** A publisher holds its key's counter row until commit. Keep transactions that publish keyed events
   short; unkeyed events take no such lock.
 - **Key counters.** `key_sequences` keeps one row per key ever published and rows are never deleted; the table grows

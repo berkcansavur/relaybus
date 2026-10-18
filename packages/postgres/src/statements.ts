@@ -33,6 +33,9 @@ function countChanged(dml: string): string {
  */
 const CLAIM_SCAN_WINDOW = 256;
 
+/** Due deliveries the fast claim reads from one lane. A lane that fills it may hide claimable deliveries behind blocked followers. */
+const LANE_SCAN_WINDOW = 64;
+
 const HANDLER_PREDICATE = `delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))`;
 
 const LANE_LIST = `ARRAY(SELECT jsonb_array_elements_text($4::jsonb)::smallint)`;
@@ -152,6 +155,71 @@ SELECT id FROM inserted`;
   }
 
   /**
+   * First step of a claim, one statement: claims from the lanes this owner
+   * already holds and records the batch in those lanes, all atomically, so a
+   * backlog that fills the batch costs one round trip. Parameters:
+   * `[now, handlersJson, limit, leaseOwner, leaseExpiresAt]`.
+   *
+   * The held lanes are locked `FOR NO KEY UPDATE` in lane order (a lane that
+   * another transaction of this owner is changing makes the statement wait, a
+   * takeover by anybody else is excluded by the lease itself). The candidate
+   * rules are those of {@link claim}. Held lanes that picked nothing, run
+   * nothing and have no full scan window (so nothing claimable hides in them)
+   * are freed. Always returns one row per picked delivery, or one row whose
+   * `delivery_id` is null; `window_saturated` says that some lane filled its
+   * scan window, and `held_lanes` (JSON text) lists the lanes still held.
+   */
+  get claimHeld(): string {
+    const deliveries = this.#names.deliveries;
+    const lanes = this.#names.lanes;
+    return `WITH held AS MATERIALIZED (
+  SELECT lane.lane, lane.epoch, lane.in_flight
+  FROM ${lanes} AS lane
+  WHERE lane.lease_owner = $4::text AND lane.lease_expires_at > $1::timestamptz
+  ORDER BY lane.lane
+  FOR NO KEY UPDATE
+), ${this.#scopeAndRunning('SELECT held.lane, held.epoch, held.in_flight FROM held')},
+${this.#fastWindow()}
+), picked_rows AS MATERIALIZED (
+  ${this.#pickedRowsSelect()}
+), by_lane AS (
+  SELECT picked_rows.lane, array_agg(picked_rows.delivery_id) AS ids FROM picked_rows GROUP BY picked_rows.lane
+), still_running AS (
+  SELECT lane.lane, array_agg(delivery.id) AS ids
+  FROM by_lane
+  JOIN ${lanes} AS lane ON lane.lane = by_lane.lane
+  CROSS JOIN LATERAL unnest(lane.in_flight) AS flying (id)
+  JOIN ${deliveries} AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+  GROUP BY lane.lane
+), extended AS (
+  UPDATE ${lanes} AS lane
+  SET in_flight = COALESCE(still_running.ids, '{}') || by_lane.ids,
+      lease_expires_at = GREATEST(lane.lease_expires_at, $5::timestamptz)
+  FROM by_lane
+  LEFT JOIN still_running ON still_running.lane = by_lane.lane
+  WHERE lane.lane = by_lane.lane
+  RETURNING lane.lane
+), saturated_lanes AS (
+  SELECT due_window.lane FROM due_window GROUP BY due_window.lane HAVING count(*) >= ${LANE_SCAN_WINDOW}
+), freed AS (
+  UPDATE ${lanes} AS lane
+  SET lease_owner = NULL, lease_expires_at = NULL, in_flight = '{}'
+  FROM held
+  WHERE lane.lane = held.lane
+    AND lane.lane NOT IN (SELECT lane FROM by_lane)
+    AND lane.lane NOT IN (SELECT lane FROM saturated_lanes)
+    AND ${this.#noRunningDelivery('lane')}
+  RETURNING lane.lane
+)
+SELECT EXISTS (SELECT 1 FROM saturated_lanes) AS window_saturated,
+  (SELECT COALESCE(jsonb_agg(held.lane), '[]'::jsonb) FROM held WHERE held.lane NOT IN (SELECT lane FROM freed))::text AS held_lanes,
+  picked.*
+FROM (SELECT 1) AS anchor
+LEFT JOIN picked_rows AS picked ON true
+ORDER BY picked.due_at, picked.delivery_id`;
+  }
+
+  /**
    * Locks the lanes this owner already holds under a live lease and returns
    * them with their epochs. Parameters: `[leaseOwner, now]`. Rows are locked in
    * lane order, the order every statement that locks several lanes uses.
@@ -161,7 +229,7 @@ SELECT id FROM inserted`;
 FROM ${this.#names.lanes}
 WHERE lease_owner = $1::text AND lease_expires_at > $2::timestamptz
 ORDER BY lane
-FOR UPDATE`;
+FOR NO KEY UPDATE`;
   }
 
   /**
@@ -236,9 +304,16 @@ SELECT lane::int AS lane, epoch::text AS epoch FROM taken ORDER BY lane`;
    * mutual exclusion, so two claimers never see the same lane.
    */
   get claim(): string {
+    return `WITH ${this.#scopeAndRunning(`SELECT lane.lane, lane.epoch, lane.in_flight FROM ${this.#names.lanes} AS lane WHERE lane.lane = ANY (${LANE_LIST})`)},
+${this.#fastWindow()}
+)
+${this.#pickedRows(`((SELECT count(*) FROM due_window) >= ${CLAIM_SCAN_WINDOW} OR EXISTS (SELECT 1 FROM due_window GROUP BY lane HAVING count(*) >= ${LANE_SCAN_WINDOW}))`)}`;
+  }
+
+  /** The `due_window` and `candidates` CTEs of the fast claim, up to (not including) the closing parenthesis of `candidates`. */
+  #fastWindow(): string {
     const deliveries = this.#names.deliveries;
-    return `WITH ${this.#scopeAndRunning()},
-due_window AS MATERIALIZED (
+    return `due_window AS MATERIALIZED (
   SELECT recent.id, recent.lane, recent.available_at
   FROM scope
   CROSS JOIN LATERAL (
@@ -248,7 +323,7 @@ due_window AS MATERIALIZED (
       AND delivery.available_at <= $1::timestamptz AND ${HANDLER_PREDICATE}
       AND delivery.id <> ALL (scope.in_flight)
     ORDER BY delivery.available_at, delivery.id
-    LIMIT ${CLAIM_SCAN_WINDOW}
+    LIMIT ${LANE_SCAN_WINDOW}
   ) AS recent
   ORDER BY recent.available_at, recent.id
   LIMIT ${CLAIM_SCAN_WINDOW}
@@ -258,41 +333,57 @@ due_window AS MATERIALIZED (
   JOIN ${deliveries} AS delivery ON delivery.id = due_window.id
   WHERE delivery.key IS NULL OR NOT (${this.#blockedKey('delivery')})
   ORDER BY delivery.available_at, delivery.id
-  LIMIT $3::int
-)
-${this.#pickedRows('(SELECT count(*) FROM due_window) >= ' + String(CLAIM_SCAN_WINDOW))}`;
+  LIMIT $3::int`;
   }
 
   /**
    * Slow claim, run when {@link claim} picked too few deliveries from a full
    * window: the front of the due queue is mostly followers of blocked keys.
    * Same parameters and rules as {@link claim}, but heads are found with
-   * `DISTINCT ON (handler, key)` over the pending-key index of each lane, so
-   * the cost follows the number of pending keyed deliveries in the lanes
+   * a loose index scan over the pending-key index of each lane (it hops from key
+   * to key), so the cost follows the number of pending keys in the lanes
    * instead of one probe per due follower.
    */
   get claimBehindBlockedKeys(): string {
     const deliveries = this.#names.deliveries;
-    return `WITH ${this.#scopeAndRunning()},
+    return `WITH ${this.#scopeAndRunning(`SELECT lane.lane, lane.epoch, lane.in_flight FROM ${this.#names.lanes} AS lane WHERE lane.lane = ANY (${LANE_LIST})`)},
 heads AS MATERIALIZED (
-  SELECT head.id
+  SELECT head.id, head.lane, head.available_at, head.handler, head.key
   FROM scope
+  CROSS JOIN unnest(ARRAY(SELECT jsonb_array_elements_text($2::jsonb))) AS wanted (handler)
   CROSS JOIN LATERAL (
-    SELECT DISTINCT ON (candidate.handler, candidate.key) candidate.id
-    FROM ${deliveries} AS candidate
-    WHERE candidate.lane = scope.lane AND candidate.key IS NOT NULL AND candidate.status = 'pending'
-      AND candidate.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
-    ORDER BY candidate.handler, candidate.key, candidate.sequence
+    -- Loose index scan: hop from key to key on the pending-key index, then take the lowest
+    -- sequence of each key. The cost follows the number of keys, not the number of followers.
+    WITH RECURSIVE hops (key) AS (
+      (SELECT candidate.key FROM ${deliveries} AS candidate
+       WHERE candidate.lane = scope.lane AND candidate.handler = wanted.handler
+         AND candidate.key IS NOT NULL AND candidate.status = 'pending'
+       ORDER BY candidate.key LIMIT 1)
+      UNION ALL
+      SELECT (SELECT candidate.key FROM ${deliveries} AS candidate
+              WHERE candidate.lane = scope.lane AND candidate.handler = wanted.handler
+                AND candidate.key IS NOT NULL AND candidate.status = 'pending' AND candidate.key > hops.key
+              ORDER BY candidate.key LIMIT 1)
+      FROM hops WHERE hops.key IS NOT NULL
+    )
+    SELECT lowest.id, lowest.lane, lowest.available_at, lowest.handler, lowest.key
+    FROM hops
+    CROSS JOIN LATERAL (
+      SELECT candidate.id, candidate.lane, candidate.available_at, candidate.handler, candidate.key
+      FROM ${deliveries} AS candidate
+      WHERE candidate.lane = scope.lane AND candidate.handler = wanted.handler
+        AND candidate.key = hops.key AND candidate.status = 'pending'
+      ORDER BY candidate.sequence LIMIT 1
+    ) AS lowest
+    WHERE hops.key IS NOT NULL
   ) AS head
 ), keyed AS MATERIALIZED (
-  SELECT delivery.id, delivery.lane, delivery.available_at
+  SELECT heads.id, heads.lane, heads.available_at
   FROM heads
-  JOIN ${deliveries} AS delivery ON delivery.id = heads.id
-  JOIN scope ON scope.lane = delivery.lane
-  WHERE delivery.status = 'pending' AND delivery.available_at <= $1::timestamptz
-    AND delivery.id <> ALL (scope.in_flight)
-    AND NOT ${this.#runningElsewhere('delivery')}
-  ORDER BY delivery.available_at, delivery.id
+  JOIN scope ON scope.lane = heads.lane
+  WHERE heads.available_at <= $1::timestamptz AND heads.id <> ALL (scope.in_flight)
+    AND NOT EXISTS (SELECT 1 FROM running WHERE running.handler = heads.handler AND running.key = heads.key)
+  ORDER BY heads.available_at, heads.id
   LIMIT $3::int
 ), unkeyed AS MATERIALIZED (
   SELECT recent.id, recent.lane, recent.available_at
@@ -321,12 +412,10 @@ ${this.#pickedRows('false')}`;
   }
 
   /** The held lanes with their epochs and in-flight ids, and the keyed deliveries running in them. */
-  #scopeAndRunning(): string {
+  #scopeAndRunning(scopeQuery: string): string {
     const deliveries = this.#names.deliveries;
     return `scope AS MATERIALIZED (
-  SELECT lane.lane, lane.epoch, lane.in_flight
-  FROM ${this.#names.lanes} AS lane
-  WHERE lane.lane = ANY (${LANE_LIST})
+  ${scopeQuery}
 ), running AS MATERIALIZED (
   SELECT delivery.handler, delivery.key
   FROM scope
@@ -359,15 +448,20 @@ ${this.#pickedRows('false')}`;
     return `SELECT ${saturated} AS window_saturated, picked.*
 FROM (SELECT 1) AS anchor
 LEFT JOIN (
-  SELECT candidates.available_at AS due_at, delivery.id AS delivery_id, delivery.lane::int AS lane,
+  ${this.#pickedRowsSelect()}
+) AS picked ON true
+ORDER BY picked.due_at, picked.delivery_id`;
+  }
+
+  /** The picked deliveries joined with the lane epoch and their event, as the claim result columns. */
+  #pickedRowsSelect(): string {
+    return `SELECT candidates.available_at AS due_at, delivery.id AS delivery_id, delivery.lane::int AS lane,
     scope.epoch::text AS epoch, delivery.handler, (delivery.attempts + 1)::int AS attempt,
     ${eventColumns('event')}
   FROM candidates
   JOIN scope ON scope.lane = candidates.lane
   JOIN ${this.#names.deliveries} AS delivery ON delivery.id = candidates.id
-  JOIN ${this.#names.events} AS event ON event.id = delivery.event_id
-) AS picked ON true
-ORDER BY picked.due_at, picked.delivery_id`;
+  JOIN ${this.#names.events} AS event ON event.id = delivery.event_id`;
   }
 
   /**
@@ -447,13 +541,15 @@ WHERE lane.lane = $2::smallint AND lane.epoch = $3::bigint AND $1::text = ANY (l
    * claimed under. Parameters: `[leasesJson]`, plus `now` when a completion history is kept, with
    * `leasesJson = [{ id, lane, epoch }]`. Returns the ids that were completed.
    *
-   * The lane rows are locked `FOR SHARE` first, in lane order, and the lock is
-   * held until the surrounding transaction ends. A claimer that takes the lane
-   * over needs the row exclusively, so it waits until this completion commits
-   * or rolls back and then either finds the delivery gone or finds the lane
-   * still unowned by it: a completion and a takeover cannot both succeed for
-   * one delivery, which is what makes a transactional handler's writes
-   * effectively-once. With a completion history the deleted rows are copied to
+   * The lane rows are locked `FOR KEY SHARE` first, in lane order, and the lock
+   * is held until the surrounding transaction ends. A claimer that takes the
+   * lane over locks it `FOR UPDATE`, which conflicts with that lock, so it
+   * skips the lane until this completion commits or rolls back: a completion
+   * and a takeover cannot both succeed for one delivery, which is what makes a
+   * transactional handler's writes effectively-once. The weakest lock that
+   * conflicts with a takeover is used on purpose: it does not conflict with the
+   * owner's own claim and heartbeats (plain updates of the lane row), which
+   * would otherwise wait for every completion in progress. With a completion history the deleted rows are copied to
    * it in the same statement.
    */
   get complete(): string {
@@ -467,7 +563,7 @@ WHERE lane.lane = $2::smallint AND lane.epoch = $3::bigint AND $1::text = ANY (l
   FROM ${this.#names.lanes} AS lane
   WHERE lane.lane IN (SELECT lane FROM leases)
   ORDER BY lane.lane
-  FOR SHARE
+  FOR KEY SHARE
 ), completed AS (
   DELETE FROM ${deliveries} AS delivery
   USING leases JOIN fence ON fence.lane = leases.lane AND fence.epoch = leases.epoch
@@ -517,7 +613,7 @@ SELECT id FROM completed`;
   /**
    * Applies `assignments` to a running delivery and removes it from its lane's
    * in-flight list, if the lane still has the caller's epoch. The lane row is
-   * locked first (`FOR UPDATE`), so a takeover cannot interleave. Parameters
+   * locked first (`FOR NO KEY UPDATE`, which conflicts with a takeover's `FOR UPDATE`), so a takeover cannot interleave. Parameters
    * `$1`..`$3` are always `[deliveryId, lane, epoch]`.
    */
   #leaveFlight(assignments: string): string {
@@ -525,7 +621,7 @@ SELECT id FROM completed`;
     return `WITH fence AS MATERIALIZED (
   SELECT lane.lane FROM ${lanes} AS lane
   WHERE lane.lane = $2::smallint AND lane.epoch = $3::bigint AND $1::text = ANY (lane.in_flight)
-  FOR UPDATE
+  FOR NO KEY UPDATE
 ), changed AS (
   UPDATE ${this.#names.deliveries} AS delivery ${assignments}
   FROM fence

@@ -14,6 +14,16 @@ eventStoreContract('InMemoryEventStore with completion history', {
   keepsCompletedRecords: true,
 });
 
+// A store without the optional port methods must pass the contract too (the suite completes one by one).
+eventStoreContract('InMemoryEventStore without completeMany', {
+  createStore: async () => {
+    const store = new InMemoryEventStore();
+    Object.defineProperty(store, 'completeMany', { value: undefined });
+    return store;
+  },
+  createPeerStore: async (primary) => primary,
+});
+
 describe('InMemoryEventStore', () => {
   afterEach(() => {
     vi.unstubAllEnvs();

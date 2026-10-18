@@ -3,6 +3,7 @@ import type { PoolClient } from 'pg';
 import { createUuidV7, type ClaimedDelivery, type EventEnvelope } from '@relaybus/core';
 import { at, createDelivery, createEnvelope } from '@relaybus/testing';
 import {
+  PgExecutor,
   PostgresEventStore,
   type PostgresExecutor,
   type PostgresParameter,
@@ -523,5 +524,70 @@ describe('upgrade from 0.1.0', () => {
     const store = new PostgresEventStore({ pool: database.pool, schema });
     await store.setup();
     expect(await store.statistics(at(0))).toMatchObject({ pending: 0, oldestDueAt: null });
+  });
+});
+
+describe('a claim that needs more than the lanes it holds', () => {
+  /** A store whose statements that take free lanes fail while `failing.on` is set. */
+  async function createFailingStore(logger: { error: (message: string) => void }) {
+    const schema = uniqueSchema();
+    const inner = new PgExecutor(database.pool);
+    const failing: { error: unknown } = { error: undefined };
+    const executor: PostgresExecutor<PoolClient> = {
+      transaction: (work) => inner.transaction(work),
+      query: async (sql, parameters, transaction) => {
+        if (failing.error !== undefined && sql.includes('AS free')) {
+          // The second failure of the test is a string on purpose: stores must cope with any thrown value.
+          throw failing.error as Error;
+        }
+        return inner.query(sql, parameters, transaction);
+      },
+    };
+    const store = new PostgresEventStore({ executor, schema, logger: logger as never });
+    await store.setup();
+    return { store, failing };
+  }
+
+  it('returns what the first step recorded when taking more lanes fails, and throws when it recorded nothing', async () => {
+    const errors: string[] = [];
+    const { store, failing } = await createFailingStore({
+      error: (message) => void errors.push(message),
+    });
+    await append(store, [
+      { event: createEnvelope({ key: 'shared' }), handlers: ['h1', 'h2', 'h3'] },
+    ]);
+    expect(await claim(store, ['h1'], 'worker-1')).toHaveLength(1);
+    failing.error = new Error('take failed');
+    const claimed = await claim(store, ['h2', 'h3'], 'worker-1', at(1), 10);
+    expect(claimed.map((delivery) => delivery.handler).sort()).toEqual(['h2', 'h3']);
+    expect(errors).toEqual([
+      expect.stringContaining('[PostgresEventStore](claim) Taking more lanes failed'),
+    ]);
+    await expect(claim(store, ['h1'], 'worker-2', at(2), 10)).rejects.toThrow('take failed');
+    // A failure that is not an Error is reported by its text.
+    await append(store, [{ event: createEnvelope({ key: 'again' }), handlers: ['h1', 'h2'] }]);
+    failing.error = undefined;
+    expect(await claim(store, ['h1'], 'worker-3', at(3))).toHaveLength(1);
+    failing.error = 'plain text failure';
+    expect(await claim(store, ['h2'], 'worker-3', at(4), 10)).toHaveLength(1);
+    expect(errors[1]).toContain('error=plain text failure');
+  });
+
+  it('looks behind the blocked followers of a lane it holds', async () => {
+    const { store } = await createStore();
+    await append(
+      store,
+      Array.from({ length: 100 }, () => ({
+        event: createEnvelope({ key: 'hot' }),
+        handlers: ['h'],
+      })),
+    );
+    const [head] = await claim(store, ['h'], 'worker-1', at(1), 5);
+    expect(head!.event.key).toBe('hot');
+    // The lane is held, its first 64 due deliveries are all followers of the running head.
+    expect(await claim(store, ['h'], 'worker-1', at(2), 5)).toEqual([]);
+    expect(await store.complete(head!, at(3))).toBe(true);
+    const [next] = await claim(store, ['h'], 'worker-1', at(4), 5);
+    expect(next!.event.key).toBe('hot');
   });
 });
