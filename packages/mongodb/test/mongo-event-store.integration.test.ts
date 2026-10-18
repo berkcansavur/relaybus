@@ -64,7 +64,6 @@ describe('setup', () => {
         'handler_created',
         'ordering',
         'parked',
-        'running',
         'status_created',
         'status_updated',
         'type_created',
@@ -273,7 +272,7 @@ describe('stored data', () => {
 
 describe('purge', () => {
   it('works through more than one batch', async () => {
-    const { store } = await createStore({ purgeBatchSize: 3 });
+    const { store } = await createStore({ purgeBatchSize: 3, completionHistory: true });
     const entries = Array.from({ length: 8 }, () => ({
       event: createEnvelope(),
       deliveries: [createDelivery('h')],
@@ -296,7 +295,7 @@ describe('purge', () => {
   });
 
   it('deletes deliveries and their events in one transaction', async () => {
-    const { store } = await createStore();
+    const { store } = await createStore({ completionHistory: true });
     await store.transaction((session) =>
       store.append(
         session,
@@ -539,7 +538,7 @@ describe('queries built from untrusted input', () => {
 
 describe('claim under contention', () => {
   it('never runs two deliveries of one handler and key at once, never claims one twice, keeps publish order', async () => {
-    const { store } = await createStore();
+    const { store } = await createStore({ completionHistory: true });
     const handlers = ['handler-a', 'handler-b'];
     const keys = Array.from({ length: 8 }, (_, index) => `key-${index}`);
     const eventsPerKey = 20;
@@ -651,8 +650,9 @@ describe('RelayBus on MongoDB', () => {
   async function createBus(
     clock: FakeClock,
     database: string,
+    completionHistory = false,
   ): Promise<{ bus: RelayBus<ClientSession>; store: MongoEventStore }> {
-    const store = new MongoEventStore({ client, database });
+    const store = new MongoEventStore({ client, database, completionHistory });
     const bus = new RelayBus<ClientSession>({
       store,
       clock,
@@ -666,7 +666,7 @@ describe('RelayBus on MongoDB', () => {
 
   it('publishes with a business write and runs the handler to completion', async () => {
     const database = uniqueDatabaseName();
-    const { bus } = await createBus(new FakeClock(), database);
+    const { bus } = await createBus(new FakeClock(), database, true);
     const received: string[] = [];
     bus.subscribe(OrderPlaced, (event) => void received.push(event.payload.orderId), {
       id: 'audit',
@@ -699,7 +699,7 @@ describe('RelayBus on MongoDB', () => {
   it('commits a transactional handler write together with the completion and rolls both back on failure', async () => {
     const database = uniqueDatabaseName();
     const clock = new FakeClock();
-    const { bus } = await createBus(clock, database);
+    const { bus } = await createBus(clock, database, true);
     const projections = client.db(database).collection<Document>('projections');
     let failNext = true;
     bus.subscribe(

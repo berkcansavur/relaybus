@@ -20,22 +20,36 @@ afterAll(async () => {
   await replicaSet.stop();
 });
 
-eventStoreContract<ClientSession>('MongoEventStore', {
-  keepsCompletedRecords: true,
-  createStore: async () => {
-    const database = uniqueDatabaseName();
-    const store = new MongoEventStore({ client: sharedClient, database, purgeBatchSize: 2 });
-    await store.setup();
-    databaseOfStore.set(store, database);
-    return store;
-  },
-  createPeerStore: async (primary) => {
-    const client = await replicaSet.connect();
-    const peer = new MongoEventStore({ client, database: databaseOfStore.get(primary)! });
-    clientOfPeer.set(peer, client);
-    return peer;
-  },
-  destroyStore: async (store) => {
-    await clientOfPeer.get(store)?.close();
-  },
-});
+for (const completionHistory of [false, true]) {
+  eventStoreContract<ClientSession>(
+    `MongoEventStore${completionHistory ? ' (completion history)' : ''}`,
+    {
+      keepsCompletedRecords: completionHistory,
+      createStore: async () => {
+        const database = uniqueDatabaseName();
+        const store = new MongoEventStore({
+          client: sharedClient,
+          database,
+          purgeBatchSize: 2,
+          completionHistory,
+        });
+        await store.setup();
+        databaseOfStore.set(store, database);
+        return store;
+      },
+      createPeerStore: async (primary) => {
+        const client = await replicaSet.connect();
+        const peer = new MongoEventStore({
+          client,
+          database: databaseOfStore.get(primary)!,
+          completionHistory,
+        });
+        clientOfPeer.set(peer, client);
+        return peer;
+      },
+      destroyStore: async (store) => {
+        await clientOfPeer.get(store)?.close();
+      },
+    },
+  );
+}

@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import type { ClaimedDelivery, EventEnvelope } from '@relaybus/core';
 import { at, createDelivery, createEnvelope } from '@relaybus/testing';
 import { MongoEventStore } from '../src/index.js';
+import { laneOf } from '../src/lanes.js';
 import { startReplicaSet, uniqueDatabaseName, type MongoReplicaSet } from './support.js';
 
 const LEASE_MS = 30_000;
@@ -29,9 +30,9 @@ interface TestStore {
   readonly deliveries: Collection<Document>;
 }
 
-async function createStore(): Promise<TestStore> {
+async function createStore(completionHistory = false): Promise<TestStore> {
   const database = uniqueDatabaseName();
-  const store = new MongoEventStore({ client, database });
+  const store = new MongoEventStore({ client, database, completionHistory });
   await store.setup();
   return { store, deliveries: client.db(database).collection('relaybus_deliveries') };
 }
@@ -117,7 +118,7 @@ describe('requeued dead letters', () => {
     expect(successor!.event.id).toBe(second.id);
   });
 
-  it('restores the lease of a crashed worker when the delivery it was taken from has to wait', async () => {
+  it('fences a crashed worker and gives its delivery back when a requeue lands during the takeover', async () => {
     const { store, deliveries } = await createStore();
     const [first, second] = keyedEvents('k', 2) as [EventEnvelope, EventEnvelope];
     await publish(store, [first, second]);
@@ -131,8 +132,19 @@ describe('requeued dead letters', () => {
     expect(await claimAt(store, 3 + LEASE_MS)).toEqual([]);
     vi.restoreAllMocks();
 
-    expect(await deliveries.find({ eventId: second.id }).next()).toEqual(before);
-    expect(await store.complete(crashed!, at(4 + LEASE_MS))).toBe(true);
+    // The takeover charged the crashed worker's lost attempt and fenced its lease.
+    expect(await deliveries.find({ eventId: second.id }).next()).toEqual({
+      ...before,
+      attempts: 1,
+    });
+    expect(await store.complete(crashed!, at(4 + LEASE_MS))).toBe(false);
+    const [requeued] = await claimAt(store, 5 + LEASE_MS);
+    expect(requeued!.event.id).toBe(first.id);
+    expect(await claimAt(store, 6 + LEASE_MS)).toEqual([]);
+    await store.complete(requeued!, at(7 + LEASE_MS));
+    const [successor] = await claimAt(store, 8 + LEASE_MS);
+    expect(successor).toMatchObject({ attempt: 2 });
+    expect(successor!.event.id).toBe(second.id);
   });
 
   it('holds every requeued delivery back while a later one of the key runs', async () => {
@@ -156,7 +168,11 @@ describe('requeued dead letters', () => {
   it('moves on when another claimer takes the delivery first', async () => {
     const { store } = await createStore();
     const keyed = createEnvelope({ key: 'k' });
-    const unkeyed = createEnvelope();
+    // Deliveries of one lane are taken together: keep the two apart.
+    let unkeyed = createEnvelope();
+    while (laneOf(null, unkeyed.id) === laneOf('k', keyed.id)) {
+      unkeyed = createEnvelope();
+    }
     await publish(store, [keyed]);
     await publish(store, [unkeyed], ['h'], at(1));
     vi.spyOn(Collection.prototype, 'findOneAndUpdate').mockImplementationOnce(
@@ -170,7 +186,7 @@ describe('requeued dead letters', () => {
   });
 
   it('never runs two deliveries of a key at once while dead letters are requeued at random', async () => {
-    const { store } = await createStore();
+    const { store } = await createStore(true);
     const keys = Array.from({ length: 5 }, (_, index) => `key-${index}`);
     const eventsPerKey = 12;
     const total = keys.length * eventsPerKey;
@@ -266,8 +282,9 @@ describe('parking of blocked backlogs', () => {
   /** A running head with `followers` deliveries of its key waiting, parked by one claim. */
   async function parkBacklog(
     followers: number,
+    completionHistory = false,
   ): Promise<TestStore & { events: EventEnvelope[]; head: ClaimedDelivery }> {
-    const created = await createStore();
+    const created = await createStore(completionHistory);
     const events = keyedEvents('hot', followers + 1);
     await publish(created.store, events.slice(0, 1));
     await publish(created.store, events.slice(1), ['h'], at(1));
@@ -295,7 +312,7 @@ describe('parking of blocked backlogs', () => {
   });
 
   it('releases the parked queue in publish order, one delivery at a time', async () => {
-    const { store, deliveries, events, head } = await parkBacklog(40);
+    const { store, deliveries, events, head } = await parkBacklog(40, true);
     expect(await store.complete(head, at(2))).toBe(true);
     for (const expected of events.slice(1)) {
       const claimed = await claimAt(store, 3);
@@ -370,9 +387,11 @@ describe('parking of blocked backlogs', () => {
 
     const claimed = await claimAt(store, 3 + LEASE_MS);
     expect(claimed.map((delivery) => delivery.event.id)).toEqual([first.id]);
+    // The taken-over delivery went back to pending with its lost attempt counted, and stays ready.
     expect(await deliveries.find({ _id: crashed!.deliveryId as never }).next()).toMatchObject({
-      status: 'processing',
+      status: 'pending',
       lane: 'ready',
+      attempts: 1,
     });
   });
 });
