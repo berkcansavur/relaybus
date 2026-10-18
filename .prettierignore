@@ -3,3 +3,10 @@ coverage
 reports
 pnpm-lock.yaml
 CHANGELOG.md
+# Generated documentation output and files copied from the package READMEs
+docs-site/.vitepress/dist
+docs-site/.vitepress/cache
+docs-site/public
+docs-site/packages/*.md
+!docs-site/packages/index.md
+llms.txt
