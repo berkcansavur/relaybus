@@ -1,0 +1,68 @@
+{
+  "name": "@relaybus/mongodb",
+  "version": "0.0.0",
+  "description": "MongoDB event store for relaybus: transactional outbox on multi-document transactions with atomic leasing.",
+  "license": "MIT",
+  "author": "Berkcan \u015eavur <berkcansavur@gmail.com>",
+  "homepage": "https://github.com/berkcansavur/relaybus#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/berkcansavur/relaybus.git",
+    "directory": "packages/mongodb"
+  },
+  "bugs": "https://github.com/berkcansavur/relaybus/issues",
+  "keywords": [
+    "relaybus",
+    "event-bus",
+    "outbox",
+    "mongodb",
+    "mongo",
+    "outbox",
+    "mongoose"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc -p tsconfig.build.json --noEmit"
+  },
+  "peerDependencies": {
+    "mongodb": "^6.0.0 || ^7.0.0",
+    "@relaybus/core": "workspace:^"
+  },
+  "devDependencies": {
+    "@relaybus/core": "workspace:*",
+    "@relaybus/testing": "workspace:*",
+    "mongodb": "7.7.0",
+    "@testcontainers/mongodb": "12.2.1",
+    "testcontainers": "12.2.1"
+  }
+}

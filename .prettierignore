@@ -1,0 +1,5 @@
+dist
+coverage
+reports
+pnpm-lock.yaml
+CHANGELOG.md
