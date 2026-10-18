@@ -21,6 +21,7 @@ afterAll(async () => {
 });
 
 eventStoreContract<ClientSession>('MongoEventStore', {
+  keepsCompletedRecords: true,
   createStore: async () => {
     const database = uniqueDatabaseName();
     const store = new MongoEventStore({ client: sharedClient, database, purgeBatchSize: 2 });

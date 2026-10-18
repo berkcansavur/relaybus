@@ -76,6 +76,15 @@ export interface DispatcherOptions {
   readonly leaseDuration?: Duration;
   /** How long `stop` waits for running handlers before aborting them. Default `'30s'`. */
   readonly shutdownTimeout?: Duration;
+  /**
+   * Longest a finished delivery waits so that deliveries finishing around the
+   * same time are completed with one store call (when the store supports it).
+   * A delivery that finishes while nothing else runs is completed at once.
+   * `0` completes every delivery on its own. Default `'2ms'`.
+   */
+  readonly completionBatchWindow?: Duration;
+  /** Most deliveries completed in one store call. Default 200. */
+  readonly completionBatchSize?: number;
 }
 
 export interface RetentionOptions {
@@ -182,6 +191,8 @@ const DEFAULTS = {
   pollInterval: '1s',
   leaseDuration: '30s',
   shutdownTimeout: '30s',
+  completionBatchWindow: '2ms',
+  completionBatchSize: 200,
   completedRetention: '7d',
   retentionInterval: '1h',
   routeTimeoutMs: 30_000,
@@ -807,6 +818,14 @@ function createDispatcherSettings(
     shutdownTimeoutMs: toTimerMilliseconds(
       options?.shutdownTimeout ?? DEFAULTS.shutdownTimeout,
       'dispatcher.shutdownTimeout',
+    ),
+    completionBatchWindowMs: toMilliseconds(
+      options?.completionBatchWindow ?? DEFAULTS.completionBatchWindow,
+      'dispatcher.completionBatchWindow',
+    ),
+    completionBatchSize: positiveInteger(
+      options?.completionBatchSize ?? DEFAULTS.completionBatchSize,
+      'dispatcher.completionBatchSize',
     ),
   };
 }

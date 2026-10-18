@@ -6,6 +6,10 @@ import type { EventEnvelope } from './event.js';
  * `pending` (waiting or scheduled for retry) -> `processing` (leased by a worker)
  * -> `completed` | `pending` (retry) | `dead` (exhausted or non-retryable).
  * `dead` -> `pending` only through an explicit requeue.
+ *
+ * A completed delivery is deleted. `completed` records exist only in stores
+ * configured to keep a completion history (`retainCompleted` /
+ * `completionHistory`), where they are listed, counted and purged like before.
  */
 export type DeliveryStatus = 'pending' | 'processing' | 'completed' | 'dead';
 
@@ -41,6 +45,11 @@ export interface AppendResult {
  * Lease expiry is compared with the `now` the caller passes, taken from the
  * bus clock. Keep worker clocks synchronized (NTP): a skew larger than a third
  * of the lease duration lets another worker reclaim a delivery that is still running.
+ *
+ * Stores may grant the lease on a group of deliveries (a lane) instead of on
+ * each delivery. The group is exclusive to `leaseOwner` while the lease is
+ * live, so other owners do not see its pending deliveries until it expires or
+ * is relinquished; every delivery of the group carries the group's fencing token.
  */
 export interface ClaimRequest {
   /** Only deliveries of these handlers are claimed. */
@@ -140,14 +149,18 @@ export interface EventStore<TTransaction = unknown> {
    * Leases up to `limit` deliveries that are due: pending with `availableAt <= now`,
    * or processing with an expired lease. A keyed delivery is only claimable when
    * no earlier delivery of the same handler and key is pending or processing.
-   * Increments the attempt count. Safe to call from many processes at once.
+   * Counts the attempt (`attempt` of the result; a store may persist the count
+   * only when the attempt fails or its lease is lost). Safe to call from many
+   * processes at once.
    */
   claim(request: ClaimRequest): Promise<ClaimedDelivery[]>;
   /** Extends a lease the caller still holds. Returns false when the lease was lost. */
   extendLease(lease: LeaseReference, leaseExpiresAt: Date, now: Date): Promise<boolean>;
   /**
-   * Marks a leased delivery completed. With `transaction` the change commits
-   * together with the handler's own writes. Returns false when the lease was lost.
+   * Marks a leased delivery completed by deleting it (or moving it to the
+   * completion history, when the store keeps one). With `transaction` the change
+   * commits together with the handler's own writes. Returns false when the lease
+   * was lost.
    */
   complete(lease: LeaseReference, now: Date, transaction?: TTransaction): Promise<boolean>;
   /** Returns a leased delivery to pending, due at `availableAt`. */
@@ -162,6 +175,14 @@ export interface EventStore<TTransaction = unknown> {
    * now, attempts decremented. Used when a handler is aborted at shutdown.
    */
   release(lease: LeaseReference, now: Date): Promise<boolean>;
+  /**
+   * Marks many leased deliveries completed with one round trip. Returns, for
+   * every lease in the same order, whether it was completed (false: lease lost
+   * or already finished). Each lease is fenced individually, exactly as in
+   * {@link EventStore.complete}. Optional: the dispatcher falls back to
+   * `complete` when a store does not implement it.
+   */
+  completeMany?(leases: readonly LeaseReference[], now: Date): Promise<boolean[]>;
   /** Moves a leased delivery to dead. */
   bury(lease: LeaseReference, error: ErrorInfo, now: Date): Promise<boolean>;
   listDeliveries(query: DeliveryQuery): Promise<DeliveryRecord[]>;
@@ -169,6 +190,13 @@ export interface EventStore<TTransaction = unknown> {
   requeue(deliveryIds: readonly string[], now: Date): Promise<number>;
   purge(request: PurgeRequest): Promise<PurgeResult>;
   statistics(now: Date): Promise<EventStoreStatistics>;
+  /**
+   * Hands back every lease group that `leaseOwner` holds without running work,
+   * so other workers can take them at once instead of after lease expiry.
+   * Called at graceful shutdown after the owner's deliveries settled. Groups
+   * with running deliveries stay leased. Optional.
+   */
+  relinquish?(leaseOwner: string, now: Date): Promise<void>;
   /** Releases connections the store opened itself. */
   close?(): Promise<void>;
 }

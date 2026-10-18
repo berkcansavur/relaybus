@@ -11,6 +11,14 @@ export interface PostgresSchemaOptions {
    * Lower-case letters, digits and underscores. Default `'relaybus_'`.
    */
   readonly tablePrefix?: string;
+  /**
+   * Keep an append-only record of completed deliveries in
+   * `<prefix>completed_deliveries`, so `listDeliveries({ status: 'completed' })`,
+   * `statistics().completed` and `retention.completed` keep working. Default
+   * `false`: a completed delivery is deleted, which avoids the dead tuples and
+   * index churn of updating it. Use the same value in every process.
+   */
+  readonly completionHistory?: boolean;
 }
 
 /** Validated, quoted names used to build SQL. */
@@ -20,20 +28,32 @@ export interface PostgresNames {
   readonly events: string;
   readonly deliveries: string;
   readonly keySequences: string;
+  /** Lane lease rows: one per lane, see {@link LANE_COUNT}. */
+  readonly lanes: string;
+  /** Completion history, present only with `completionHistory`. */
+  readonly completions: string;
+  readonly completionHistory: boolean;
   /** Index names, quoted but not schema-qualified (an index lives in its table's schema). */
   readonly indexes: {
     readonly deliveryEventHandler: string;
-    readonly deliveryDue: string;
-    readonly deliveryDueUnkeyed: string;
-    readonly deliveryHandlerCreated: string;
+    readonly deliveryLaneDue: string;
+    readonly deliveryKeyPending: string;
     readonly eventCreated: string;
-    readonly deliveryKeyUnfinished: string;
-    readonly deliveryKeyProcessing: string;
-    readonly deliveryStatusCreated: string;
     readonly deliveryCompleted: string;
     readonly deliveryDead: string;
+    readonly completionCompleted: string;
+    /** Indexes of the 0.1.0 schema that the current schema drops. */
+    readonly obsolete: readonly string[];
   };
 }
+
+/**
+ * Number of lanes. Every delivery belongs to the lane of its ordering key (or of
+ * its event id when the event has no key); workers lease whole lanes. The count
+ * is fixed because the lane of a delivery is stored, and all processes must
+ * agree on it.
+ */
+export const LANE_COUNT = 256;
 
 const DEFAULT_SCHEMA = 'public';
 const DEFAULT_TABLE_PREFIX = 'relaybus_';
@@ -68,17 +88,25 @@ export function resolvePostgresNames(options: PostgresSchemaOptions = {}): Postg
     events: table('events'),
     deliveries: table('deliveries'),
     keySequences: table('key_sequences'),
+    lanes: table('lanes'),
+    completions: table('completed_deliveries'),
+    completionHistory: options.completionHistory ?? false,
     indexes: {
       deliveryEventHandler: index('deliveries_event_handler_unique'),
-      deliveryDue: index('deliveries_due_idx'),
-      deliveryDueUnkeyed: index('deliveries_due_unkeyed_idx'),
-      deliveryHandlerCreated: index('deliveries_handler_created_idx'),
+      deliveryLaneDue: index('deliveries_lane_due_idx'),
+      deliveryKeyPending: index('deliveries_key_pending_idx'),
       eventCreated: index('events_created_idx'),
-      deliveryKeyUnfinished: index('deliveries_key_unfinished_idx'),
-      deliveryKeyProcessing: index('deliveries_key_processing_idx'),
-      deliveryStatusCreated: index('deliveries_status_created_idx'),
       deliveryCompleted: index('deliveries_completed_idx'),
       deliveryDead: index('deliveries_dead_idx'),
+      completionCompleted: index('completed_deliveries_completed_idx'),
+      obsolete: [
+        index('deliveries_due_idx'),
+        index('deliveries_due_unkeyed_idx'),
+        index('deliveries_handler_created_idx'),
+        index('deliveries_key_unfinished_idx'),
+        index('deliveries_key_processing_idx'),
+        index('deliveries_status_created_idx'),
+      ],
     },
   };
 }

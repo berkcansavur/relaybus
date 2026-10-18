@@ -135,14 +135,18 @@ function defineAdapterTests<TTransaction>(adapter: Adapter<TTransaction>): void 
       { schema: string; harness: Harness<TTransaction> }
     >();
 
-    async function createStore(): Promise<{
+    async function createStore(completionHistory = false): Promise<{
       store: PostgresEventStore<TTransaction>;
       schema: string;
       harness: Harness<TTransaction>;
     }> {
       const schema = uniqueSchema();
       const harness = await adapter.create(database.connectionString, schema);
-      const store = new PostgresEventStore<TTransaction>({ executor: harness.executor, schema });
+      const store = new PostgresEventStore<TTransaction>({
+        executor: harness.executor,
+        schema,
+        completionHistory,
+      });
       await store.setup();
       await database.pool.query(`CREATE TABLE "${schema}".orders (id text PRIMARY KEY)`);
       harnesses.set(store, { schema, harness });
@@ -200,7 +204,7 @@ function defineAdapterTests<TTransaction>(adapter: Adapter<TTransaction>): void 
       });
 
       it('runs a transactional handler and completes the delivery in one transaction', async () => {
-        const { store, schema, harness } = await createStore();
+        const { store, schema, harness } = await createStore(true);
         const bus = new RelayBus<TTransaction>({
           store,
           setupStore: false,

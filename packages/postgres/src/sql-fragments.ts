@@ -1,13 +1,4 @@
-/**
- * The instant a delivery becomes claimable: `available_at` while pending,
- * `lease_expires_at` while processing. The claim query, the statistics query
- * and the partial index all use this exact expression, which is what lets
- * PostgreSQL answer "earliest due delivery" from an index.
- */
-export function dueAtExpression(alias?: string): string {
-  const prefix = alias === undefined ? '' : `${alias}.`;
-  return `CASE WHEN ${prefix}status = 'pending' THEN ${prefix}available_at ELSE ${prefix}lease_expires_at END`;
-}
+import { LANE_COUNT } from './names.js';
 
 /**
  * Renders a timestamptz as ISO-8601 text in UTC. Reading timestamps as text
@@ -16,4 +7,14 @@ export function dueAtExpression(alias?: string): string {
  */
 export function isoText(expression: string): string {
   return `to_char(${expression} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
+}
+
+/**
+ * The lane of a delivery: a hash of the ordering key, or of the event id when
+ * the event has no key. All deliveries of one key therefore share a lane and
+ * are owned by one worker at a time, which is what keeps their order.
+ * `hashtextextended` is stable across PostgreSQL versions and platforms.
+ */
+export function laneExpression(keyExpression: string, eventIdExpression: string): string {
+  return `(hashtextextended(COALESCE(${keyExpression}, ${eventIdExpression}), 0) & ${LANE_COUNT - 1})::smallint`;
 }

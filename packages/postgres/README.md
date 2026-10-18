@@ -1,7 +1,7 @@
 # @relaybus/postgres
 
 PostgreSQL event store for [relaybus](https://github.com/berkcansavur/relaybus): a transactional outbox with
-`FOR UPDATE SKIP LOCKED` leasing, per-key ordering and fenced state changes. PostgreSQL 13 or newer.
+lane leases, batched claim and completion, per-key ordering and fenced state changes. PostgreSQL 13 or newer.
 Works with `pg`, Kysely, Knex, TypeORM, Drizzle and Prisma, so events are written in the **same transaction as your
 business data**.
 
@@ -82,14 +82,15 @@ against a fake client only. Prisma interactive transactions default to a 5 s tim
 
 ## Options
 
-| Option                                   | Default               | Meaning                                                                     |
-| ---------------------------------------- | --------------------- | --------------------------------------------------------------------------- |
-| `pool` / `connectionString` / `executor` | required, exactly one | How to reach the database.                                                  |
-| `poolConfig`                             | none                  | Extra `pg` pool settings when `connectionString` is used.                   |
-| `schema`                                 | `'public'`            | Schema of the tables. Created by `setup()` when it is not `public`.         |
-| `tablePrefix`                            | `'relaybus_'`         | Tables are `<prefix>events`, `<prefix>deliveries`, `<prefix>key_sequences`. |
-| `purgeBatchSize`                         | `1000`                | Deliveries deleted per transaction by `purge`.                              |
-| `logger`                                 | `console`             | Receives idle-connection errors of a pool the store created itself.         |
+| Option                                   | Default               | Meaning                                                                                                           |
+| ---------------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `pool` / `connectionString` / `executor` | required, exactly one | How to reach the database.                                                                                        |
+| `poolConfig`                             | none                  | Extra `pg` pool settings when `connectionString` is used.                                                         |
+| `schema`                                 | `'public'`            | Schema of the tables. Created by `setup()` when it is not `public`.                                               |
+| `tablePrefix`                            | `'relaybus_'`         | Tables are `<prefix>events`, `<prefix>deliveries`, `<prefix>key_sequences`, `<prefix>lanes`.                      |
+| `completionHistory`                      | `false`               | Keep an append-only record of completed deliveries (`<prefix>completed_deliveries`). Same value in every process. |
+| `purgeBatchSize`                         | `1000`                | Deliveries deleted per transaction by `purge`.                                                                    |
+| `logger`                                 | `console`             | Receives idle-connection errors of a pool the store created itself.                                               |
 
 **Pool errors.** A pool created from `connectionString` gets an `error` listener that logs through `logger`
 (`[PostgresEventStore](constructor) Idle connection failed ...`); `pg` then replaces the dead connection, so a failover
@@ -112,19 +113,36 @@ import { createPostgresSchemaSql, createPostgresSchemaStatements } from '@relayb
 const migration = createPostgresSchemaSql({ schema: 'app', tablePrefix: 'bus_' });
 ```
 
-| Table           | Purpose                                                                                                                                                                                                                                         |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `events`        | One row per event: `id` (**text**, so any caller id works), `type`, `source`, `key`, `sequence`, `payload jsonb`, `headers jsonb`, correlation and causation ids, `occurred_at`, `created_at`.                                                  |
-| `deliveries`    | One row per (event, handler): status, attempts, `available_at`, lease owner/token/expiry, `last_error jsonb`, key and sequence copied from the event, timestamps. `unique (event_id, handler)`, foreign key to events with `ON DELETE CASCADE`. |
-| `key_sequences` | One counter row per ordering key.                                                                                                                                                                                                               |
+| Table                  | Purpose                                                                                                                                                                                                                                                                            |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `events`               | One row per event: `id` (**text**, so any caller id works), `type`, `source`, `key`, `sequence`, `payload jsonb`, `headers jsonb`, correlation and causation ids, `occurred_at`, `created_at`, and `handlers`, the handlers that ever got a delivery (it outlives the deliveries). |
+| `deliveries`           | One row per (event, handler) that is not finished: `lane`, `status` (`pending` or `dead`), `attempts`, `available_at`, `last_error jsonb`, key and sequence copied from the event, timestamps. `unique (event_id, handler)`, foreign key to events with `ON DELETE CASCADE`.       |
+| `lanes`                | 256 rows, one per lane: `epoch` (the fencing token), `lease_owner`, `lease_expires_at` and `in_flight` (ids of the deliveries the owner claimed). `fillfactor = 50` and no secondary index, so its updates are heap-only (HOT).                                                    |
+| `key_sequences`        | One counter row per ordering key.                                                                                                                                                                                                                                                  |
+| `completed_deliveries` | Only with `completionHistory`: one insert-only row per completed delivery.                                                                                                                                                                                                         |
 
-Indexes on `deliveries`: a partial index on the due time of pending/processing rows (statistics), the same for unkeyed
-rows only (claim), two partial indexes on `(handler, key, ...)` for the ordering check, `(status, created_at, id)` and
-`(handler, created_at, id)` for `listDeliveries` filtered by status or handler, and partial indexes for purging
-completed and dead rows; on `events`, `(created_at, id)` for the purge sweep. `listDeliveries({ eventType })` has no
-index of its own (it filters through a join with `events`); combine it with `status` or `handler`, or add
-`CREATE INDEX ON <prefix>events (type)` if you query by type often. `deliveries.id` uses the `C` collation so id tie-breaks are the
-same on every database.
+A delivery row is inserted once and deleted once when it completes. Claiming, renewing a lease and completing never
+update it: they update the lane row (claim, renewal) or delete the delivery (completion), so the indexed columns of a
+delivery are written exactly once, at publish. Indexes on `deliveries`: `(lane, available_at, id) WHERE status = 'pending'`
+(claim and statistics), `(lane, handler, key, sequence) WHERE key IS NOT NULL AND status = 'pending'` (ordering check
+and the blocked-key claim), the unique `(event_id, handler)`, and partial indexes for purging dead deliveries (and
+completed ones left by 0.1.0); on `events`, `(created_at, id)` for the purge sweep. `listDeliveries` has no index of its
+own: it orders by `created_at`, so on a large `deliveries` table combine it with `status`/`handler`, which keeps the scan
+to the dead or pending rows, or add the index you need. `deliveries.id` uses the `C` collation so id tie-breaks are the
+same on every database. The tables are created with aggressive autovacuum settings
+(`autovacuum_vacuum_scale_factor = 0.02`): deleted deliveries leave dead tuples that autovacuum reclaims.
+
+## Upgrading from 0.1.0
+
+`setup()` upgrades a 0.1.0 schema in place, in one transaction under the same advisory lock, and is safe to run again:
+it adds `lane` to every delivery (hash of the key, or of the event id) and `handlers` to every event (from the
+existing deliveries), turns `processing` deliveries into `pending` (their attempt stays counted, as a lost lease would
+count it), drops the per-delivery lease columns and the indexes that no longer exist, and creates the lane table.
+Deliveries that were `completed` stay as `completed` rows until `retention.completed` purges them (or forever with
+`retention: { completed: false }`). **Stop every 0.1.0 worker before running it** (they cannot use the new tables), and
+expect the one-off rewrite of `deliveries` (an `UPDATE` of every row plus `SET NOT NULL`) to take time proportional to
+its size; purge old completed rows first to shorten it. If you apply `createPostgresSchemaSql()` with your own migration
+tool, run it as one transaction with the workers stopped. Running 0.1.0 and the new version together is not supported.
 
 ## Guarantees
 
@@ -136,30 +154,42 @@ same on every database.
   primary-key order, so concurrent single calls cannot deadlock each other. Claiming hands out a keyed delivery only when no earlier (same handler and key) delivery
   is pending or processing, so one key is processed one event at a time, in order. A retrying or leased head blocks its
   successors; a dead-lettered head releases them. A `limit` of zero or less claims nothing.
-- **Safe parallel claiming.** One statement chooses candidates with `FOR UPDATE SKIP LOCKED`, applies `LIMIT` after the
-  ordering filter, and leases them (`processing`, `attempts + 1`, a new `gen_random_uuid()` lease token). SKIP LOCKED
-  alone is sufficient for ordering: only the head of a key is ever a candidate, and a racing claimer either skips the
-  locked head or, if the other claim already committed, re-checks the row (now processing, not due) and drops it.
-  Followers stay blocked because the head remains pending or processing in every snapshot until it is completed or
-  buried. The stress test in `test/claim-concurrency.integration.test.ts` runs 12 claimers on 3 pools against 30 keys
-  and fails if a key is ever in flight twice or out of order. A keyed delivery is also not claimed while another
-  delivery of the same handler and key holds a **live** lease, which covers a requeued or newly attached delivery
-  re-entering behind a running one. An expired lease does not block: if the running successor's worker crashed, the
-  requeued head is claimed after the lease expires and the successor follows once it completes.
-  Claiming first looks at the 256 earliest due deliveries (one cheap statement). Only when those are mostly followers of
-  blocked keys and fewer than `limit` were leased does a second statement find the head of every key with
-  `DISTINCT ON (handler, key)`, so a deep backlog behind one busy key costs one index-only scan instead of a probe per
-  follower.
-- **Fenced.** `complete`, `reschedule`, `bury`, `release` and `extendLease` apply only to
-  `status = 'processing' AND lease_token = <token>`; a worker that lost its lease changes nothing. `complete` takes the
-  handler's transaction, so a transactional handler's writes and its completion commit together.
+- **Lane leases.** Every delivery belongs to one of 256 lanes: a hash of its ordering key, or of its event id when it
+  has none, so all deliveries of a key share a lane. Workers lease lanes, not rows. A claim runs in one short
+  transaction: it locks the lane rows this worker already holds, takes free lanes that have due work (four, then eight,
+  ... lanes at a time, so a worker holds only as many lanes as its batch needs, oldest due delivery first), reads the due
+  deliveries of those lanes and writes **one** lane row per lane to record the batch (`in_flight`). It writes no delivery
+  row and takes no row lock on one: exclusivity comes from the lease. A lane taken from another worker gets a new
+  `epoch`; lanes that yielded nothing are handed back at once. While a lane lease is live, other workers do not see the
+  pending deliveries of that lane. The lease is renewed with the running deliveries (`extendLease` updates the lane
+  row) and handed back at graceful shutdown (`relinquish`).
+- **Per-key order under lanes.** A keyed delivery is claimed only when no earlier delivery of its handler and key is
+  pending (a running one is still a pending row) and none of its handler and key is in flight, and the lane belongs to
+  one worker, so a key is processed one event at a time, in order. A retrying or running head blocks its successors; a
+  dead-lettered head releases them. Claiming first looks at the 256 earliest due deliveries of the lanes it holds
+  (cheap); only when those are mostly followers of blocked keys and fewer than `limit` were picked does a second
+  statement find the head of every key with `DISTINCT ON (handler, key)`. The stress test in
+  `test/claim-concurrency.integration.test.ts` runs 12 claimers on 3 pools against 30 keys and fails if a key is ever in
+  flight twice or out of order.
+- **Fenced.** A lease token is `<lane>:<epoch>`. `complete`, `completeMany`, `reschedule`, `bury`, `release` and
+  `extendLease` apply only while the lane still has that epoch and lists the delivery as in flight; a worker that lost
+  its lane changes nothing. Completion takes a shared lock on the lane row until the transaction ends, so a takeover
+  (which needs the row exclusively) and a transactional handler's completion cannot both succeed: the handler's writes
+  and the deletion of its delivery commit together, or the takeover redelivers it.
+- **Attempts survive crashes.** An attempt is recorded when it ends: a failure adds one to `attempts` (`reschedule`,
+  `bury`), a graceful `release` adds nothing, and a lane that is taken over charges one attempt to every delivery its
+  previous holder still had in flight. A worker that dies on a poison message therefore still runs it into the retry
+  limit and the dead-letter table.
+- **No double run after completion.** An event lists every handler it ever had a delivery for, so republishing an
+  event id (or a broker redelivering it) creates deliveries only for handlers that never had one, even though completed
+  deliveries are deleted. This holds while the event row exists (`retention.completed`).
 - **App clock.** Every timestamp is the `now` the caller passes, never the database clock.
 - **Driver independent reads.** Timestamps and JSON are read as text and parsed by the store, so custom `pg` type
   parsers (or Drizzle's) cannot change results.
 
 ## Operations
 
-- **Isolation.** Claiming runs as autocommit statements and relies on `READ COMMITTED` (the PostgreSQL default). Do
+- **Isolation.** Claiming runs as a short transaction and relies on `READ COMMITTED` (the PostgreSQL default). Do
   not change `default_transaction_isolation` for the relaybus pool. Your own publishing transaction may use a stricter
   level, but under `REPEATABLE READ` or `SERIALIZABLE` PostgreSQL can abort it with `40001` (serialization failure);
   retry the whole transaction.
@@ -168,10 +198,11 @@ same on every database.
   other) can deadlock; PostgreSQL aborts one with `40P01`. The aborted transaction rolls back completely, nothing is
   lost or half-written, and the caller should retry it. Publishing all keys of a transaction in one `publishAll` call
   avoids the problem because the store locks them in sorted order.
-- **Retention.** `purge` deletes completed (`completed_at < cutoff`) and dead (`updated_at < cutoff`) deliveries in
-  batches of `purgeBatchSize`, each batch in its own short transaction with `SKIP LOCKED`, then deletes the events left
-  without deliveries, including events created before the earliest cutoff you passed that never had one (a publish
-  whose delivery was purged in the same instant, or an event with no subscriber). Configure it through the bus `retention` option. Delete rows through `purge` only; events are
+- **Retention.** Completed deliveries are deleted when they complete, so `purge` has two jobs: it deletes dead
+  (`updated_at < cutoff`) deliveries, completion records (`completionHistory`) and `completed` rows left by 0.1.0 in
+  batches of `purgeBatchSize`, each batch in its own short transaction with `SKIP LOCKED`, and it deletes the events left
+  without deliveries or records, including events created before the earliest cutoff you passed that never had one (a publish
+  whose delivery was purged in the same instant, or an event with no subscriber). Configure it through the bus `retention` option (`retention.completed` is therefore the horizon of event deduplication and of the events' storage). Delete rows through `purge` only; events are
   removed by cascade or by purge, never by hand while publishers are active.
 - **Lock duration.** A publisher holds its key's counter row until commit. Keep transactions that publish keyed events
   short; unkeyed events take no such lock.
@@ -183,10 +214,22 @@ same on every database.
   lone UTF-16 surrogate is rejected by PostgreSQL and fails the publish with a database error; strip or encode such
   text before publishing.
 - **Sequence gaps.** Republishing an existing event id consumes a sequence number. Gaps are normal; only order matters.
+- **Vacuum.** Completing a delivery deletes its row, which leaves a dead tuple until autovacuum runs. The tables are
+  created with `autovacuum_vacuum_scale_factor = 0.02`; for sustained throughput above a few thousand deliveries per
+  second also lower `autovacuum_vacuum_cost_delay` for this table (or run a periodic `VACUUM`), and watch
+  `pg_stat_user_tables.n_dead_tup`. The lane table is vacuumed by HOT pruning alone.
+- **Lane exclusivity.** While a worker holds a lane under a live lease, other workers do not see its pending
+  deliveries, even when they sit idle. A worker that dies delays its lanes by at most the lease duration
+  (`dispatcher.leaseDuration`); a worker that stops gracefully gives them back immediately. Lanes are chosen
+  per claim, so a busy backlog spreads over workers; a few hot keys live in few lanes and run on few workers by
+  design (they are ordered).
 - **Pooling.** Claim, complete, extend and purge need a free connection besides your transactions; size the pool for
   `dispatcher.concurrency` plus publishers. With PgBouncer use session or transaction pooling; no session state is used.
 - **Handlers added later.** A delivery added to an old event (new handler, republish with the same id) keeps the
   event's position in its key; if later events of that handler already finished, it runs after them.
+- **Listing completed deliveries.** Without `completionHistory`, `listDeliveries({ status: 'completed' })` is empty and
+  `statistics().completed` is 0 (rows left by 0.1.0 excepted). With it, every completion also inserts one row into
+  `completed_deliveries` (one more heap and index write per delivery); use it for audits, not for throughput.
 
 ## Troubleshooting
 
@@ -199,7 +242,9 @@ same on every database.
 - Foreign key error on append: the only known cause is republishing an event id in the same instant its last delivery
   is purged. The publishing transaction rolls back and can simply be retried.
 - A key looks stuck: a pending or processing head blocks it. Inspect `listDeliveries({ status: 'processing' })` and
-  `requeue` dead heads; expired leases are reclaimed automatically.
+  `requeue` dead heads; expired lane leases are taken over automatically.
+- Deliveries wait although workers are idle: another worker holds their lane under a live lease (look at
+  `<prefix>lanes.lease_owner` and `lease_expires_at`); it is released when that worker finishes, stops, or the lease expires.
 - `deadlock detected` (`40P01`) or `could not serialize access` (`40001`) while publishing: see Deadlocks and
   Isolation under Operations; retry the transaction.
 

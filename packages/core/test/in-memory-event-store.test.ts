@@ -8,6 +8,12 @@ eventStoreContract('InMemoryEventStore', {
   createPeerStore: async (primary) => primary,
 });
 
+eventStoreContract('InMemoryEventStore with completion history', {
+  createStore: async () => new InMemoryEventStore({ retainCompleted: true }),
+  createPeerStore: async (primary) => primary,
+  keepsCompletedRecords: true,
+});
+
 describe('InMemoryEventStore', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -107,5 +113,63 @@ describe('InMemoryTransaction', () => {
     rolledBack.rollback();
     expect(rolledBack.state).toBe('rolled-back');
     expect(() => rolledBack.enqueue(() => undefined)).toThrow(/rolled-back/);
+  });
+});
+
+describe('InMemoryEventStore completion', () => {
+  const lease = (deliveryId: string, leaseToken: string) => ({ deliveryId, leaseToken });
+
+  async function claimOne(store: InMemoryEventStore) {
+    await store.transaction((transaction) =>
+      store.append(
+        transaction,
+        [{ event: createEnvelope(), deliveries: [createDelivery('a')] }],
+        at(0),
+      ),
+    );
+    const [claimed] = await store.claim({
+      handlers: ['a'],
+      limit: 1,
+      leaseOwner: 'w',
+      leaseExpiresAt: at(1_000),
+      now: at(0),
+    });
+    return claimed!;
+  }
+
+  it('deletes a completed delivery unless a history is kept', async () => {
+    const store = new InMemoryEventStore();
+    const claimed = await claimOne(store);
+    expect(await store.complete(claimed, at(1))).toBe(true);
+    expect(await store.listDeliveries({})).toEqual([]);
+    expect(await store.statistics(at(2))).toMatchObject({ completed: 0, pending: 0 });
+  });
+
+  it('keeps a completed record when asked to', async () => {
+    const store = new InMemoryEventStore({ retainCompleted: true });
+    const claimed = await claimOne(store);
+    expect(await store.completeMany([claimed, lease('missing', 'x')], at(1))).toEqual([
+      true,
+      false,
+    ]);
+    expect(await store.listDeliveries({ status: 'completed' })).toHaveLength(1);
+  });
+
+  it('removes events no delivery references once they are older than the cutoff', async () => {
+    const store = new InMemoryEventStore();
+    const claimed = await claimOne(store);
+    await store.complete(claimed, at(1));
+    await store.transaction((transaction) =>
+      store.append(transaction, [{ event: createEnvelope(), deliveries: [] }], at(5_000)),
+    );
+    expect(await store.purge({})).toEqual({ deletedDeliveries: 0, deletedEvents: 0 });
+    expect(await store.purge({ completedBefore: at(2_000), deadBefore: at(9_000) })).toEqual({
+      deletedDeliveries: 0,
+      deletedEvents: 1,
+    });
+    expect(await store.purge({ completedBefore: at(9_000) })).toEqual({
+      deletedDeliveries: 0,
+      deletedEvents: 1,
+    });
   });
 });

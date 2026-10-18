@@ -20,6 +20,12 @@ export interface InMemoryEventStoreOptions {
   /** Allow use when `NODE_ENV` is `production`. Data is lost on restart. Default false. */
   readonly allowInProduction?: boolean;
   readonly generateIdentifier?: IdentifierGenerator;
+  /**
+   * Keep a record of completed deliveries (status `completed`, listed, counted
+   * and purged by `retention.completed`). Default false: a completed delivery
+   * is deleted, like in the database stores.
+   */
+  readonly retainCompleted?: boolean;
 }
 
 /** Transaction handle of {@link InMemoryEventStore}. Writes apply on commit only. */
@@ -72,6 +78,13 @@ interface HeldLock {
 interface StoredEvent {
   readonly envelope: SerializedEnvelope;
   readonly sequence: number | null;
+  readonly createdAt: Date;
+  /**
+   * Handlers that ever got a delivery of this event, completed ones included.
+   * A repeated append adds deliveries only for handlers not listed, so a
+   * completed (deleted) delivery is never created again.
+   */
+  readonly handlers: Set<string>;
 }
 
 interface SerializedEnvelope extends Omit<EventEnvelope, 'occurredAt'> {
@@ -109,6 +122,7 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
   /** Row-lock emulation: event ids and ordering keys written by open transactions. */
   readonly #locks = new Map<string, HeldLock>();
   readonly #generateIdentifier: IdentifierGenerator;
+  readonly #retainCompleted: boolean;
 
   constructor(options: InMemoryEventStoreOptions = {}) {
     if (process.env['NODE_ENV'] === 'production' && options.allowInProduction !== true) {
@@ -117,6 +131,7 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
       );
     }
     this.#generateIdentifier = options.generateIdentifier ?? (() => createUuidV7());
+    this.#retainCompleted = options.retainCompleted ?? false;
   }
 
   async transaction<T>(work: (transaction: InMemoryTransaction) => Promise<T>): Promise<T> {
@@ -159,7 +174,10 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
       }
       const newDeliveries = entry.deliveries.filter((delivery) => {
         const deliveryKey = `${eventId}\u0000${delivery.handler}`;
-        if (pendingDeliveryKeys.has(deliveryKey) || this.#hasDelivery(eventId, delivery.handler)) {
+        if (
+          pendingDeliveryKeys.has(deliveryKey) ||
+          this.#events.get(eventId)?.handlers.has(delivery.handler) === true
+        ) {
           return false;
         }
         pendingDeliveryKeys.add(deliveryKey);
@@ -172,10 +190,13 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
           this.#events.set(eventId, {
             envelope: serialized,
             sequence: this.#nextSequence(serialized.key),
+            createdAt: now,
+            handlers: new Set(),
           });
         }
         const stored = this.#events.get(eventId)!;
         for (const delivery of newDeliveries) {
+          stored.handlers.add(delivery.handler);
           this.#deliveries.set(delivery.id, {
             id: delivery.id,
             eventId,
@@ -242,14 +263,8 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
     now: Date,
     transaction?: InMemoryTransaction,
   ): Promise<boolean> {
-    const finish = (delivery: StoredDelivery): void => {
-      delivery.status = 'completed';
-      delivery.completedAt = now;
-      delivery.updatedAt = now;
-      clearLease(delivery);
-    };
     if (transaction === undefined) {
-      return this.#updateLeased(lease, finish);
+      return this.#updateLeased(lease, (delivery) => this.#finish(delivery, now));
     }
     if (this.#findLeased(lease) === undefined) {
       return false;
@@ -257,10 +272,14 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
     transaction.enqueue(() => {
       const delivery = this.#findLeased(lease);
       if (delivery !== undefined) {
-        finish(delivery);
+        this.#finish(delivery, now);
       }
     });
     return true;
+  }
+
+  async completeMany(leases: readonly LeaseReference[], now: Date): Promise<boolean[]> {
+    return Promise.all(leases.map((lease) => this.complete(lease, now)));
   }
 
   async reschedule(
@@ -351,9 +370,18 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
     const referencedEventIds = new Set(
       [...this.#deliveries.values()].map((delivery) => delivery.eventId),
     );
+    // Events no delivery references (every delivery completed and was deleted, or none was
+    // ever created) go once they are older than the earliest cutoff, like in the database stores.
+    const cutoffs = [request.completedBefore, request.deadBefore]
+      .filter((cutoff) => cutoff !== undefined)
+      .map((cutoff) => cutoff.getTime());
+    const orphanCutoff = cutoffs.length === 0 ? Number.NEGATIVE_INFINITY : Math.min(...cutoffs);
     let deletedEvents = 0;
-    for (const eventId of touchedEventIds) {
-      if (!referencedEventIds.has(eventId)) {
+    for (const [eventId, event] of [...this.#events]) {
+      const isOrphan =
+        !referencedEventIds.has(eventId) &&
+        (touchedEventIds.has(eventId) || event.createdAt.getTime() < orphanCutoff);
+      if (isOrphan) {
         this.#events.delete(eventId);
         deletedEvents += 1;
       }
@@ -408,15 +436,6 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
     }
   }
 
-  #hasDelivery(eventId: string, handler: string): boolean {
-    for (const delivery of this.#deliveries.values()) {
-      if (delivery.eventId === eventId && delivery.handler === handler) {
-        return true;
-      }
-    }
-    return false;
-  }
-
   #nextSequence(key: string | null): number | null {
     if (key === null) {
       return null;
@@ -449,6 +468,18 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
       }
     }
     return false;
+  }
+
+  /** Deletes a completed delivery, or marks it completed when a history is kept. */
+  #finish(delivery: StoredDelivery, now: Date): void {
+    if (!this.#retainCompleted) {
+      this.#deliveries.delete(delivery.id);
+      return;
+    }
+    delivery.status = 'completed';
+    delivery.completedAt = now;
+    delivery.updatedAt = now;
+    clearLease(delivery);
   }
 
   #findLeased(lease: LeaseReference): StoredDelivery | undefined {

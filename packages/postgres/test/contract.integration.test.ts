@@ -24,30 +24,41 @@ describe.each(POSTGRES_IMAGES)('PostgresEventStore on %s', (image) => {
     await database.stop();
   });
 
-  eventStoreContract<PoolClient>(`PostgresEventStore (${image})`, {
-    async createStore() {
-      const schema = uniqueSchema();
-      const store = new PostgresEventStore({ pool: database.pool, schema });
-      await store.setup();
-      schemas.set(store, schema);
-      return store;
-    },
-    async destroyStore(store) {
-      const schema = schemas.get(store as PostgresEventStore)!;
-      if (peers.has(store as PostgresEventStore)) {
-        await store.close?.();
-      } else {
-        await dropSchema(database.pool, schema);
-      }
-    },
-    async createPeerStore(primary) {
-      const peer = new PostgresEventStore({
-        connectionString: database.connectionString,
-        schema: schemas.get(primary as PostgresEventStore)!,
-      });
-      schemas.set(peer, schemas.get(primary as PostgresEventStore)!);
-      peers.add(peer);
-      return peer;
-    },
-  });
+  for (const completionHistory of [false, true]) {
+    eventStoreContract<PoolClient>(
+      `PostgresEventStore (${image}${completionHistory ? ', completion history' : ''})`,
+      {
+        keepsCompletedRecords: completionHistory,
+        async createStore() {
+          const schema = uniqueSchema();
+          const store = new PostgresEventStore({
+            pool: database.pool,
+            schema,
+            completionHistory,
+          });
+          await store.setup();
+          schemas.set(store, schema);
+          return store;
+        },
+        async destroyStore(store) {
+          const schema = schemas.get(store as PostgresEventStore)!;
+          if (peers.has(store as PostgresEventStore)) {
+            await store.close?.();
+          } else {
+            await dropSchema(database.pool, schema);
+          }
+        },
+        async createPeerStore(primary) {
+          const peer = new PostgresEventStore({
+            connectionString: database.connectionString,
+            schema: schemas.get(primary as PostgresEventStore)!,
+            completionHistory,
+          });
+          schemas.set(peer, schemas.get(primary as PostgresEventStore)!);
+          peers.add(peer);
+          return peer;
+        },
+      },
+    );
+  }
 });

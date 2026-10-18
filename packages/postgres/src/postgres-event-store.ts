@@ -6,7 +6,6 @@ import {
   type ClaimedDelivery,
   type DeliveryQuery,
   type DeliveryRecord,
-  type DeliveryStatus,
   type ErrorInfo,
   type EventEnvelope,
   type EventStore,
@@ -20,7 +19,14 @@ import { Pool, type PoolClient, type PoolConfig } from 'pg';
 import type { PostgresExecutor, PostgresParameter, PostgresRow } from './executor.js';
 import { resolvePostgresNames, type PostgresSchemaOptions } from './names.js';
 import { PgExecutor } from './pg-executor.js';
-import { mapClaimedDelivery, mapDeliveryRecord, mapOldestDueAt, readCount } from './row-mapping.js';
+import {
+  mapClaimedDelivery,
+  mapDeliveryRecord,
+  mapOldestDueAt,
+  parseLeaseToken,
+  readCount,
+  type LaneLease,
+} from './row-mapping.js';
 import { createPostgresSchemaStatements } from './schema.js';
 import { PostgresStatements } from './statements.js';
 
@@ -70,6 +76,8 @@ export type PostgresEventStoreOptions<TTransaction = PoolClient> =
   PostgresPoolOptions | PostgresConnectionOptions | PostgresExecutorOptions<TTransaction>;
 
 const DEFAULT_PURGE_BATCH_SIZE = 1_000;
+/** Lanes a claim takes in its first round; every further round takes twice as many. */
+const INITIAL_LANES_PER_ROUND = 4;
 
 interface EventRow {
   readonly id: string;
@@ -82,6 +90,7 @@ interface EventRow {
   readonly correlation_id: string | null;
   readonly causation_id: string | null;
   readonly occurred_at: string;
+  readonly handlers: readonly string[];
 }
 
 interface DeliveryRow {
@@ -106,13 +115,26 @@ interface DeliveryRow {
  *   Publishing locks that row and holds the lock until commit, so two
  *   transactions publishing the same key are serialized and sequence order
  *   equals commit order. Claiming then hands out only the lowest unfinished
- *   sequence of a (handler, key).
- * - **Safe parallel claiming.** One `FOR UPDATE SKIP LOCKED` statement leases
- *   deliveries; any number of processes can claim at once.
+ *   sequence of a (handler, key), and all deliveries of a key live in one lane,
+ *   so one worker at a time sees them.
+ * - **Lane leases.** Workers lease lanes (256 hash buckets of the ordering key
+ *   or event id), not single deliveries. A claim writes one lane row for a
+ *   whole batch and never writes a delivery row; a completion deletes the
+ *   delivery rows. Delivery rows are therefore inserted once and deleted once,
+ *   which leaves no dead index entries from updates on the normal path.
  * - **Fenced state changes.** Complete, reschedule, bury and extend only apply
- *   to the lease token that claimed the delivery.
+ *   with the epoch of the lane lease that claimed the delivery. A lane taken
+ *   over by another worker gets a new epoch, which fences everything the
+ *   previous holder still runs. Completion takes a shared lock on the lane
+ *   row, so it cannot interleave with a takeover.
+ * - **Attempts survive crashes.** A claim records which deliveries it put in
+ *   flight in the lane row. If the holder dies, the next holder charges one
+ *   attempt to each of them, so a poison message still reaches the retry limit.
  * - **App clock.** Every timestamp comes from the `now` the caller passes in,
  *   never from the database clock.
+ *
+ * Completed deliveries are deleted. Pass `completionHistory: true` to keep an
+ * append-only record for `listDeliveries({ status: 'completed' })`.
  */
 export class PostgresEventStore<TTransaction = PoolClient> implements EventStore<TTransaction> {
   readonly #executor: PostgresExecutor<TTransaction>;
@@ -120,6 +142,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   readonly #schemaStatements: readonly string[];
   readonly #setupLockKey: string;
   readonly #purgeBatchSize: number;
+  readonly #completionHistory: boolean;
   #ownedPool: Pool | undefined;
 
   constructor(options: PostgresEventStoreOptions<TTransaction>) {
@@ -142,6 +165,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     this.#schemaStatements = createPostgresSchemaStatements(options);
     this.#setupLockKey = this.#statements.setupLockKey;
     this.#purgeBatchSize = purgeBatchSize;
+    this.#completionHistory = names.completionHistory;
     if (options.executor !== undefined) {
       this.#executor = options.executor;
     } else {
@@ -206,7 +230,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
         : (
             await this.#executor.query(
               this.#statements.insertEvents,
-              [JSON.stringify(toEventRows(plan.events, sequences)), createdAt],
+              [JSON.stringify(toEventRows(plan, sequences)), createdAt],
               transaction,
             )
           ).map((row) => row['id'] as string),
@@ -216,7 +240,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
         ? []
         : await this.#executor.query(
             this.#statements.insertDeliveries,
-            [JSON.stringify(plan.deliveries), createdAt],
+            [JSON.stringify(plan.deliveries), createdAt, JSON.stringify([...insertedEventIds])],
             transaction,
           );
     const appendedEventIds: string[] = [];
@@ -234,53 +258,138 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   }
 
   /**
-   * Leases up to `limit` due deliveries with `FOR UPDATE SKIP LOCKED`. The fast
-   * statement examines the first due deliveries; only when they are mostly
-   * blocked followers of busy keys does a second statement look at the heads of
-   * all keys. See {@link PostgresStatements.claim} for why that keeps a
-   * (handler, key) strictly one-at-a-time and in order.
+   * Claims up to `limit` due deliveries in one transaction. It first claims from
+   * the lanes this owner already holds, then takes free lanes with due work,
+   * a few at a time (4, 8, 16, ...) so a worker holds only as many lanes as it
+   * needs, and finally records the batch in the lane rows. See
+   * {@link PostgresStatements.claim} for the rules a delivery must satisfy.
+   * Lanes taken for nothing (everything in them is blocked or not yet due) are
+   * handed back at the end.
    */
   async claim(request: ClaimRequest): Promise<ClaimedDelivery[]> {
     if (request.handlers.length === 0 || !(request.limit > 0)) {
       return [];
     }
-    const parameters = (limit: number): PostgresParameter[] => [
-      request.now.toISOString(),
-      JSON.stringify(request.handlers),
-      limit,
-      request.leaseOwner,
-      request.leaseExpiresAt.toISOString(),
-    ];
-    const fastRows = await this.#executor.query(this.#statements.claim, parameters(request.limit));
-    const leased = fastRows.filter((row) => row['delivery_id'] !== null);
-    if (leased.length < request.limit && fastRows[0]!['window_saturated'] === true) {
-      leased.push(
-        ...(
-          await this.#executor.query(
-            this.#statements.claimBehindBlockedKeys,
-            parameters(request.limit - leased.length),
-          )
-        ).filter((row) => row['delivery_id'] !== null),
+    const now = request.now.toISOString();
+    const leaseExpiresAt = request.leaseExpiresAt.toISOString();
+    const handlers = JSON.stringify(request.handlers);
+    return this.#executor.transaction(async (transaction) => {
+      const heldLanes = await this.#executor.query(
+        this.#statements.lockHeldLanes,
+        [request.leaseOwner, now],
+        transaction,
       );
+      const lanes = new Set(heldLanes.map((row) => readCount(row, 'lane')));
+      const claimed: PostgresRow[] = [];
+      const pickFrom = async (laneIds: readonly number[]): Promise<void> => {
+        claimed.push(
+          ...(await this.#pickDeliveries(
+            [now, handlers, request.limit - claimed.length, JSON.stringify(laneIds)],
+            transaction,
+          )),
+        );
+      };
+      if (lanes.size > 0) {
+        await pickFrom([...lanes]);
+      }
+      for (let laneCount = INITIAL_LANES_PER_ROUND; claimed.length < request.limit;) {
+        const taken = await this.#executor.query(
+          this.#statements.takeFreeLanes,
+          [now, handlers, laneCount, request.leaseOwner, leaseExpiresAt],
+          transaction,
+        );
+        if (taken.length === 0) {
+          break;
+        }
+        const takenLanes = taken.map((row) => readCount(row, 'lane'));
+        for (const lane of takenLanes) {
+          lanes.add(lane);
+        }
+        await pickFrom(takenLanes);
+        laneCount *= 2;
+      }
+      await this.#recordClaim(claimed, lanes, request, transaction);
+      return claimed.map((row) => mapClaimedDelivery(row, request.leaseExpiresAt));
+    });
+  }
+
+  /** Fast claim, then the slow one when the fast window was full of blocked followers. */
+  async #pickDeliveries(
+    parameters: readonly PostgresParameter[],
+    transaction: TTransaction,
+  ): Promise<PostgresRow[]> {
+    const limit = parameters[2] as number;
+    const fastRows = await this.#executor.query(this.#statements.claim, parameters, transaction);
+    const picked = fastRows.filter((row) => row['delivery_id'] !== null);
+    if (picked.length < limit && fastRows[0]!['window_saturated'] === true) {
+      const slowRows = await this.#executor.query(
+        this.#statements.claimBehindBlockedKeys,
+        parameters,
+        transaction,
+      );
+      // Nothing was written, so the slow statement sees the fast statement's picks again.
+      // Both pick at most the head of a key, so the union is still one delivery per key.
+      const pickedIds = new Set(picked.map((row) => row['delivery_id']));
+      picked.push(
+        ...slowRows.filter(
+          (row) => row['delivery_id'] !== null && !pickedIds.has(row['delivery_id']),
+        ),
+      );
+      picked.sort(
+        (left, right) =>
+          compareText(left['due_at'] as string, right['due_at'] as string) ||
+          compareText(left['delivery_id'] as string, right['delivery_id'] as string),
+      );
+      picked.length = Math.min(picked.length, limit);
     }
-    return leased.map((row) => mapClaimedDelivery(row, request.leaseExpiresAt));
+    return picked;
   }
 
-  extendLease(lease: LeaseReference, leaseExpiresAt: Date, now: Date): Promise<boolean> {
-    return this.#changed(this.#statements.extendLease, [
-      lease.deliveryId,
-      lease.leaseToken,
-      leaseExpiresAt.toISOString(),
-      now.toISOString(),
-    ]);
-  }
-
-  complete(lease: LeaseReference, now: Date, transaction?: TTransaction): Promise<boolean> {
-    return this.#changed(
-      this.#statements.complete,
-      [lease.deliveryId, lease.leaseToken, now.toISOString()],
+  /** Writes the picked ids into their lane rows and frees the lanes that picked nothing. */
+  async #recordClaim(
+    claimed: readonly PostgresRow[],
+    lanes: ReadonlySet<number>,
+    request: ClaimRequest,
+    transaction: TTransaction,
+  ): Promise<void> {
+    const idsByLane = new Map<number, string[]>();
+    for (const row of claimed) {
+      const lane = readCount(row, 'lane');
+      idsByLane.set(lane, [...(idsByLane.get(lane) ?? []), row['delivery_id'] as string]);
+    }
+    const idleLanes = [...lanes].filter((lane) => !idsByLane.has(lane));
+    if (idsByLane.size === 0 && idleLanes.length === 0) {
+      return;
+    }
+    await this.#executor.query(
+      this.#statements.recordClaim,
+      [
+        JSON.stringify([...idsByLane].map(([lane, ids]) => ({ lane, ids }))),
+        JSON.stringify(idleLanes),
+        request.leaseOwner,
+        request.leaseExpiresAt.toISOString(),
+      ],
       transaction,
     );
+  }
+
+  extendLease(lease: LeaseReference, leaseExpiresAt: Date): Promise<boolean> {
+    return this.#whenIssued(lease, (held) =>
+      this.#changed(this.#statements.extendLease, [
+        lease.deliveryId,
+        held.lane,
+        held.epoch,
+        leaseExpiresAt.toISOString(),
+      ]),
+    );
+  }
+
+  async complete(lease: LeaseReference, now: Date, transaction?: TTransaction): Promise<boolean> {
+    return (await this.#completeLeases([lease], now, transaction))[0]!;
+  }
+
+  completeMany(leases: readonly LeaseReference[], now: Date): Promise<boolean[]> {
+    return this.#completeLeases(leases, now, undefined);
   }
 
   reschedule(
@@ -289,31 +398,45 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     error: ErrorInfo,
     now: Date,
   ): Promise<boolean> {
-    return this.#changed(this.#statements.reschedule, [
-      lease.deliveryId,
-      lease.leaseToken,
-      availableAt.toISOString(),
-      JSON.stringify(error),
-      now.toISOString(),
-    ]);
+    return this.#whenIssued(lease, (held) =>
+      this.#changed(this.#statements.reschedule, [
+        lease.deliveryId,
+        held.lane,
+        held.epoch,
+        availableAt.toISOString(),
+        JSON.stringify(error),
+        now.toISOString(),
+      ]),
+    );
   }
 
   bury(lease: LeaseReference, error: ErrorInfo, now: Date): Promise<boolean> {
-    return this.#changed(this.#statements.bury, [
-      lease.deliveryId,
-      lease.leaseToken,
-      JSON.stringify(error),
-      now.toISOString(),
-    ]);
+    return this.#whenIssued(lease, (held) =>
+      this.#changed(this.#statements.bury, [
+        lease.deliveryId,
+        held.lane,
+        held.epoch,
+        JSON.stringify(error),
+        now.toISOString(),
+      ]),
+    );
   }
 
   /** Returns a leased delivery to pending, due now, without counting the attempt. */
   release(lease: LeaseReference, now: Date): Promise<boolean> {
-    return this.#changed(this.#statements.release, [
-      lease.deliveryId,
-      lease.leaseToken,
-      now.toISOString(),
-    ]);
+    return this.#whenIssued(lease, (held) =>
+      this.#changed(this.#statements.release, [
+        lease.deliveryId,
+        held.lane,
+        held.epoch,
+        now.toISOString(),
+      ]),
+    );
+  }
+
+  /** Frees the lanes `leaseOwner` holds that run no delivery, so other workers need not wait for the lease to expire. */
+  async relinquish(leaseOwner: string): Promise<void> {
+    await this.#executor.query(this.#statements.relinquish, [leaseOwner]);
   }
 
   async listDeliveries(query: DeliveryQuery): Promise<DeliveryRecord[]> {
@@ -345,6 +468,9 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       [this.#statements.purgeCompletedBatch(), request.completedBefore],
       [this.#statements.purgeDeadBatch(), request.deadBefore],
     ];
+    if (this.#completionHistory) {
+      batches.push([this.#statements.purgeCompletionHistoryBatch(), request.completedBefore]);
+    }
     for (const [sql, cutoff] of batches) {
       if (cutoff === undefined) {
         continue;
@@ -367,18 +493,25 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   }
 
   async statistics(now: Date): Promise<EventStoreStatistics> {
-    const counts: Record<DeliveryStatus, number> = {
-      pending: 0,
-      processing: 0,
-      completed: 0,
-      dead: 0,
-    };
+    const stored: Record<string, number> = { pending: 0, dead: 0, completed: 0 };
     for (const row of await this.#executor.query(this.#statements.countByStatus, [])) {
-      // A CHECK constraint restricts the column to the four statuses.
-      counts[row['status'] as DeliveryStatus] = readCount(row, 'count');
+      stored[row['status'] as string] = readCount(row, 'count');
+    }
+    const [running] = await this.#executor.query(this.#statements.countRunning, []);
+    const processing = readCount(running!, 'count');
+    let completed = stored['completed']!;
+    if (this.#completionHistory) {
+      const [history] = await this.#executor.query(this.#statements.countCompletionHistory, []);
+      completed += readCount(history!, 'count');
     }
     const oldestDue = await this.#executor.query(this.#statements.oldestDue, [now.toISOString()]);
-    return { ...counts, oldestDueAt: mapOldestDueAt(oldestDue) };
+    return {
+      pending: stored['pending']! - processing,
+      processing,
+      completed,
+      dead: stored['dead']!,
+      oldestDueAt: mapOldestDueAt(oldestDue),
+    };
   }
 
   /** Ends the pool this store created from `connectionString`. Pools and executors you passed in stay open. */
@@ -388,13 +521,49 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     await pool?.end();
   }
 
-  async #changed(
-    sql: string,
-    parameters: readonly PostgresParameter[],
-    transaction?: TTransaction,
-  ): Promise<boolean> {
-    const rows = await this.#executor.query(sql, parameters, transaction);
+  async #changed(sql: string, parameters: readonly PostgresParameter[]): Promise<boolean> {
+    const rows = await this.#executor.query(sql, parameters);
     return readCount(rows[0]!, 'count') > 0;
+  }
+
+  /** Runs `operation` for a lease this store issued; any other token cannot be held. */
+  async #whenIssued(
+    lease: LeaseReference,
+    operation: (held: LaneLease) => Promise<boolean>,
+  ): Promise<boolean> {
+    const held = parseLeaseToken(lease.leaseToken);
+    return held !== undefined && (await operation(held));
+  }
+
+  /**
+   * Deletes the delivery of every lease whose lane epoch still matches. Returns
+   * one flag per lease, in order; a lease listed twice completes once.
+   */
+  async #completeLeases(
+    leases: readonly LeaseReference[],
+    now: Date,
+    transaction: TTransaction | undefined,
+  ): Promise<boolean[]> {
+    const held = leases.map((lease) => parseLeaseToken(lease.leaseToken));
+    const issued = leases.flatMap((lease, index) =>
+      held[index] === undefined ? [] : [{ id: lease.deliveryId, ...held[index] }],
+    );
+    const completedIds = new Set<string>();
+    if (issued.length > 0) {
+      const rows = await this.#executor.query(
+        this.#statements.complete,
+        this.#completionHistory
+          ? [JSON.stringify(issued), now.toISOString()]
+          : [JSON.stringify(issued)],
+        transaction,
+      );
+      for (const row of rows) {
+        completedIds.add(row['id'] as string);
+      }
+    }
+    return leases.map(
+      (lease, index) => held[index] !== undefined && completedIds.delete(lease.deliveryId),
+    );
   }
 
   async #reserveSequences(
@@ -514,12 +683,16 @@ function planAppend(entries: readonly AppendEntry[]): AppendPlan {
   return { events, deliveries, outcomes };
 }
 
-function toEventRows(
-  events: readonly EventEnvelope[],
-  firstSequences: ReadonlyMap<string, bigint>,
-): EventRow[] {
+function toEventRows(plan: AppendPlan, firstSequences: ReadonlyMap<string, bigint>): EventRow[] {
   const nextSequences = new Map(firstSequences);
-  return events.map((event) => {
+  const handlersByEvent = new Map<string, string[]>();
+  for (const delivery of plan.deliveries) {
+    handlersByEvent.set(delivery.event_id, [
+      ...(handlersByEvent.get(delivery.event_id) ?? []),
+      delivery.handler,
+    ]);
+  }
+  return plan.events.map((event) => {
     let sequence: string | null = null;
     if (event.key !== null) {
       const next = nextSequences.get(event.key)!;
@@ -537,6 +710,11 @@ function toEventRows(
       correlation_id: event.correlationId,
       causation_id: event.causationId,
       occurred_at: event.occurredAt.toISOString(),
+      handlers: handlersByEvent.get(event.id) ?? [],
     };
   });
+}
+
+function compareText(left: string, right: string): number {
+  return Number(left > right) - Number(left < right);
 }

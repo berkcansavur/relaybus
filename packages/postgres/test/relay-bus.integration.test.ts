@@ -18,7 +18,7 @@ afterAll(async () => {
 });
 
 function createBus(schema: string, clock: FakeClock) {
-  const store = new PostgresEventStore({ pool: database.pool, schema });
+  const store = new PostgresEventStore({ pool: database.pool, schema, completionHistory: true });
   const bus = new RelayBus<PoolClient>({
     store,
     clock,

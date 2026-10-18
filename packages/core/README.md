@@ -76,29 +76,31 @@ Use a database store in production: [`@relaybus/postgres`](../postgres) or
 
 ## `new RelayBus(options)`
 
-| Option                                    | Default                                       | Description                                                                     |
-| ----------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------- |
-| `store`                                   | required                                      | `EventStore` implementation.                                                    |
-| `source`                                  | `'relaybus'`                                  | Service name recorded on every event.                                           |
-| `transactionMode`                         | `'required'`                                  | `'optional'` lets `publish` open its own transaction.                           |
-| `transactionResolver`                     | —                                             | Returns the caller's active transaction, e.g. from `@nestjs-cls/transactional`. |
-| `unroutedEvents`                          | `'warn'`                                      | `'throw'` rejects events without any handler or route.                          |
-| `retry`                                   | 10 attempts, `1s`, ×2, max `10m`, full jitter | Default handler retry policy. `attempts: Infinity` retries forever.             |
-| `handlerTimeout`                          | `false`                                       | Default handler timeout.                                                        |
-| `dispatcher.enabled`                      | `true`                                        | Run handlers in this process.                                                   |
-| `dispatcher.concurrency`                  | `10`                                          | Handlers running at once.                                                       |
-| `dispatcher.batchSize`                    | concurrency                                   | Deliveries claimed per query.                                                   |
-| `dispatcher.pollInterval`                 | `'1s'`                                        | Idle wait between claims; retries are picked up on this cadence.                |
-| `dispatcher.leaseDuration`                | `'30s'`                                       | Lease length, renewed every third while a handler runs.                         |
-| `dispatcher.shutdownTimeout`              | `'30s'`                                       | Wait for running handlers on `stop`, then release them.                         |
-| `retention.completed`                     | `'7d'`                                        | Delete completed deliveries after this; also the deduplication horizon.         |
-| `retention.dead`                          | `false`                                       | Delete dead letters after this.                                                 |
-| `retention.interval`                      | `'1h'`                                        | Cleanup cadence.                                                                |
-| `transports` / `routes` / `subscriptions` | —                                             | Broker integration, see below.                                                  |
-| `setupStore`                              | `true`                                        | Create tables and indexes on `start`.                                           |
-| `observers`                               | `[]`                                          | Lifecycle hooks for logs, metrics and tracing.                                  |
-| `logger`                                  | `console`                                     | `{ log, warn, error }`.                                                         |
-| `clock`, `generateIdentifier`, `random`   | system                                        | Replace in tests.                                                               |
+| Option                                    | Default                                       | Description                                                                                                                                   |
+| ----------------------------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `store`                                   | required                                      | `EventStore` implementation.                                                                                                                  |
+| `source`                                  | `'relaybus'`                                  | Service name recorded on every event.                                                                                                         |
+| `transactionMode`                         | `'required'`                                  | `'optional'` lets `publish` open its own transaction.                                                                                         |
+| `transactionResolver`                     | —                                             | Returns the caller's active transaction, e.g. from `@nestjs-cls/transactional`.                                                               |
+| `unroutedEvents`                          | `'warn'`                                      | `'throw'` rejects events without any handler or route.                                                                                        |
+| `retry`                                   | 10 attempts, `1s`, ×2, max `10m`, full jitter | Default handler retry policy. `attempts: Infinity` retries forever.                                                                           |
+| `handlerTimeout`                          | `false`                                       | Default handler timeout.                                                                                                                      |
+| `dispatcher.enabled`                      | `true`                                        | Run handlers in this process.                                                                                                                 |
+| `dispatcher.concurrency`                  | `10`                                          | Handlers running at once.                                                                                                                     |
+| `dispatcher.batchSize`                    | concurrency                                   | Deliveries claimed per query.                                                                                                                 |
+| `dispatcher.pollInterval`                 | `'1s'`                                        | Idle wait between claims; retries are picked up on this cadence.                                                                              |
+| `dispatcher.leaseDuration`                | `'30s'`                                       | Lease length, renewed every third while a handler runs.                                                                                       |
+| `dispatcher.shutdownTimeout`              | `'30s'`                                       | Wait for running handlers on `stop`, then release them.                                                                                       |
+| `dispatcher.completionBatchWindow`        | `'2ms'`                                       | Deliveries that finish within this window are completed with one store call; `0` completes one by one.                                        |
+| `dispatcher.completionBatchSize`          | `200`                                         | Most deliveries completed in one store call.                                                                                                  |
+| `retention.completed`                     | `'7d'`                                        | Delete events whose deliveries all completed after this; also the deduplication horizon. A completed delivery is deleted at once (see below). |
+| `retention.dead`                          | `false`                                       | Delete dead letters after this.                                                                                                               |
+| `retention.interval`                      | `'1h'`                                        | Cleanup cadence.                                                                                                                              |
+| `transports` / `routes` / `subscriptions` | —                                             | Broker integration, see below.                                                                                                                |
+| `setupStore`                              | `true`                                        | Create tables and indexes on `start`.                                                                                                         |
+| `observers`                               | `[]`                                          | Lifecycle hooks for logs, metrics and tracing.                                                                                                |
+| `logger`                                  | `console`                                     | `{ log, warn, error }`.                                                                                                                       |
+| `clock`, `generateIdentifier`, `random`   | system                                        | Replace in tests.                                                                                                                             |
 
 Durations are milliseconds or strings such as `'250ms'`, `'30s'`, `'5m'`, `'1h'`, `'7d'`.
 
@@ -142,6 +144,16 @@ transports acknowledge only after it resolves and dead-letter `InvalidEnvelopeEr
 
 `listDeliveries(query)`, `requeue(ids)`, `statistics()`, `purgeExpired()`,
 `handlers()`, `runOnce()` and `drain()` (tests), `start()` and `stop()`.
+
+**Completed deliveries are deleted.** Completing a delivery removes its row instead
+of updating it, which is what keeps the write cost of a delivery constant (see
+`docs/performance/write-amplification.md`). `listDeliveries({ status: 'completed' })`
+and `statistics().completed` therefore report nothing unless the store keeps a
+completion history (`completionHistory: true` on the SQL stores,
+`retainCompleted: true` on `InMemoryEventStore`). Deduplication does not depend
+on it: an event remembers every handler it ever had a delivery for, so a
+redelivered or republished event never runs a completed handler again, for as
+long as the event is kept (`retention.completed`).
 
 ## Writing a store
 

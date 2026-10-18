@@ -1,4 +1,5 @@
 import type { Clock } from './clock.js';
+import { CompletionBatcher } from './completion-batcher.js';
 import {
   DispatcherStoppedError,
   HandlerTimeoutError,
@@ -20,6 +21,10 @@ export interface DispatcherSettings {
   readonly pollIntervalMs: number;
   readonly leaseDurationMs: number;
   readonly shutdownTimeoutMs: number;
+  /** Longest a completion waits to be written together with others. Absent or 0: written one by one. */
+  readonly completionBatchWindowMs?: number;
+  /** Completions written at once, at most. Used with `completionBatchWindowMs`. */
+  readonly completionBatchSize?: number;
 }
 
 export interface DispatcherDependencies {
@@ -56,6 +61,7 @@ export class Dispatcher {
   readonly #dependencies: DispatcherDependencies;
   readonly #sleep: (milliseconds: number) => Promise<void>;
   readonly #inFlight = new Set<InFlightDelivery>();
+  readonly #completions: CompletionBatcher | undefined;
   #running = false;
   #loop: Promise<void> | undefined;
   #wakeUp: (() => void) | undefined;
@@ -64,6 +70,17 @@ export class Dispatcher {
   constructor(dependencies: DispatcherDependencies) {
     this.#dependencies = dependencies;
     this.#sleep = dependencies.sleep ?? defaultSleep;
+    const { store, clock, settings } = dependencies;
+    const { completionBatchWindowMs: windowMs = 0, completionBatchSize: maxBatchSize = 1 } =
+      settings;
+    if (store.completeMany !== undefined && windowMs > 0) {
+      this.#completions = new CompletionBatcher(
+        { completeMany: (leases, now) => store.completeMany!(leases, now) },
+        clock,
+        { windowMs, maxBatchSize },
+        () => this.#inFlight.size,
+      );
+    }
   }
 
   get isRunning(): boolean {
@@ -106,6 +123,17 @@ export class Dispatcher {
         delivery.controller.abort(new DispatcherStoppedError('relaybus dispatcher stopped'));
       }
       await settled;
+    }
+    await this.#relinquish();
+  }
+
+  /** Gives lease groups the owner no longer works on back to the store, so other workers need not wait for expiry. */
+  async #relinquish(): Promise<void> {
+    const { store, clock, notifier, settings } = this.#dependencies;
+    try {
+      await store.relinquish?.(settings.owner, clock.now());
+    } catch (error) {
+      notifier.failure('relinquish', error);
     }
   }
 
@@ -302,11 +330,11 @@ export class Dispatcher {
    * still held. Gives up to lease expiry, which reruns the handler: at-least-once.
    */
   async #confirmCompletion(delivery: ClaimedDelivery): Promise<HandlerOutcome> {
-    const { store, clock, notifier } = this.#dependencies;
+    const { notifier } = this.#dependencies;
     for (let attempt = 0; ; attempt += 1) {
       let completed: boolean;
       try {
-        completed = await store.complete(delivery, clock.now());
+        completed = await this.#complete(delivery);
       } catch (error) {
         const delay = COMPLETION_RETRY_DELAYS_MS[attempt];
         if (delay === undefined) {
@@ -321,6 +349,14 @@ export class Dispatcher {
       }
       return 'completed';
     }
+  }
+
+  /** Records one completion, grouped with its neighbours when the store can complete many at once. */
+  #complete(delivery: ClaimedDelivery): Promise<boolean> {
+    const { store, clock } = this.#dependencies;
+    return this.#completions === undefined
+      ? store.complete(delivery, clock.now())
+      : this.#completions.submit(delivery);
   }
 
   async #invoke(

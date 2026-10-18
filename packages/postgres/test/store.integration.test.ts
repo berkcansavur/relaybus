@@ -59,7 +59,12 @@ describe('setup', () => {
       await Promise.all(stores.map((store) => store.setup()));
       await Promise.all(stores.map((store) => store.close()));
     }
-    expect(await tableNames(schema)).toEqual(['bus_deliveries', 'bus_events', 'bus_key_sequences']);
+    expect(await tableNames(schema)).toEqual([
+      'bus_deliveries',
+      'bus_events',
+      'bus_key_sequences',
+      'bus_lanes',
+    ]);
   });
 
   it('creates the default tables in the public schema', async () => {
@@ -120,7 +125,12 @@ describe('pool ownership', () => {
 describe('purge batching', () => {
   it('deletes in bounded batches until nothing is left and keeps referenced events', async () => {
     const schema = uniqueSchema();
-    const store = new PostgresEventStore({ pool: database.pool, schema, purgeBatchSize: 2 });
+    const store = new PostgresEventStore({
+      pool: database.pool,
+      schema,
+      purgeBatchSize: 2,
+      completionHistory: true,
+    });
     await store.setup();
     const shared = envelope();
     const entries = [
@@ -158,7 +168,7 @@ describe('purge batching', () => {
 
   it('purges completed and dead deliveries in one call', async () => {
     const schema = uniqueSchema();
-    const store = new PostgresEventStore({ pool: database.pool, schema });
+    const store = new PostgresEventStore({ pool: database.pool, schema, completionHistory: true });
     await store.setup();
     await store.transaction((transaction) =>
       store.append(
