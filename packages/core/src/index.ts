@@ -1,5 +1,23 @@
 export { systemClock, type Clock } from './clock.js';
 export { MAX_TIMER_DELAY_MS, toMilliseconds, type Duration } from './duration.js';
+export { CatalogPublisher, type PublishTarget } from './catalog-publisher.js';
+export {
+  defineCatalog,
+  defineHandlers,
+  describeCatalog,
+  type Catalog,
+  type CatalogDescription,
+  type CatalogEntry,
+  type CatalogEventClass,
+  type CatalogEventName,
+  type CatalogEvents,
+  type DefineCatalogOptions,
+  type EventOf,
+  type HandlersOf,
+  type NoExtraHandlers,
+  type PartialHandlersOf,
+  type SubscribeCatalogOptions,
+} from './catalog.js';
 export {
   ConfigurationError,
   DispatcherStoppedError,

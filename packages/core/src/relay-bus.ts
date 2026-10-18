@@ -1,4 +1,13 @@
 import { hostname } from 'node:os';
+import {
+  assertCatalogsCovered,
+  describeCatalog,
+  resolveCatalogHandlers,
+  type Catalog,
+  type SubscribeCatalogOptions,
+  type HandlersOf,
+} from './catalog.js';
+import { CatalogPublisher } from './catalog-publisher.js';
 import { systemClock, type Clock } from './clock.js';
 import { Dispatcher, type DispatcherSettings } from './dispatcher.js';
 import { toMilliseconds, toTimerMilliseconds, type Duration } from './duration.js';
@@ -143,6 +152,12 @@ export interface RelayBusOptions<TTransaction = unknown> {
   readonly clock?: Clock;
   readonly generateIdentifier?: IdentifierGenerator;
   readonly random?: () => number;
+  /**
+   * Catalogs whose events must all be handled or routed by this process.
+   * `start()` throws a {@link ConfigurationError} listing every event without a
+   * handler or route and the handler method it expects. See `registerCatalog`.
+   */
+  readonly catalogs?: readonly Catalog[];
 }
 
 export interface PublishOptions<TTransaction = unknown> {
@@ -211,6 +226,7 @@ export class RelayBus<TTransaction = unknown> {
   readonly #generateIdentifier: IdentifierGenerator;
   readonly #dispatcher: Dispatcher;
   readonly #dispatcherEnabled: boolean;
+  readonly #catalogs = new Set<Catalog>();
   readonly #setupStore: boolean;
   readonly #retention: { completedMs: number | null; deadMs: number | null; intervalMs: number };
   #retentionTimer: NodeJS.Timeout | undefined;
@@ -260,6 +276,9 @@ export class RelayBus<TTransaction = unknown> {
       if (transport.subscribe === undefined) {
         throw new ConfigurationError(`Transport '${transport.name}' cannot subscribe`);
       }
+    }
+    for (const catalog of options.catalogs ?? []) {
+      this.registerCatalog(catalog);
     }
     this.#dispatcherEnabled = options.dispatcher?.enabled ?? true;
     this.#dispatcher = new Dispatcher({
@@ -324,6 +343,43 @@ export class RelayBus<TTransaction = unknown> {
       },
       this.#defaults,
     );
+  }
+
+  /**
+   * Subscribes the `on${EventName}` methods of `handlers` to the events of
+   * `catalog`, with the stable handler ids `${prefix}.on${EventName}`. The prefix
+   * is `options.idPrefix`, else the catalog name, else the class name of
+   * `handlers`. Methods run with `this` bound to `handlers`. Throws
+   * {@link ConfigurationError} when a method is missing or an id is invalid
+   * or taken; handlers registered before the failure stay registered.
+   */
+  subscribeCatalog<TCatalog extends Catalog>(
+    catalog: TCatalog,
+    handlers: HandlersOf<TCatalog, TTransaction>,
+    options: SubscribeCatalogOptions = {},
+  ): void {
+    for (const binding of resolveCatalogHandlers(catalog, handlers, options)) {
+      this.subscribe(binding.eventClass as EventClass<unknown>, binding.handle, binding.options);
+    }
+  }
+
+  /**
+   * Requires every event of `catalog` to have a handler or route by the time
+   * `start()` runs; otherwise `start()` throws a {@link ConfigurationError}
+   * naming each missing event and the handler method it expects. Equivalent to
+   * the `catalogs` option.
+   */
+  registerCatalog(catalog: Catalog): void {
+    describeCatalog(catalog);
+    this.#catalogs.add(catalog);
+  }
+
+  /** A view of this bus that publishes only the events of `catalog`. */
+  forCatalog<TCatalog extends Catalog>(
+    catalog: TCatalog,
+  ): CatalogPublisher<TCatalog, TTransaction> {
+    describeCatalog(catalog);
+    return new CatalogPublisher(catalog, this);
   }
 
   /** Registered handlers and routes, for diagnostics. */
@@ -406,6 +462,8 @@ export class RelayBus<TTransaction = unknown> {
           : `Cannot start a relaybus that is ${this.#state}`,
       );
     }
+    // Before any side effect, so a failed check leaves the bus idle and startable.
+    assertCatalogsCovered(this.#catalogs, (type) => this.#registry.forEventType(type).length > 0);
     this.#state = 'starting';
     this.#starting = this.#startComponents();
     try {
