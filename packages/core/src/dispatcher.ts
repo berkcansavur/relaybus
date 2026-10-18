@@ -247,8 +247,11 @@ export class Dispatcher {
       );
       return;
     }
-    const stopHeartbeat = this.#startHeartbeat(delivery, controller);
+    let stopHeartbeat = (): void => undefined;
     try {
+      stopHeartbeat = registration.transactional
+        ? await this.#guardTransactionalLease(registration, delivery, controller)
+        : this.#startHeartbeat(delivery, controller);
       const outcome = await this.#runHandler(registration, delivery, controller);
       if (outcome === 'completed') {
         notifier.notify('onDeliverySucceeded', {
@@ -392,6 +395,37 @@ export class Dispatcher {
     }
     const deadline = Date.now() + this.#dependencies.settings.leaseDurationMs;
     await this.#waitUntil(settledWork, deadline);
+  }
+
+  /**
+   * Transactional handlers get no renewals: a renewal would write the delivery
+   * the open transaction completes, which databases with snapshot isolation
+   * (MongoDB) turn into a write conflict that reruns the handler. Instead the
+   * lease is extended once to cover the handler timeout, and the handler is
+   * aborted when that lease ends.
+   */
+  async #guardTransactionalLease(
+    registration: HandlerRegistration,
+    delivery: ClaimedDelivery,
+    controller: AbortController,
+  ): Promise<() => void> {
+    const { store, clock, settings } = this.#dependencies;
+    const now = clock.now();
+    let expiry = delivery.leaseExpiresAt.getTime();
+    if (registration.timeoutMs !== null && now.getTime() + registration.timeoutMs >= expiry) {
+      expiry = now.getTime() + registration.timeoutMs + settings.leaseDurationMs;
+      if (!(await store.extendLease(delivery, new Date(expiry), now))) {
+        throw new LeaseLostError(`Lease on delivery ${delivery.deliveryId} was lost`);
+      }
+    }
+    const timer = setTimeout(
+      () => {
+        controller.abort(new LeaseLostError(`Lease on delivery ${delivery.deliveryId} expired`));
+      },
+      Math.max(0, expiry - clock.now().getTime()),
+    );
+    timer.unref();
+    return () => clearTimeout(timer);
   }
 
   /**

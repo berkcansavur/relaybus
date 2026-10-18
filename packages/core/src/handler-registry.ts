@@ -42,7 +42,11 @@ export interface SubscribeOptions {
    * Run the handler inside a store transaction that also completes the
    * delivery: its writes and the completion commit or roll back together,
    * so a handler that writes only through `context.transaction` (or through
-   * events it publishes) takes effect exactly once. Keep such handlers short.
+   * events it publishes) takes effect exactly once.
+   *
+   * The lease is not renewed while the transaction is open. A transactional
+   * handler must finish within the lease duration (default 30s), or within its
+   * `timeout`, which extends the lease once to cover it; otherwise it is aborted.
    */
   readonly transactional?: boolean;
 }

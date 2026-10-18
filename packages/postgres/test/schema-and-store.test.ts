@@ -1,0 +1,183 @@
+import { describe, expect, it, vi } from 'vitest';
+import { ConfigurationError } from '@relaybus/core';
+import type { Pool, PoolClient } from 'pg';
+import {
+  PgExecutor,
+  type PostgresExecutor,
+  PostgresEventStore,
+  createPostgresSchemaSql,
+  createPostgresSchemaStatements,
+  resolvePostgresNames,
+} from '../src/index.js';
+import { splitPositionalSql } from '../src/positional-sql.js';
+
+describe('identifier validation', () => {
+  it('uses the defaults', () => {
+    const names = resolvePostgresNames();
+    expect(names.events).toBe('"public"."relaybus_events"');
+    expect(names.deliveries).toBe('"public"."relaybus_deliveries"');
+    expect(names.keySequences).toBe('"public"."relaybus_key_sequences"');
+  });
+
+  it('applies a custom schema and prefix', () => {
+    const names = resolvePostgresNames({ schema: 'messaging', tablePrefix: 'bus_' });
+    expect(names.events).toBe('"messaging"."bus_events"');
+    expect(names.indexes.deliveryDue).toBe('"bus_deliveries_due_idx"');
+  });
+
+  it('accepts an empty prefix', () => {
+    expect(resolvePostgresNames({ tablePrefix: '' }).events).toBe('"public"."events"');
+  });
+
+  it.each([
+    ['schema', { schema: 'public"; DROP TABLE x; --' }],
+    ['schema', { schema: 'Public' }],
+    ['schema', { schema: '' }],
+    ['schema', { schema: 'a'.repeat(64) }],
+    ['schema', { schema: '1abc' }],
+    ['tablePrefix', { tablePrefix: 'x"; DROP TABLE y; --' }],
+    ['tablePrefix', { tablePrefix: 'UPPER_' }],
+    ['tablePrefix', { tablePrefix: 'with space' }],
+    ['tablePrefix', { tablePrefix: '1digit_' }],
+    ['tablePrefix', { tablePrefix: 'p'.repeat(40) }],
+  ])('rejects an unsafe %s', (_label, options) => {
+    expect(() => resolvePostgresNames(options)).toThrow(ConfigurationError);
+    expect(() => createPostgresSchemaStatements(options)).toThrow(ConfigurationError);
+    expect(() => new PostgresEventStore({ executor: fakeExecutor(), ...options })).toThrow(
+      ConfigurationError,
+    );
+  });
+});
+
+describe('schema SQL', () => {
+  it('creates everything idempotently', () => {
+    const statements = createPostgresSchemaStatements();
+    expect(statements.length).toBeGreaterThan(8);
+    for (const statement of statements) {
+      expect(statement).toMatch(/IF NOT EXISTS/);
+    }
+    expect(statements[0]).not.toMatch(/CREATE SCHEMA/);
+  });
+
+  it('creates a custom schema first', () => {
+    expect(createPostgresSchemaStatements({ schema: 'messaging' })[0]).toBe(
+      'CREATE SCHEMA IF NOT EXISTS "messaging"',
+    );
+  });
+
+  it('renders one script for migration tools', () => {
+    const sql = createPostgresSchemaSql({ tablePrefix: 'bus_' });
+    expect(sql).toContain('"public"."bus_deliveries"');
+    expect(sql.trimEnd().endsWith(';')).toBe(true);
+  });
+});
+
+describe('positional SQL', () => {
+  it('splits text and parameter references in order, keeping repeats', () => {
+    expect(splitPositionalSql('a = $1 AND b = $2 OR c = $1')).toEqual([
+      'a = ',
+      { parameterIndex: 0 },
+      ' AND b = ',
+      { parameterIndex: 1 },
+      ' OR c = ',
+      { parameterIndex: 0 },
+      '',
+    ]);
+    expect(splitPositionalSql('SELECT 1')).toEqual(['SELECT 1']);
+  });
+});
+
+function fakeExecutor(): PostgresExecutor<unknown> {
+  return {
+    transaction: (work) => work(undefined),
+    query: () => Promise.resolve([]),
+  };
+}
+
+describe('PostgresEventStore options', () => {
+  it('requires exactly one way to connect', () => {
+    expect(() => new PostgresEventStore({} as never)).toThrow(ConfigurationError);
+    expect(
+      () => new PostgresEventStore({ pool: {} as Pool, executor: fakeExecutor() } as never),
+    ).toThrow(ConfigurationError);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])('rejects purgeBatchSize %s', (purgeBatchSize) => {
+    expect(() => new PostgresEventStore({ executor: fakeExecutor(), purgeBatchSize })).toThrow(
+      ConfigurationError,
+    );
+  });
+
+  it('claims nothing for an empty handler list without touching the database', async () => {
+    const query = vi.fn();
+    const store = new PostgresEventStore({
+      executor: { transaction: vi.fn(), query } as never,
+    });
+    await expect(
+      store.claim({
+        handlers: [],
+        limit: 5,
+        leaseOwner: 'w',
+        leaseExpiresAt: new Date(),
+        now: new Date(),
+      }),
+    ).resolves.toEqual([]);
+    await expect(store.append({} as never, [], new Date())).resolves.toEqual({
+      appendedEventIds: [],
+      duplicateEventIds: [],
+      appendedDeliveryCount: 0,
+    });
+    expect(query).not.toHaveBeenCalled();
+  });
+});
+
+describe('PgExecutor', () => {
+  function createPool(clientQuery: (sql: string) => Promise<unknown>) {
+    const client = { query: vi.fn(clientQuery), release: vi.fn() };
+    const pool = { connect: vi.fn(async () => client), query: vi.fn() };
+    return { client, pool, executor: new PgExecutor(pool as unknown as Pool) };
+  }
+
+  it('commits and releases the client', async () => {
+    const { client, executor } = createPool(async () => ({ rows: [] }));
+    await expect(executor.transaction(async () => 'done')).resolves.toBe('done');
+    expect(client.query.mock.calls.map(([sql]) => sql)).toEqual(['BEGIN', 'COMMIT']);
+    expect(client.release).toHaveBeenCalledWith();
+  });
+
+  it('rolls back and reuses the client when the work fails', async () => {
+    const { client, executor } = createPool(async () => ({ rows: [] }));
+    await expect(
+      executor.transaction(async (transaction: PoolClient) => {
+        expect(transaction).toBe(client);
+        throw new Error('work failed');
+      }),
+    ).rejects.toThrow('work failed');
+    expect(client.query.mock.calls.map(([sql]) => sql)).toEqual(['BEGIN', 'ROLLBACK']);
+    expect(client.release).toHaveBeenCalledWith();
+  });
+
+  it('destroys a client whose rollback fails and reports the original error', async () => {
+    const { client, executor } = createPool(async (sql) => {
+      if (sql === 'ROLLBACK') {
+        throw new Error('connection lost');
+      }
+      return { rows: [] };
+    });
+    await expect(
+      executor.transaction(async () => {
+        throw new Error('work failed');
+      }),
+    ).rejects.toThrow('work failed');
+    expect(client.release).toHaveBeenCalledWith(true);
+  });
+
+  it('runs queries on the pool, or on the transaction when given one', async () => {
+    const { pool, client, executor } = createPool(async () => ({ rows: [{ a: 1 }] }));
+    pool.query.mockResolvedValue({ rows: [{ b: 2 }] });
+    await expect(executor.query('SELECT $1', ['x'])).resolves.toEqual([{ b: 2 }]);
+    await expect(
+      executor.query('SELECT $1', ['x'], client as unknown as PoolClient),
+    ).resolves.toEqual([{ a: 1 }]);
+  });
+});

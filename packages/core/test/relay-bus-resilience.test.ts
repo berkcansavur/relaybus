@@ -476,3 +476,69 @@ describe('errors', () => {
     expect(new DispatcherStoppedError('x').name).toBe('DispatcherStoppedError');
   });
 });
+
+describe('transactional leases', () => {
+  it('never renews the lease while a transactional handler runs', async () => {
+    const { bus, store } = createTestBus({
+      transactionMode: 'optional',
+      clock: systemClock,
+      dispatcher: { leaseDuration: 60 },
+    });
+    const extend = vi.spyOn(store, 'extendLease');
+    bus.subscribe(OrderPlaced, () => new Promise((resolve) => setTimeout(resolve, 45)), {
+      id: 'h',
+      transactional: true,
+    });
+    await bus.publish(new OrderPlaced({ orderId: '1' }));
+    await bus.runOnce();
+    expect(extend).not.toHaveBeenCalled();
+    expect((await bus.listDeliveries())[0]!.status).toBe('completed');
+  });
+
+  it('extends the lease once to cover a long timeout', async () => {
+    const { bus, store, clock } = createTestBus({
+      transactionMode: 'optional',
+      dispatcher: { leaseDuration: '30s' },
+    });
+    const extend = vi.spyOn(store, 'extendLease');
+    bus.subscribe(OrderPlaced, () => undefined, { id: 'h', transactional: true, timeout: '2m' });
+    await bus.publish(new OrderPlaced({ orderId: '1' }));
+    await bus.runOnce();
+    expect(extend).toHaveBeenCalledTimes(1);
+    expect(extend.mock.calls[0]![1]).toEqual(new Date(clock.now().getTime() + 150_000));
+    expect((await bus.listDeliveries())[0]!.status).toBe('completed');
+  });
+
+  it('gives up when the lease cannot be extended for the timeout', async () => {
+    const { bus, store, observer } = createTestBus({ transactionMode: 'optional' });
+    vi.spyOn(store, 'extendLease').mockResolvedValue(false);
+    const handler = vi.fn();
+    bus.subscribe(OrderPlaced, handler, { id: 'h', transactional: true, timeout: '5m' });
+    await bus.publish(new OrderPlaced({ orderId: '1' }));
+    await bus.runOnce();
+    expect(handler).not.toHaveBeenCalled();
+    expect(observer.onLeaseLost).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts a transactional handler that outlives its lease', async () => {
+    const { bus, observer } = createTestBus({
+      transactionMode: 'optional',
+      clock: systemClock,
+      dispatcher: { leaseDuration: 20 },
+    });
+    let signal: AbortSignal | undefined;
+    bus.subscribe(
+      OrderPlaced,
+      async (_event, context) => {
+        signal = context.signal;
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      },
+      { id: 'h', transactional: true },
+    );
+    await bus.publish(new OrderPlaced({ orderId: '1' }));
+    await bus.runOnce();
+    expect((signal!.reason as Error).message).toMatch(/expired/);
+    expect(observer.onLeaseLost).toHaveBeenCalledTimes(1);
+    expect((await bus.listDeliveries())[0]!.status).toBe('processing');
+  });
+});

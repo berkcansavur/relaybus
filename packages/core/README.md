@@ -1,0 +1,115 @@
+# @relaybus/core
+
+The relaybus engine: transactional publishing, per-handler deliveries, leased
+dispatching, retries with jitter, dead letters, ordering keys and transport
+routing. Framework-free; use [`@relaybus/nestjs`](../nestjs) for NestJS.
+
+```sh
+pnpm add @relaybus/core
+```
+
+## Quick start
+
+```ts
+import { InMemoryEventStore, RelayBus, defineEvent } from '@relaybus/core';
+
+class OrderPlaced extends defineEvent<{ orderId: string }>('order.placed.v1') {}
+
+const bus = new RelayBus({ store: new InMemoryEventStore(), source: 'orders' });
+
+bus.subscribe(
+  OrderPlaced,
+  async (event, context) => {
+    console.log(event.payload.orderId, context.attempt);
+  },
+  { id: 'orders.log' },
+);
+
+await bus.start();
+await bus.transaction(async () => {
+  await bus.publish(new OrderPlaced({ orderId: 'o-1' }), { key: 'o-1' });
+});
+```
+
+Use a database store in production: [`@relaybus/postgres`](../postgres) or
+[`@relaybus/mongodb`](../mongodb). `InMemoryEventStore` refuses to start when
+`NODE_ENV=production` unless `allowInProduction: true`.
+
+## `new RelayBus(options)`
+
+| Option                                    | Default                                       | Description                                                                     |
+| ----------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------- |
+| `store`                                   | required                                      | `EventStore` implementation.                                                    |
+| `source`                                  | `'relaybus'`                                  | Service name recorded on every event.                                           |
+| `transactionMode`                         | `'required'`                                  | `'optional'` lets `publish` open its own transaction.                           |
+| `transactionResolver`                     | —                                             | Returns the caller's active transaction, e.g. from `@nestjs-cls/transactional`. |
+| `unroutedEvents`                          | `'warn'`                                      | `'throw'` rejects events without any handler or route.                          |
+| `retry`                                   | 10 attempts, `1s`, ×2, max `10m`, full jitter | Default handler retry policy. `attempts: Infinity` retries forever.             |
+| `handlerTimeout`                          | `false`                                       | Default handler timeout.                                                        |
+| `dispatcher.enabled`                      | `true`                                        | Run handlers in this process.                                                   |
+| `dispatcher.concurrency`                  | `10`                                          | Handlers running at once.                                                       |
+| `dispatcher.batchSize`                    | concurrency                                   | Deliveries claimed per query.                                                   |
+| `dispatcher.pollInterval`                 | `'1s'`                                        | Idle wait between claims; retries are picked up on this cadence.                |
+| `dispatcher.leaseDuration`                | `'30s'`                                       | Lease length, renewed every third while a handler runs.                         |
+| `dispatcher.shutdownTimeout`              | `'30s'`                                       | Wait for running handlers on `stop`, then release them.                         |
+| `retention.completed`                     | `'7d'`                                        | Delete completed deliveries after this; also the deduplication horizon.         |
+| `retention.dead`                          | `false`                                       | Delete dead letters after this.                                                 |
+| `retention.interval`                      | `'1h'`                                        | Cleanup cadence.                                                                |
+| `transports` / `routes` / `subscriptions` | —                                             | Broker integration, see below.                                                  |
+| `setupStore`                              | `true`                                        | Create tables and indexes on `start`.                                           |
+| `observers`                               | `[]`                                          | Lifecycle hooks for logs, metrics and tracing.                                  |
+| `logger`                                  | `console`                                     | `{ log, warn, error }`.                                                         |
+| `clock`, `generateIdentifier`, `random`   | system                                        | Replace in tests.                                                               |
+
+Durations are milliseconds or strings such as `'250ms'`, `'30s'`, `'5m'`, `'1h'`, `'7d'`.
+
+## Publishing
+
+`publish(event, options)` and `publishAll(events, options)` write into, in
+order: `options.transaction`, the transaction of `bus.transaction()`, then
+`transactionResolver`. Options: `key`, `delay`, `headers`, `correlationId`,
+and `id` on `publish` for idempotent publishing. Register every handler in each
+process that publishes the event: deliveries are created at publish time.
+
+## Handlers
+
+`subscribe(event, handler, { id, retry, timeout, concurrency, transactional })`.
+The handler receives the envelope and a context with `attempt`, `maxAttempts`,
+`deliveryId`, `signal` and, for transactional handlers, `transaction`.
+
+- Throw `NonRetryableError` to dead-letter at once. Schema failures are never retried.
+- `transactional: true` runs the handler in a store transaction that also completes
+  the delivery. It must finish within the lease duration or its `timeout`.
+- After a timeout or lease loss the handler's `signal` is aborted; the retry waits
+  for the abandoned run to settle so runs never overlap.
+
+## Transports
+
+```ts
+new RelayBus({
+  store,
+  transports: [kafka],
+  routes: [{ event: OrderPlaced, transport: 'kafka', destination: 'orders.events' }],
+  subscriptions: [{ transport: 'kafka', destinations: ['payments.events'] }],
+});
+```
+
+Routes are deliveries like any handler: retried until the broker accepts them
+(unlimited attempts by default) with a 30s publish timeout. Subscriptions call
+`bus.receive(envelope)`, which stores the event once by id for local handlers;
+transports acknowledge only after it resolves and dead-letter `InvalidEnvelopeError`.
+
+## Operations
+
+`listDeliveries(query)`, `requeue(ids)`, `statistics()`, `purgeExpired()`,
+`handlers()`, `runOnce()` and `drain()` (tests), `start()` and `stop()`.
+
+## Writing a store
+
+Implement `EventStore` and run `eventStoreContract` from
+[`@relaybus/testing`](../testing) against a real database. The contract defines
+fencing, ordering, commit-order sequencing, visibility and purge semantics.
+
+## License
+
+MIT

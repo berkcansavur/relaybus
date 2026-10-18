@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "description": "PostgreSQL event store for relaybus: transactional outbox with SKIP LOCKED leasing, for pg, Prisma, TypeORM, Knex, Kysely and Drizzle.",
   "license": "MIT",
-  "author": "Berkcan \u015eavur <berkcansavur@gmail.com>",
+  "author": "Berkcan Şavur <berkcansavur@gmail.com>",
   "homepage": "https://github.com/berkcansavur/relaybus#readme",
   "repository": {
     "type": "git",
@@ -12,13 +12,12 @@
   },
   "bugs": "https://github.com/berkcansavur/relaybus/issues",
   "keywords": [
-    "relaybus",
     "event-bus",
     "outbox",
+    "pg",
     "postgres",
     "postgresql",
-    "outbox",
-    "pg",
+    "relaybus",
     "skip-locked"
   ],
   "type": "module",
@@ -35,6 +34,56 @@
       "require": {
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
+      }
+    },
+    "./kysely": {
+      "import": {
+        "types": "./dist/kysely.d.ts",
+        "default": "./dist/kysely.js"
+      },
+      "require": {
+        "types": "./dist/kysely.d.cts",
+        "default": "./dist/kysely.cjs"
+      }
+    },
+    "./knex": {
+      "import": {
+        "types": "./dist/knex.d.ts",
+        "default": "./dist/knex.js"
+      },
+      "require": {
+        "types": "./dist/knex.d.cts",
+        "default": "./dist/knex.cjs"
+      }
+    },
+    "./typeorm": {
+      "import": {
+        "types": "./dist/typeorm.d.ts",
+        "default": "./dist/typeorm.js"
+      },
+      "require": {
+        "types": "./dist/typeorm.d.cts",
+        "default": "./dist/typeorm.cjs"
+      }
+    },
+    "./drizzle": {
+      "import": {
+        "types": "./dist/drizzle.d.ts",
+        "default": "./dist/drizzle.js"
+      },
+      "require": {
+        "types": "./dist/drizzle.d.cts",
+        "default": "./dist/drizzle.cjs"
+      }
+    },
+    "./prisma": {
+      "import": {
+        "types": "./dist/prisma.d.ts",
+        "default": "./dist/prisma.js"
+      },
+      "require": {
+        "types": "./dist/prisma.d.cts",
+        "default": "./dist/prisma.cjs"
       }
     },
     "./package.json": "./package.json"
@@ -56,8 +105,12 @@
     "typecheck": "tsc -p tsconfig.build.json --noEmit"
   },
   "peerDependencies": {
+    "@relaybus/core": "workspace:^",
     "pg": "^8.11.0",
-    "@relaybus/core": "workspace:^"
+    "kysely": ">=0.27.0",
+    "knex": ">=3.0.0",
+    "typeorm": ">=0.3.0",
+    "drizzle-orm": ">=0.36.0"
   },
   "devDependencies": {
     "@relaybus/core": "workspace:*",
@@ -70,5 +123,38 @@
     "knex": "3.3.0",
     "typeorm": "1.1.2",
     "drizzle-orm": "0.45.4"
+  },
+  "typesVersions": {
+    "*": {
+      "kysely": [
+        "dist/kysely.d.ts"
+      ],
+      "knex": [
+        "dist/knex.d.ts"
+      ],
+      "typeorm": [
+        "dist/typeorm.d.ts"
+      ],
+      "drizzle": [
+        "dist/drizzle.d.ts"
+      ],
+      "prisma": [
+        "dist/prisma.d.ts"
+      ]
+    }
+  },
+  "peerDependenciesMeta": {
+    "kysely": {
+      "optional": true
+    },
+    "knex": {
+      "optional": true
+    },
+    "typeorm": {
+      "optional": true
+    },
+    "drizzle-orm": {
+      "optional": true
+    }
   }
 }

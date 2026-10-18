@@ -55,9 +55,18 @@
     "typecheck": "tsc -p tsconfig.build.json --noEmit"
   },
   "peerDependencies": {
-    "@relaybus/core": "workspace:^"
+    "@relaybus/core": "workspace:^",
+    "kafkajs": "^2.2.4",
+    "@confluentinc/kafka-javascript": ">=1.0.0"
   },
-  "peerDependenciesMeta": {},
+  "peerDependenciesMeta": {
+    "kafkajs": {
+      "optional": true
+    },
+    "@confluentinc/kafka-javascript": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@relaybus/core": "workspace:*",
     "@relaybus/testing": "workspace:*",

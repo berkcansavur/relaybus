@@ -1,0 +1,247 @@
+import { CompiledQuery, Kysely, PostgresDialect, type Transaction } from 'kysely';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { sql as drizzleSql } from 'drizzle-orm';
+import knexFactory, { type Knex } from 'knex';
+import { DataSource, type EntityManager } from 'typeorm';
+import { Pool } from 'pg';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { RelayBus, defineEvent, type EventStore } from '@relaybus/core';
+import { eventStoreContract } from '@relaybus/testing';
+import { PostgresEventStore, type PostgresExecutor } from '../src/index.js';
+import { createDrizzleExecutor } from '../src/drizzle/index.js';
+import { createKnexExecutor } from '../src/knex/index.js';
+import { createKyselyExecutor } from '../src/kysely/index.js';
+import { createTypeOrmExecutor } from '../src/typeorm/index.js';
+import {
+  dropSchema,
+  startDatabase,
+  uniqueSchema,
+  type TestDatabase,
+} from './support/postgres-container.js';
+
+class OrderPlaced extends defineEvent<{ orderId: string }>('order.placed.v1') {}
+
+/** Everything the shared tests need from one ORM, on one schema. */
+interface Harness<TTransaction> {
+  readonly executor: PostgresExecutor<TTransaction>;
+  /** The ORM's own transaction API, as application code uses it. */
+  begin<T>(work: (transaction: TTransaction) => Promise<T>): Promise<T>;
+  /** A business write through the ORM transaction. */
+  insertOrder(transaction: TTransaction, orderId: string): Promise<void>;
+  destroy(): Promise<void>;
+}
+
+interface Adapter<TTransaction> {
+  readonly name: string;
+  create(connectionString: string, schema: string): Promise<Harness<TTransaction>>;
+}
+
+const orderInsertSql = (schema: string): string =>
+  `INSERT INTO "${schema}".orders (id) VALUES ($1)`;
+
+const kyselyAdapter: Adapter<Transaction<unknown>> = {
+  name: 'Kysely',
+  async create(connectionString, schema) {
+    const db = new Kysely<unknown>({
+      dialect: new PostgresDialect({ pool: new Pool({ connectionString, max: 10 }) }),
+    });
+    return {
+      executor: createKyselyExecutor(db) as unknown as PostgresExecutor<Transaction<unknown>>,
+      begin: (work) => db.transaction().execute(work),
+      async insertOrder(transaction, orderId) {
+        await transaction.executeQuery(CompiledQuery.raw(orderInsertSql(schema), [orderId]));
+      },
+      destroy: () => db.destroy(),
+    };
+  },
+};
+
+const knexAdapter: Adapter<Knex.Transaction> = {
+  name: 'Knex',
+  async create(connectionString, schema) {
+    const knex = knexFactory({ client: 'pg', connection: connectionString, pool: { max: 10 } });
+    return {
+      executor: createKnexExecutor(knex) as unknown as PostgresExecutor<Knex.Transaction>,
+      begin: (work) => knex.transaction(work),
+      async insertOrder(transaction, orderId) {
+        await transaction.raw(orderInsertSql(schema).replace('$1', '?'), [orderId]);
+      },
+      destroy: () => knex.destroy(),
+    };
+  },
+};
+
+const typeOrmAdapter: Adapter<EntityManager> = {
+  name: 'TypeORM',
+  async create(connectionString, schema) {
+    const dataSource = await new DataSource({
+      type: 'postgres',
+      url: connectionString,
+      extra: { max: 10 },
+    }).initialize();
+    return {
+      executor: createTypeOrmExecutor(dataSource) as unknown as PostgresExecutor<EntityManager>,
+      begin: (work) => dataSource.transaction(work),
+      async insertOrder(transaction, orderId) {
+        await transaction.query(orderInsertSql(schema), [orderId]);
+      },
+      destroy: () => dataSource.destroy(),
+    };
+  },
+};
+
+type DrizzleDatabase = ReturnType<typeof drizzle>;
+type DrizzleTransaction = Parameters<Parameters<DrizzleDatabase['transaction']>[0]>[0];
+
+const drizzleAdapter: Adapter<DrizzleTransaction> = {
+  name: 'Drizzle',
+  async create(connectionString, schema) {
+    const pool = new Pool({ connectionString, max: 10 });
+    const db = drizzle(pool);
+    return {
+      executor: createDrizzleExecutor(db) as unknown as PostgresExecutor<DrizzleTransaction>,
+      begin: (work) => db.transaction(work),
+      async insertOrder(transaction, orderId) {
+        await transaction.execute(
+          drizzleSql`INSERT INTO ${drizzleSql.raw(`"${schema}"`)}.orders (id) VALUES (${orderId})`,
+        );
+      },
+      destroy: () => pool.end(),
+    };
+  },
+};
+
+let database: TestDatabase;
+
+beforeAll(async () => {
+  database = await startDatabase();
+});
+
+afterAll(async () => {
+  await database.stop();
+});
+
+async function countOrders(schema: string): Promise<number> {
+  const result = await database.pool.query<{ count: string }>(
+    `SELECT count(*) FROM "${schema}".orders`,
+  );
+  return Number(result.rows[0]!.count);
+}
+
+function defineAdapterTests<TTransaction>(adapter: Adapter<TTransaction>): void {
+  describe(`${adapter.name} adapter`, () => {
+    const harnesses = new Map<
+      EventStore<TTransaction>,
+      { schema: string; harness: Harness<TTransaction> }
+    >();
+
+    async function createStore(): Promise<{
+      store: PostgresEventStore<TTransaction>;
+      schema: string;
+      harness: Harness<TTransaction>;
+    }> {
+      const schema = uniqueSchema();
+      const harness = await adapter.create(database.connectionString, schema);
+      const store = new PostgresEventStore<TTransaction>({ executor: harness.executor, schema });
+      await store.setup();
+      await database.pool.query(`CREATE TABLE "${schema}".orders (id text PRIMARY KEY)`);
+      harnesses.set(store, { schema, harness });
+      return { store, schema, harness };
+    }
+
+    async function destroy(store: EventStore<TTransaction>): Promise<void> {
+      const entry = harnesses.get(store)!;
+      harnesses.delete(store);
+      await entry.harness.destroy();
+      await dropSchema(database.pool, entry.schema);
+    }
+
+    eventStoreContract<TTransaction>(`PostgresEventStore through ${adapter.name}`, {
+      createStore: async () => (await createStore()).store,
+      destroyStore: destroy,
+    });
+
+    describe('with the application transaction', () => {
+      it('publishes into the ORM transaction and commits with the business write', async () => {
+        const { store, schema, harness } = await createStore();
+        const bus = new RelayBus<TTransaction>({
+          store,
+          setupStore: false,
+          dispatcher: { enabled: false },
+        });
+        bus.subscribe(OrderPlaced, () => undefined, { id: 'listener' });
+        await harness.begin(async (transaction) => {
+          await harness.insertOrder(transaction, 'order-1');
+          await bus.publish(new OrderPlaced({ orderId: 'order-1' }), { transaction });
+        });
+        expect(await countOrders(schema)).toBe(1);
+        expect(await store.listDeliveries({})).toHaveLength(1);
+        await destroy(store);
+      });
+
+      it('rolls the event back together with the business write', async () => {
+        const { store, schema, harness } = await createStore();
+        const bus = new RelayBus<TTransaction>({
+          store,
+          setupStore: false,
+          dispatcher: { enabled: false },
+        });
+        bus.subscribe(OrderPlaced, () => undefined, { id: 'listener' });
+        await expect(
+          harness.begin(async (transaction) => {
+            await harness.insertOrder(transaction, 'order-1');
+            await bus.publish(new OrderPlaced({ orderId: 'order-1' }), { transaction });
+            throw new Error('business failure');
+          }),
+        ).rejects.toThrow('business failure');
+        expect(await countOrders(schema)).toBe(0);
+        expect(await store.listDeliveries({})).toEqual([]);
+        await destroy(store);
+      });
+
+      it('runs a transactional handler and completes the delivery in one transaction', async () => {
+        const { store, schema, harness } = await createStore();
+        const bus = new RelayBus<TTransaction>({
+          store,
+          setupStore: false,
+          dispatcher: { enabled: false },
+          retry: { attempts: 2 },
+        });
+        let failNext = true;
+        bus.subscribe(
+          OrderPlaced,
+          async (event, context) => {
+            await harness.insertOrder(context.transaction!, event.payload.orderId);
+            if (event.payload.orderId === 'order-2' && failNext) {
+              failNext = false;
+              throw new Error('handler failure after write');
+            }
+          },
+          { id: 'writer', transactional: true },
+        );
+        await bus.transaction(async (transaction) => {
+          await bus.publish(new OrderPlaced({ orderId: 'order-1' }), { transaction });
+        });
+        await bus.drain();
+        expect(await countOrders(schema)).toBe(1);
+        expect((await store.listDeliveries({}))[0]!.status).toBe('completed');
+
+        await bus.transaction(async (transaction) => {
+          await bus.publish(new OrderPlaced({ orderId: 'order-2' }), { transaction });
+        });
+        await bus.runOnce();
+        // The failed attempt wrote order-2 inside the handler transaction, which rolled back.
+        expect(await countOrders(schema)).toBe(1);
+        const [retrying] = await store.listDeliveries({ status: 'pending' });
+        expect(retrying!.attempts).toBe(1);
+        expect(retrying!.lastError!.message).toBe('handler failure after write');
+        await destroy(store);
+      });
+    });
+  });
+}
+
+defineAdapterTests(kyselyAdapter);
+defineAdapterTests(knexAdapter);
+defineAdapterTests(typeOrmAdapter);
+defineAdapterTests(drizzleAdapter);

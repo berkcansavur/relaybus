@@ -1,0 +1,417 @@
+import { randomUUID } from 'node:crypto';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { Kafka, Partitioners, logLevel, type Consumer } from 'kafkajs';
+import { KafkaContainer, type StartedKafkaContainer } from '@testcontainers/kafka';
+import {
+  InMemoryEventStore,
+  RelayBus,
+  defineEvent,
+  type EventEnvelope,
+  type InMemoryTransaction,
+} from '@relaybus/core';
+import { KafkaTransport, type KafkaTransportOptions } from '../src/index.js';
+import { createEnvelope, createLogger } from './fakes.js';
+
+class OrderPlaced extends defineEvent<{ orderId: string }>('order.placed.v1') {}
+
+const KAFKA_IMAGE = 'confluentinc/cp-kafka:7.5.0';
+const KAFKA_EXTERNAL_PORT = 9093;
+
+let container: StartedKafkaContainer;
+let brokers: string[];
+
+function createClient(): Kafka {
+  return new Kafka({
+    clientId: `relaybus-test-${randomUUID()}`,
+    brokers,
+    logLevel: logLevel.NOTHING,
+    retry: { initialRetryTime: 100, retries: 10 },
+  });
+}
+
+/** Unique topic name; the topic itself is created by `createTopics`. */
+function uniqueName(prefix: string): string {
+  return `${prefix}-${randomUUID()}`;
+}
+
+/** A consumer cannot subscribe to a topic that does not exist yet, so tests create theirs. */
+async function createTopics(...topics: string[]): Promise<void> {
+  const admin = createClient().admin();
+  await admin.connect();
+  await admin.createTopics({
+    waitForLeaders: true,
+    topics: topics.map((topic) => ({ topic, numPartitions: 1 })),
+  });
+  await admin.disconnect();
+}
+
+function createTransport(options: Partial<KafkaTransportOptions> = {}) {
+  const logger = createLogger();
+  const transport = new KafkaTransport({
+    kafka: createClient(),
+    groupId: uniqueName('group'),
+    logger,
+    producerConfig: { createPartitioner: Partitioners.DefaultPartitioner },
+    consumerConfig: { retry: { initialRetryTime: 100, retries: 10 } },
+    processing: { maxAttempts: 3, initialBackoff: 50, maxBackoff: 200 },
+    ...options,
+  });
+  return { transport, logger };
+}
+
+async function waitFor(condition: () => boolean, timeoutMs = 60_000): Promise<void> {
+  const started = Date.now();
+  while (!condition()) {
+    if (Date.now() - started > timeoutMs) {
+      throw new Error('waitFor timed out');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+interface RawRecord {
+  key: string | null;
+  value: string | null;
+  headers: Record<string, string>;
+}
+
+/** Reads a topic from the beginning with a plain kafkajs consumer. */
+async function readRaw(topic: string, expected: number): Promise<RawRecord[]> {
+  const consumer: Consumer = createClient().consumer({ groupId: uniqueName('raw') });
+  const records: RawRecord[] = [];
+  await consumer.connect();
+  await consumer.subscribe({ topic, fromBeginning: true });
+  await consumer.run({
+    eachMessage: async ({ message }) => {
+      records.push({
+        key: message.key?.toString() ?? null,
+        value: message.value?.toString() ?? null,
+        headers: Object.fromEntries(
+          Object.entries(message.headers ?? {}).map(([name, value]) => [name, String(value)]),
+        ),
+      });
+    },
+  });
+  await waitFor(() => records.length >= expected);
+  await consumer.disconnect();
+  return records;
+}
+
+async function produceRaw(
+  topic: string,
+  messages: { key?: string; value: string; headers?: Record<string, string> }[],
+): Promise<void> {
+  const producer = createClient().producer({ createPartitioner: Partitioners.DefaultPartitioner });
+  await producer.connect();
+  await producer.send({ topic, messages });
+  await producer.disconnect();
+}
+
+beforeAll(async () => {
+  container = await new KafkaContainer(KAFKA_IMAGE).withKraft().start();
+  brokers = [`${container.getHost()}:${container.getMappedPort(KAFKA_EXTERNAL_PORT)}`];
+});
+
+afterAll(async () => {
+  await container.stop();
+});
+
+describe('KafkaTransport against a real broker', () => {
+  it('round-trips an envelope exactly and writes CloudEvents binary mode on the wire', async () => {
+    const topic = uniqueName('orders');
+    await createTopics(topic);
+    const { transport: producerSide } = createTransport();
+    const { transport: consumerSide } = createTransport();
+    const received: EventEnvelope[] = [];
+    await consumerSide.subscribe([topic], async (envelope) => {
+      received.push(envelope);
+    });
+    expect(consumerSide.isConsuming()).toBe(true);
+
+    const envelope = createEnvelope({ headers: { ce_id: 'user-supplied', traceparent: 'tp' } });
+    await producerSide.publish(envelope, topic);
+    await waitFor(() => received.length === 1);
+    expect(received[0]).toEqual(envelope);
+    expect(received[0]!.occurredAt).toBeInstanceOf(Date);
+
+    const [wire] = await readRaw(topic, 1);
+    expect(wire!.key).toBe('order-1');
+    expect(wire!.value).toBe('{"orderId":"1"}');
+    expect(wire!.headers).toMatchObject({
+      ce_specversion: '1.0',
+      ce_id: envelope.id,
+      ce_type: 'order.placed.v1',
+      ce_source: 'orders',
+      ce_time: '2026-01-01T00:00:00.000Z',
+      ce_subject: 'order-1',
+      ce_correlationid: 'flow-1',
+      ce_causationid: 'cause-1',
+      'content-type': 'application/json',
+      traceparent: 'tp',
+      'x-relaybus-h-ce_id': 'user-supplied',
+    });
+
+    await producerSide.close();
+    await consumerSide.close();
+    expect(consumerSide.isConsuming()).toBe(false);
+  });
+
+  it('keeps the order of events that share a key', async () => {
+    const topic = uniqueName('ordered');
+    await createTopics(topic);
+    const { transport: producerSide } = createTransport();
+    const { transport: consumerSide } = createTransport();
+    const sequence: string[] = [];
+    await consumerSide.subscribe([topic], async (envelope) => {
+      sequence.push((envelope.payload as { n: string }).n);
+    });
+    const numbers = Array.from({ length: 20 }, (_, index) => String(index));
+    for (const n of numbers) {
+      await producerSide.publish(createEnvelope({ id: `id-${n}`, payload: { n } }), topic);
+    }
+    await waitFor(() => sequence.length === numbers.length);
+    expect(sequence).toEqual(numbers);
+    await producerSide.close();
+    await consumerSide.close();
+  });
+
+  it('delivers events published before the group first joined (fromBeginning)', async () => {
+    const topic = uniqueName('early');
+    await createTopics(topic);
+    const { transport: producerSide } = createTransport();
+    await producerSide.publish(createEnvelope(), topic);
+    const { transport: consumerSide } = createTransport();
+    const received: EventEnvelope[] = [];
+    await consumerSide.subscribe([topic], async (envelope) => {
+      received.push(envelope);
+    });
+    await waitFor(() => received.length === 1);
+    await producerSide.close();
+    await consumerSide.close();
+  });
+
+  it('redelivers a record whose handler failed beyond the in-process attempts, losing nothing', async () => {
+    const topic = uniqueName('redelivery');
+    await createTopics(topic);
+    const { transport: producerSide } = createTransport();
+    const { transport: consumerSide, logger } = createTransport({
+      processing: { maxAttempts: 2, initialBackoff: 20, maxBackoff: 20 },
+    });
+    let calls = 0;
+    const stored: string[] = [];
+    await consumerSide.subscribe([topic], async (envelope) => {
+      calls += 1;
+      if (calls <= 5) {
+        throw new Error('database unavailable');
+      }
+      stored.push(envelope.id);
+    });
+    await producerSide.publish(createEnvelope({ id: 'first' }), topic);
+    await producerSide.publish(createEnvelope({ id: 'second' }), topic);
+    await waitFor(() => stored.length === 2, 90_000);
+    expect(stored).toEqual(['first', 'second']);
+    expect(calls).toBeGreaterThan(5);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('will be redelivered'));
+    await waitFor(() => consumerSide.isConsuming());
+    await producerSide.close();
+    await consumerSide.close();
+  }, 120_000);
+
+  it('skips malformed records with a logged error and keeps consuming', async () => {
+    const topic = uniqueName('malformed');
+    await createTopics(topic);
+    const { transport: consumerSide, logger } = createTransport();
+    const received: EventEnvelope[] = [];
+    await produceRaw(topic, [
+      { value: 'not even json' },
+      { value: '{}', headers: { ce_specversion: '1.0' } },
+    ]);
+    await consumerSide.subscribe([topic], async (envelope) => {
+      received.push(envelope);
+    });
+    const { transport: producerSide } = createTransport();
+    await producerSide.publish(createEnvelope({ id: 'valid' }), topic);
+    await waitFor(() => received.length === 1);
+    expect(received[0]!.id).toBe('valid');
+    expect(logger.error).toHaveBeenCalledTimes(2);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('Skipping malformed message'),
+    );
+    await producerSide.close();
+    await consumerSide.close();
+  });
+
+  it('dead-letters malformed records to a topic with diagnostic headers', async () => {
+    const topic = uniqueName('malformed-dlq');
+    const deadLetterTopic = `${topic}.dlq`;
+    await createTopics(topic, deadLetterTopic);
+    const { transport: consumerSide } = createTransport({ onInvalidMessage: { deadLetterTopic } });
+    const received: EventEnvelope[] = [];
+    await produceRaw(topic, [{ key: 'k1', value: 'garbage', headers: { origin: 'legacy' } }]);
+    await consumerSide.subscribe([topic], async (envelope) => {
+      received.push(envelope);
+    });
+    const [deadLetter] = await readRaw(deadLetterTopic, 1);
+    expect(received).toEqual([]);
+    expect(deadLetter).toMatchObject({
+      key: 'k1',
+      value: 'garbage',
+      headers: {
+        origin: 'legacy',
+        'relaybus-source-topic': topic,
+        'relaybus-source-partition': '0',
+        'relaybus-source-offset': '0',
+      },
+    });
+    expect(deadLetter!.headers['relaybus-invalid-reason']).toContain('ce_specversion');
+    await consumerSide.close();
+  });
+
+  it('fails start-up when the broker is unreachable instead of looking healthy', async () => {
+    const { transport } = createTransport({
+      kafka: new Kafka({
+        brokers: ['127.0.0.1:1'],
+        logLevel: logLevel.NOTHING,
+        connectionTimeout: 500,
+        retry: { retries: 0 },
+      }),
+    });
+    await expect(transport.subscribe(['any'], async () => undefined)).rejects.toThrow();
+    expect(transport.isConsuming()).toBe(false);
+    await transport.close().catch(() => undefined);
+  });
+
+  it('closes gracefully: stops consuming, rejects publishes, leaves the group', async () => {
+    const topic = uniqueName('close');
+    await createTopics(topic);
+    const { transport } = createTransport();
+    await transport.subscribe([topic], async () => undefined);
+    await transport.connect();
+    await transport.close();
+    expect(transport.isConsuming()).toBe(false);
+    await expect(transport.publish(createEnvelope(), topic)).rejects.toThrow(/closed/);
+    await transport.close();
+  });
+});
+
+describe('RelayBus across Kafka', () => {
+  interface Service {
+    readonly bus: RelayBus<InMemoryTransaction>;
+    readonly store: InMemoryEventStore;
+    readonly transport: KafkaTransport;
+  }
+
+  function createService(
+    name: string,
+    topic: string,
+    options: { routes?: boolean; subscriptions?: boolean },
+  ): Service {
+    const store = new InMemoryEventStore();
+    const { transport } = createTransport({ name: 'kafka' });
+    const bus = new RelayBus<InMemoryTransaction>({
+      store,
+      source: name,
+      transactionMode: 'optional',
+      transports: [transport],
+      routes:
+        options.routes === true
+          ? [{ event: OrderPlaced, transport: 'kafka', destination: topic }]
+          : [],
+      subscriptions:
+        options.subscriptions === true ? [{ transport: 'kafka', destinations: [topic] }] : [],
+      dispatcher: { pollInterval: 25 },
+      logger: createLogger(),
+    });
+    return { bus, store, transport };
+  }
+
+  it('delivers an event from service A through Kafka to a handler in service B', async () => {
+    const topic = uniqueName('orders');
+    await createTopics(topic);
+    const serviceB = createService('billing', topic, { subscriptions: true });
+    const handled: EventEnvelope[] = [];
+    serviceB.bus.subscribe(
+      OrderPlaced,
+      async (event) => {
+        handled.push(event);
+      },
+      { id: 'billing-handler' },
+    );
+    await serviceB.bus.start();
+    const serviceA = createService('orders', topic, { routes: true });
+    await serviceA.bus.start();
+
+    const published = await serviceA.bus.publish(new OrderPlaced({ orderId: '42' }), {
+      key: 'order-42',
+    });
+    await waitFor(() => handled.length === 1);
+    expect(handled[0]).toEqual(published);
+    expect(handled[0]).toMatchObject({
+      source: 'orders',
+      key: 'order-42',
+      payload: { orderId: '42' },
+    });
+    expect(serviceB.transport.isConsuming()).toBe(true);
+
+    await serviceA.bus.stop();
+    await serviceB.bus.stop();
+    expect(serviceB.transport.isConsuming()).toBe(false);
+  });
+
+  it('stores a duplicated Kafka message once and runs the handler once', async () => {
+    const topic = uniqueName('orders-duplicate');
+    await createTopics(topic);
+    const serviceB = createService('billing', topic, { subscriptions: true });
+    const handler = vi.fn(async (_event: EventEnvelope) => undefined);
+    serviceB.bus.subscribe(OrderPlaced, handler, { id: 'billing-handler' });
+    await serviceB.bus.start();
+
+    const { transport: producerSide } = createTransport();
+    const envelope = createEnvelope({ id: 'duplicate-1' });
+    await producerSide.publish(envelope, topic);
+    await producerSide.publish(envelope, topic);
+    await producerSide.publish(createEnvelope({ id: 'marker' }), topic);
+    await waitFor(() => handler.mock.calls.length >= 2);
+    await serviceB.bus.drain();
+    const handledIds = handler.mock.calls.map(([event]) => event.id);
+    expect(handledIds.sort()).toEqual(['duplicate-1', 'marker']);
+
+    await producerSide.close();
+    await serviceB.bus.stop();
+  });
+
+  it('keeps the event when the inbound store fails, and stores it after recovery', async () => {
+    const topic = uniqueName('orders-store-outage');
+    await createTopics(topic);
+    const serviceB = createService('billing', topic, { subscriptions: true });
+    const handled: string[] = [];
+    serviceB.bus.subscribe(
+      OrderPlaced,
+      async (event) => {
+        handled.push(event.id);
+      },
+      { id: 'billing-handler' },
+    );
+    const originalTransaction = serviceB.store.transaction.bind(serviceB.store);
+    let outage = true;
+    const transactionSpy = vi
+      .spyOn(serviceB.store, 'transaction')
+      .mockImplementation(async (work) => {
+        if (outage) {
+          throw new Error('database unavailable');
+        }
+        return originalTransaction(work);
+      });
+    await serviceB.bus.start();
+    const { transport: producerSide } = createTransport();
+    await producerSide.publish(createEnvelope({ id: 'survivor' }), topic);
+    await waitFor(() => transactionSpy.mock.calls.length >= 4);
+    expect(handled).toEqual([]);
+    outage = false;
+    await waitFor(() => handled.length === 1, 90_000);
+    expect(handled).toEqual(['survivor']);
+
+    await producerSide.close();
+    await serviceB.bus.stop();
+  }, 120_000);
+});
