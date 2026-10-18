@@ -1,10 +1,10 @@
 {
   "name": "@relaybus/testing",
   "version": "0.0.0",
-  "description": "Test utilities for relaybus: the EventStore contract suite, a fake clock and an in-memory transport.",
+  "description": "Testing utilities for relaybus: the EventStore contract suite, a FakeClock and an in-memory transport for deterministic tests of retries, delays and dead letters.",
   "license": "MIT",
   "author": "Berkcan Şavur <berkcansavur@gmail.com>",
-  "homepage": "https://github.com/berkcansavur/relaybus#readme",
+  "homepage": "https://berkcansavur.github.io/relaybus/packages/testing",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/berkcansavur/relaybus.git",
@@ -14,8 +14,20 @@
   "keywords": [
     "relaybus",
     "testing",
+    "test-utilities",
     "contract-tests",
-    "event-bus"
+    "fake-clock",
+    "in-memory",
+    "vitest",
+    "event-bus",
+    "transactional-outbox",
+    "outbox-pattern",
+    "event-driven",
+    "reliable-events",
+    "dead-letter-queue",
+    "retry",
+    "nestjs",
+    "typescript"
   ],
   "type": "module",
   "sideEffects": false,
