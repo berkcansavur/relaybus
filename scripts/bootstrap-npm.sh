@@ -31,7 +31,8 @@ for dir in core testing nestjs postgres mongodb kafka rabbitmq; do
   (cd "$pkg" && pnpm pack --pack-destination "$PACK_DIR" >/dev/null)
   tarball="$PACK_DIR/$(echo "${name#@}" | tr '/' '-')-$VERSION.tgz"
   echo "publish $name@$VERSION"
-  npm publish "$tarball" --access public
+  # Provenance needs a CI identity; the local bootstrap publish cannot have it.
+  npm publish "$tarball" --access public --provenance=false
 done
 
 echo "Done. Now attach a Trusted Publisher to each package (see docs/releasing.md)."
