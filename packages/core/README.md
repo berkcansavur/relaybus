@@ -2,13 +2,52 @@
 
 The relaybus engine: transactional publishing, per-handler deliveries, leased
 dispatching, retries with jitter, dead letters, ordering keys and transport
-routing. Framework-free; use [`@relaybus/nestjs`](../nestjs) for NestJS.
+routing. Most applications install it together with a store and, for NestJS,
+the module:
 
 ```sh
-pnpm add @relaybus/core
+pnpm add @relaybus/core @relaybus/nestjs @relaybus/postgres pg
 ```
 
-## Quick start
+| Package                                                                  | Use it for                                                    |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| [`@relaybus/nestjs`](https://www.npmjs.com/package/@relaybus/nestjs)     | `RelayBusModule` and the `@Subscribe` decorator               |
+| [`@relaybus/postgres`](https://www.npmjs.com/package/@relaybus/postgres) | PostgreSQL store (pg, Prisma, TypeORM, Knex, Kysely, Drizzle) |
+| [`@relaybus/mongodb`](https://www.npmjs.com/package/@relaybus/mongodb)   | MongoDB store (driver or Mongoose sessions)                   |
+| [`@relaybus/kafka`](https://www.npmjs.com/package/@relaybus/kafka)       | Kafka transport between services                              |
+| [`@relaybus/rabbitmq`](https://www.npmjs.com/package/@relaybus/rabbitmq) | RabbitMQ transport between services                           |
+| [`@relaybus/testing`](https://www.npmjs.com/package/@relaybus/testing)   | Contract suite, fake clock, in-memory transport               |
+
+## With NestJS
+
+```ts
+// order.events.ts
+export class OrderPlaced extends defineEvent<{ orderId: string }>('order.placed.v1') {}
+
+// app.module.ts
+@Module({ imports: [RelayBusModule.forRoot({ store: new PostgresEventStore({ pool }) })] })
+export class AppModule {}
+
+// shipping.handlers.ts: consume with a decorator
+@Injectable()
+export class ShippingHandlers {
+  @Subscribe(OrderPlaced, { retry: { attempts: 5 } })
+  async ship(event: EventEnvelope<{ orderId: string }>) {
+    /* runs after the order transaction commits */
+  }
+}
+
+// order.service.ts: produce inside your transaction
+await this.bus.transaction(async () => {
+  await this.orders.insert(order);
+  await this.bus.publish(new OrderPlaced({ orderId: order.id }), { key: order.id });
+});
+```
+
+See the [project README](https://github.com/berkcansavur/relaybus#readme) for
+guarantees and architecture.
+
+## Without a framework
 
 ```ts
 import { InMemoryEventStore, RelayBus, defineEvent } from '@relaybus/core';
