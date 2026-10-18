@@ -1,3 +1,8 @@
+export {
+  EventConsumer,
+  type EventConsumerMetadata,
+  type EventConsumerOptions,
+} from './event-consumer.decorator.js';
 export { RelayBusHandlerExplorer } from './handler-explorer.js';
 export type {
   RelayBusModuleExtras,
