@@ -38,6 +38,10 @@ jobs:
           restore-keys: |
             stryker-incremental-
 
+      # Stryker runs in place (`inPlace: true` in stryker.config.json): it mutates the
+      # files of this fresh checkout and restores them afterwards. That keeps the
+      # `@relaybus/*` workspace imports on the mutated sources. Safe here because the
+      # runner's checkout is disposable.
       # Fails (non-zero exit) when the mutation score drops below thresholds.break.
       - name: Run Stryker
         run: pnpm mutation

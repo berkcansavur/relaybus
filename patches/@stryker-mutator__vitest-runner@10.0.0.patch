@@ -1,0 +1,15 @@
+diff --git a/dist/src/vitest-test-runner.js b/dist/src/vitest-test-runner.js
+index 84f1ca026503b8e92b7adc952ec6c6a401943656..eeba315fd83944e34f0ce7c5b19513f72d99321b 100644
+--- a/dist/src/vitest-test-runner.js
++++ b/dist/src/vitest-test-runner.js
+@@ -144,7 +144,9 @@ export class VitestTestRunner {
+         if (testIds.length > 0) {
+             const parsedTests = testIds.map(fromTestId);
+             const regexTestNameFilter = parsedTests
+-                .map(({ test: name }) => escapeRegExp(name))
++                // Vitest >= 5 joins suite and test names with ' > ' (older versions use ' ').
++            // Stryker builds ids with ' ', so let every space match either separator.
++            .map(({ test: name }) => escapeRegExp(name).replace(/ /g, '(?: > | )'))
+                 .join('|');
+             const regex = new RegExp(regexTestNameFilter);
+             testFilesToRun = parsedTests.map(({ file }) => file);

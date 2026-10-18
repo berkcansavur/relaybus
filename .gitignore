@@ -19,3 +19,5 @@ docs-site/public/*.md
 docs-site/public/**/*.md
 docs-site/public/llms.txt
 docs-site/public/llms-full.txt
+stryker-setup-*.js
+stryker.log

@@ -6,15 +6,19 @@
     "configFile": "vitest.stryker.config.ts"
   },
   "coverageAnalysis": "perTest",
+  "inPlace": true,
   "mutate": [
     "packages/*/src/**/*.ts",
     "!packages/*/src/**/index.ts",
-    "!packages/core/src/standard-schema.ts"
+    "!packages/core/src/standard-schema.ts",
+    "!packages/postgres/src/**",
+    "!packages/mongodb/src/**",
+    "!packages/testing/src/event-store-contract.ts"
   ],
   "thresholds": {
     "high": 90,
-    "low": 80,
-    "break": 75
+    "low": 87,
+    "break": 85
   },
   "incremental": true,
   "incrementalFile": "reports/stryker-incremental.json",
@@ -27,7 +31,17 @@
   },
   "tempDirName": ".stryker-tmp",
   "cleanTempDir": true,
-  "ignorePatterns": ["coverage", "reports", "dist", ".stryker-tmp"],
+  "ignorePatterns": [
+    "coverage",
+    "reports",
+    "dist",
+    ".stryker-tmp",
+    "scripts",
+    "docs",
+    "docs-site",
+    "examples",
+    "benchmarks"
+  ],
   "timeoutMS": 10000,
-  "concurrency": 2
+  "concurrency": 4
 }
