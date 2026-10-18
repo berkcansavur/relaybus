@@ -19,5 +19,12 @@ export interface Transport {
   connect?(): Promise<void>;
   publish(envelope: EventEnvelope, destination: string): Promise<void>;
   subscribe?(destinations: readonly string[], onMessage: TransportMessageHandler): Promise<void>;
+  /**
+   * Whether the transport can currently publish and, when subscribed, is
+   * consuming. Health checks use it to report a dead consumer or a lost
+   * connection. Transports without it count as ready.
+   */
+  isReady?(): boolean;
+  /** Releases connections. A closed transport is not reopened. */
   close(): Promise<void>;
 }

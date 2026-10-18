@@ -732,7 +732,49 @@ export function eventStoreContract<TTransaction>(
       });
     });
 
+    describe('requeued keyed dead letters', () => {
+      it('never runs a requeued dead letter alongside its running successor', async () => {
+        const first = createEnvelope({ key: 'k' });
+        const second = createEnvelope({ key: 'k' });
+        await append([{ event: first, deliveries: [createDelivery('handler-a')] }]);
+        await append([{ event: second, deliveries: [createDelivery('handler-a')] }]);
+        const [head] = await claim(['handler-a'], at(0));
+        await store.bury(head!, { name: 'Error', message: 'x' }, at(1));
+        const [successor] = await claim(['handler-a'], at(2));
+        expect(successor!.event.id).toBe(second.id);
+        expect(await store.requeue([head!.deliveryId], at(3))).toBe(1);
+        expect(await claim(['handler-a'], at(4))).toEqual([]);
+        await store.complete(successor!, at(5));
+        const [requeued] = await claim(['handler-a'], at(6));
+        expect(requeued!.event.id).toBe(first.id);
+      });
+
+      it('recovers when the running successor crashes after the requeue', async () => {
+        const first = createEnvelope({ key: 'k' });
+        const second = createEnvelope({ key: 'k' });
+        await append([{ event: first, deliveries: [createDelivery('handler-a')] }]);
+        await append([{ event: second, deliveries: [createDelivery('handler-a')] }]);
+        const [head] = await claim(['handler-a'], at(0));
+        await store.bury(head!, { name: 'Error', message: 'x' }, at(1));
+        await claim(['handler-a'], at(2));
+        await store.requeue([head!.deliveryId], at(3));
+        const recovered = await claim(['handler-a'], at(2 + LEASE_MS));
+        expect(recovered.map((delivery) => delivery.event.id)).toEqual([first.id]);
+        await store.complete(recovered[0]!, at(3 + LEASE_MS));
+        const [retried] = await claim(['handler-a'], at(4 + LEASE_MS));
+        expect(retried).toMatchObject({ attempt: 2 });
+        expect(retried!.event.id).toBe(second.id);
+      });
+    });
+
     describe('lease semantics', () => {
+      it('confirms a repeated renewal with identical values', async () => {
+        await append([{ event: createEnvelope(), deliveries: [createDelivery('handler-a')] }]);
+        const [delivery] = await claim(['handler-a'], at(0));
+        expect(await store.extendLease(delivery!, at(LEASE_MS * 2), at(10))).toBe(true);
+        expect(await store.extendLease(delivery!, at(LEASE_MS * 2), at(10))).toBe(true);
+      });
+
       it('accepts an expired lease that nobody reclaimed', async () => {
         await append([{ event: createEnvelope(), deliveries: [createDelivery('handler-a')] }]);
         const [delivery] = await claim(['handler-a'], at(0));

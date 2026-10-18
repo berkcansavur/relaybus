@@ -5,7 +5,12 @@ import {
   type Transport,
   type TransportMessageHandler,
 } from '@relaybus/core';
-import type { AmqpConfirmChannel, AmqpConnection, AmqpMessage } from './amqp-types.js';
+import type {
+  AmqpConfirmChannel,
+  AmqpConnection,
+  AmqpMessage,
+  AmqpPublishOptions,
+} from './amqp-types.js';
 import { ConnectionSupervisor } from './connection-supervisor.js';
 import {
   RabbitMqPublishRejectedError,
@@ -21,12 +26,14 @@ import {
 import { QueueConsumer } from './queue-consumer.js';
 import { SerialQueue } from './serial-queue.js';
 import { assertConsumerTopology, assertExchange, type ConsumerTopology } from './topology.js';
-import { encodeEnvelope } from './wire-format.js';
+import { assertShortString, encodeEnvelope } from './wire-format.js';
 
 /** Publisher channel plus the broker returns not yet matched with their confirm. */
 interface Publisher {
   readonly channel: AmqpConfirmChannel;
   readonly unroutable: Map<string, number>;
+  /** Set when the channel closed, also while the transport was still being set up. */
+  closed: boolean;
 }
 
 interface LiveConnection {
@@ -54,8 +61,10 @@ const NACK_MESSAGE = 'message nacked';
  *
  * Subscribing: one durable quorum queue per consumer group, bound to the
  * destinations (routing-key patterns such as `orders.*`). A message is
- * acknowledged only after the handler resolved; failures are retried with
- * backoff and finally dead-lettered, never lost.
+ * acknowledged only after the handler resolved. A failing handler is retried
+ * on the same delivery, then through retry queues with growing delays (see
+ * `redelivery`), and finally dead-lettered after the retry window; poison
+ * messages are dead-lettered at once. Nothing is lost on the way.
  *
  * Reconnection: after a connection or channel loss the transport reconnects
  * with capped, jittered backoff and restores channels, topology and the
@@ -93,6 +102,18 @@ export class RabbitMqTransport implements Transport {
     return this.#supervisor.isConnected();
   }
 
+  /**
+   * True when the transport can publish and, once subscribed, is consuming: the
+   * connection is up, its channels are open and the consumer is registered. False while reconnecting and after a cancelled consumer.
+   */
+  isReady(): boolean {
+    return (
+      this.#supervisor.isConnected() &&
+      this.#live !== undefined &&
+      (this.#subscription === undefined || this.#subscription.consumer.isActive())
+    );
+  }
+
   /** Connects to the broker. Rejects when it is unreachable unless `failOnConnectError` is false. */
   async connect(): Promise<void> {
     await this.#supervisor.start(this.#settings.failOnConnectError);
@@ -102,24 +123,44 @@ export class RabbitMqTransport implements Transport {
    * Publishes to the exchange with `destination` as routing key and resolves
    * after the broker confirmed the message.
    *
+   * @throws {UnserializablePayloadError} the payload is not representable as JSON (never retried)
+   * @throws {AmqpLimitExceededError} the event id, a header name or `destination` exceeds 255 bytes (never retried)
    * @throws {RabbitMqUnavailableError} not connected, channel lost, or confirm timed out
    * @throws {RabbitMqPublishRejectedError} the broker nacked the message
    * @throws {UnroutableMessageError} no queue is bound to `destination` (unless `allowUnroutable`)
    */
   async publish(envelope: EventEnvelope, destination: string): Promise<void> {
+    assertShortString('Destination (routing key)', destination);
+    const { content, options } = encodeEnvelope(envelope);
+    await this.#publishConfirmed(
+      this.#settings.exchange,
+      destination,
+      content,
+      options,
+      !this.#settings.allowUnroutable,
+    );
+  }
+
+  async #publishConfirmed(
+    exchange: string,
+    routingKey: string,
+    content: Buffer,
+    options: AmqpPublishOptions,
+    mandatory: boolean,
+  ): Promise<void> {
     const publisher = this.#live?.publisher;
+    const eventId = options.messageId ?? 'unknown';
     if (publisher === undefined) {
       throw new RabbitMqUnavailableError(
-        `[RabbitMqTransport](publish) Not connected to the broker | transport=${this.name} destination=${destination}`,
+        `[RabbitMqTransport](publish) Not connected to the broker | transport=${this.name} destination=${routingKey}`,
       );
     }
-    const { content, options } = encodeEnvelope(envelope);
-    const returnKey = unroutableKey(envelope.id, destination);
+    const returnKey = unroutableKey(options.messageId, routingKey);
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(
           new RabbitMqUnavailableError(
-            `[RabbitMqTransport](publish) No broker confirm within ${this.#settings.publishTimeoutMs}ms | transport=${this.name} eventId=${envelope.id} destination=${destination}`,
+            `[RabbitMqTransport](publish) No broker confirm within ${this.#settings.publishTimeoutMs}ms | transport=${this.name} eventId=${eventId} destination=${routingKey}`,
           ),
         );
       }, this.#settings.publishTimeoutMs);
@@ -127,11 +168,11 @@ export class RabbitMqTransport implements Transport {
         clearTimeout(timer);
         const returned = takeUnroutable(publisher.unroutable, returnKey);
         if (error) {
-          reject(this.#toPublishError(error, envelope.id, destination));
+          reject(this.#toPublishError(error, eventId, routingKey));
         } else if (returned) {
           reject(
             new UnroutableMessageError(
-              `[RabbitMqTransport](publish) No queue is bound to the routing key | transport=${this.name} eventId=${envelope.id} destination=${destination}`,
+              `[RabbitMqTransport](publish) No queue is bound to the routing key | transport=${this.name} eventId=${eventId} destination=${routingKey}`,
             ),
           );
         } else {
@@ -140,15 +181,15 @@ export class RabbitMqTransport implements Transport {
       };
       try {
         publisher.channel.publish(
-          this.#settings.exchange,
-          destination,
+          exchange,
+          routingKey,
           content,
-          { ...options, mandatory: !this.#settings.allowUnroutable },
+          { ...options, mandatory },
           onConfirm,
         );
       } catch (error) {
         clearTimeout(timer);
-        reject(this.#toPublishError(error, envelope.id, destination));
+        reject(this.#toPublishError(error, eventId, routingKey));
       }
     });
   }
@@ -178,13 +219,21 @@ export class RabbitMqTransport implements Transport {
         deadLetterExchange: this.#settings.deadLetterExchange,
         deadLetterQueue: this.#settings.deadLetterQueue ?? `${queue}.dead`,
         deliveryLimit: this.#settings.deliveryLimit,
+        ordered: this.#settings.ordered,
+        retryDelaysMs: this.#settings.retryLadder,
         destinations,
       },
       consumer: new QueueConsumer({
         queue,
         prefetch: this.#settings.prefetch,
-        deliveryLimit: this.#settings.deliveryLimit,
         handlerRetry: this.#settings.handlerRetry,
+        redelivery: this.#settings.redelivery,
+        retryLadder: this.#settings.retryLadder,
+        redeliveryMaxAgeMs: this.#settings.redeliveryMaxAgeMs,
+        ordered: this.#settings.ordered,
+        deadLetterExchange: this.#settings.deadLetterExchange,
+        republish: (exchange, routingKey, content, options) =>
+          this.#publishConfirmed(exchange, routingKey, content, options, true),
         shutdownTimeoutMs: this.#settings.shutdownTimeoutMs,
         onMessage,
         onConsumerLost: (reason) => this.#supervisor.recover(reason),
@@ -223,13 +272,14 @@ export class RabbitMqTransport implements Transport {
   async #establishChannels(connection: AmqpConnection): Promise<void> {
     await this.#topologyWork.run(async () => {
       const channel = await connection.createConfirmChannel();
-      const publisher: Publisher = { channel, unroutable: new Map() };
+      const publisher: Publisher = { channel, unroutable: new Map(), closed: false };
       channel.on('error', (error: Error) => {
         this.#settings.logger.warn(
           `[RabbitMqTransport](establishChannels) Publisher channel error | transport=${this.name} error=${error.message}`,
         );
       });
       channel.on('close', () => {
+        publisher.closed = true;
         if (this.#live?.publisher === publisher) {
           this.#supervisor.recover('publisher channel closed');
         }
@@ -243,6 +293,12 @@ export class RabbitMqTransport implements Transport {
       await assertExchange(channel, this.#settings.exchange);
       if (this.#subscription !== undefined) {
         await this.#startConsuming(connection, this.#subscription);
+      }
+      if (publisher.closed) {
+        // The close came before `live` was set, so nothing reacted to it.
+        throw new RabbitMqUnavailableError(
+          `[RabbitMqTransport](establishChannels) Publisher channel closed while the transport was being set up | transport=${this.name}`,
+        );
       }
       this.#live = { connection, publisher };
     });

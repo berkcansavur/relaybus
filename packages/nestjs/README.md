@@ -100,8 +100,13 @@ Rules, all enforced at boot (the application fails to start, no silent skips):
   decorators must give each an explicit `id`.
 - **Singletons only.** Handlers on request-scoped or transient providers (or default-scoped
   providers that depend on one) are rejected: deliveries run outside any request, so there is no
-  request instance to call. Providers without `@Subscribe` are never inspected for scope.
-- `this` is bound to the provider instance. Only providers are scanned, in every module.
+  request instance to call. This covers class, `useClass` and `useFactory` providers (a factory is
+  checked through its class token; a request-scoped factory under a string token cannot be
+  inspected). Providers without `@Subscribe` are never inspected for scope.
+- `this` is bound to the provider instance. Only providers are scanned, in every module. A handler
+  reachable through several tokens (`useExisting`) is registered once. Declarations are stored per
+  class and method, so decorators that wrap the method later do not drop them, and subclasses
+  inherit the handlers of their base class.
 
 ## Lifecycle
 
@@ -165,11 +170,13 @@ RelayBusModule.forRootAsync({
 
 ```ts
 const report = await health.check();
-// { status: 'up' | 'down', running, handlers, statistics?, lagMilliseconds?, error? }
+// { status: 'up' | 'down', running, ready, handlers, statistics?, lagMilliseconds?, error? }
 ```
 
-`down` when the bus is not running or the store cannot be queried. `lagMilliseconds` is how long
-the oldest due delivery has waited, a good alert signal. With terminus 11:
+`down` when the bus is not running, a transport is not ready (`ready` is `bus.isReady()`: for
+example a dead Kafka consumer or a disconnected RabbitMQ channel) or the store cannot be queried.
+`lagMilliseconds` is how long the oldest due delivery has waited (measured with the `clock` from
+the module options, the system clock by default), a good alert signal. With terminus 11:
 
 ```ts
 @Injectable()
@@ -186,6 +193,12 @@ export class RelayBusIndicator {
   }
 }
 ```
+
+## Startup failure and restarts
+
+The bus starts during application bootstrap. If the start fails (store setup, transport connect),
+application boot fails with that error. A bus whose start failed is stopped for good and cannot be
+started again: restart the process rather than retrying in place.
 
 ## Testing
 

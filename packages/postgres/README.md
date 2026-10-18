@@ -89,6 +89,12 @@ against a fake client only. Prisma interactive transactions default to a 5 s tim
 | `schema`                                 | `'public'`            | Schema of the tables. Created by `setup()` when it is not `public`.         |
 | `tablePrefix`                            | `'relaybus_'`         | Tables are `<prefix>events`, `<prefix>deliveries`, `<prefix>key_sequences`. |
 | `purgeBatchSize`                         | `1000`                | Deliveries deleted per transaction by `purge`.                              |
+| `logger`                                 | `console`             | Receives idle-connection errors of a pool the store created itself.         |
+
+**Pool errors.** A pool created from `connectionString` gets an `error` listener that logs through `logger`
+(`[PostgresEventStore](constructor) Idle connection failed ...`); `pg` then replaces the dead connection, so a failover
+or `pg_terminate_backend` of an idle connection does not crash the process. A `pool` you pass in is yours: attach
+`pool.on('error', ...)` to it yourself, because without a listener `pg` re-throws the error as an uncaught exception.
 
 `schema` and `tablePrefix` are validated (`[a-z_][a-z0-9_]*`, names at most 63 characters) before they are placed in SQL;
 anything else throws `ConfigurationError`.
@@ -96,7 +102,8 @@ anything else throws `ConfigurationError`.
 ## Schema and migrations
 
 `setup()` (called by `bus.start()`) creates everything with `IF NOT EXISTS` inside a transaction guarded by
-`pg_advisory_xact_lock`, so any number of processes can start at once. To own the schema yourself, set
+`pg_advisory_xact_lock`, so any number of processes can start at once. The lock key is derived from the schema name, so
+stores with different table prefixes in one schema (which race on `CREATE SCHEMA IF NOT EXISTS`) are serialized too. To own the schema yourself, set
 `setupStore: false` and put the DDL into your migration tool:
 
 ```ts
@@ -111,9 +118,12 @@ const migration = createPostgresSchemaSql({ schema: 'app', tablePrefix: 'bus_' }
 | `deliveries`    | One row per (event, handler): status, attempts, `available_at`, lease owner/token/expiry, `last_error jsonb`, key and sequence copied from the event, timestamps. `unique (event_id, handler)`, foreign key to events with `ON DELETE CASCADE`. |
 | `key_sequences` | One counter row per ordering key.                                                                                                                                                                                                               |
 
-Indexes (all on `deliveries`): a partial index on the due time of pending/processing rows (claim and statistics), two
-partial indexes on `(handler, key, ...)` for the ordering check, `(status, created_at, id)` for `listDeliveries`, and
-partial indexes for purging completed and dead rows. `deliveries.id` uses the `C` collation so id tie-breaks are the
+Indexes on `deliveries`: a partial index on the due time of pending/processing rows (statistics), the same for unkeyed
+rows only (claim), two partial indexes on `(handler, key, ...)` for the ordering check, `(status, created_at, id)` and
+`(handler, created_at, id)` for `listDeliveries` filtered by status or handler, and partial indexes for purging
+completed and dead rows; on `events`, `(created_at, id)` for the purge sweep. `listDeliveries({ eventType })` has no
+index of its own (it filters through a join with `events`); combine it with `status` or `handler`, or add
+`CREATE INDEX ON <prefix>events (type)` if you query by type often. `deliveries.id` uses the `C` collation so id tie-breaks are the
 same on every database.
 
 ## Guarantees
@@ -122,10 +132,10 @@ same on every database.
 - **Per-key order.** On append, a key's counter row in `key_sequences` is upserted
   (`INSERT ... ON CONFLICT (key) DO UPDATE SET sequence = sequence + n`). That row lock is held until the publishing
   transaction ends, so two transactions publishing the same key are serialized and the sequence order equals the commit
-  order. Keys are locked in sorted order, events and deliveries are inserted in primary-key order, so concurrent
-  publishers cannot deadlock. Claiming hands out a keyed delivery only when no earlier (same handler and key) delivery
+  order. Within one `append` (one `publishAll`) keys are locked in sorted order and events and deliveries are inserted in
+  primary-key order, so concurrent single calls cannot deadlock each other. Claiming hands out a keyed delivery only when no earlier (same handler and key) delivery
   is pending or processing, so one key is processed one event at a time, in order. A retrying or leased head blocks its
-  successors; a dead-lettered head releases them.
+  successors; a dead-lettered head releases them. A `limit` of zero or less claims nothing.
 - **Safe parallel claiming.** One statement chooses candidates with `FOR UPDATE SKIP LOCKED`, applies `LIMIT` after the
   ordering filter, and leases them (`processing`, `attempts + 1`, a new `gen_random_uuid()` lease token). SKIP LOCKED
   alone is sufficient for ordering: only the head of a key is ever a candidate, and a racing claimer either skips the
@@ -133,8 +143,13 @@ same on every database.
   Followers stay blocked because the head remains pending or processing in every snapshot until it is completed or
   buried. The stress test in `test/claim-concurrency.integration.test.ts` runs 12 claimers on 3 pools against 30 keys
   and fails if a key is ever in flight twice or out of order. A keyed delivery is also not claimed while another
-  delivery of the same handler and key is processing, which covers a requeued or newly attached delivery re-entering
-  behind a running one.
+  delivery of the same handler and key holds a **live** lease, which covers a requeued or newly attached delivery
+  re-entering behind a running one. An expired lease does not block: if the running successor's worker crashed, the
+  requeued head is claimed after the lease expires and the successor follows once it completes.
+  Claiming first looks at the 256 earliest due deliveries (one cheap statement). Only when those are mostly followers of
+  blocked keys and fewer than `limit` were leased does a second statement find the head of every key with
+  `DISTINCT ON (handler, key)`, so a deep backlog behind one busy key costs one index-only scan instead of a probe per
+  follower.
 - **Fenced.** `complete`, `reschedule`, `bury`, `release` and `extendLease` apply only to
   `status = 'processing' AND lease_token = <token>`; a worker that lost its lease changes nothing. `complete` takes the
   handler's transaction, so a transactional handler's writes and its completion commit together.
@@ -144,14 +159,29 @@ same on every database.
 
 ## Operations
 
-- **Isolation.** Claiming runs as one autocommit statement and relies on `READ COMMITTED` (the PostgreSQL default). Do
-  not change `default_transaction_isolation` for the relaybus pool.
+- **Isolation.** Claiming runs as autocommit statements and relies on `READ COMMITTED` (the PostgreSQL default). Do
+  not change `default_transaction_isolation` for the relaybus pool. Your own publishing transaction may use a stricter
+  level, but under `REPEATABLE READ` or `SERIALIZABLE` PostgreSQL can abort it with `40001` (serialization failure);
+  retry the whole transaction.
+- **Deadlocks.** Publishing a keyed event locks that key's counter row until your transaction ends. Two transactions
+  that append keys in opposite order across **several** `append`/`publish` calls (A then B in one, B then A in the
+  other) can deadlock; PostgreSQL aborts one with `40P01`. The aborted transaction rolls back completely, nothing is
+  lost or half-written, and the caller should retry it. Publishing all keys of a transaction in one `publishAll` call
+  avoids the problem because the store locks them in sorted order.
 - **Retention.** `purge` deletes completed (`completed_at < cutoff`) and dead (`updated_at < cutoff`) deliveries in
   batches of `purgeBatchSize`, each batch in its own short transaction with `SKIP LOCKED`, then deletes the events left
-  without deliveries. Configure it through the bus `retention` option. Delete rows through `purge` only; events are
+  without deliveries, including events created before the earliest cutoff you passed that never had one (a publish
+  whose delivery was purged in the same instant, or an event with no subscriber). Configure it through the bus `retention` option. Delete rows through `purge` only; events are
   removed by cascade or by purge, never by hand while publishers are active.
 - **Lock duration.** A publisher holds its key's counter row until commit. Keep transactions that publish keyed events
   short; unkeyed events take no such lock.
+- **Key counters.** `key_sequences` keeps one row per key ever published and rows are never deleted; the table grows
+  with the number of distinct keys (a bigint counter each). Pick keys with bounded cardinality, or prune counters of keys
+  you know are retired once nothing for them is pending.
+- **Stored JSON.** Payloads and headers are stored as `jsonb`: object keys come back **reordered** (shorter keys first,
+  then bytewise) and duplicate keys collapse, values are otherwise identical. A string containing `\u0000` (NUL) or a
+  lone UTF-16 surrogate is rejected by PostgreSQL and fails the publish with a database error; strip or encode such
+  text before publishing.
 - **Sequence gaps.** Republishing an existing event id consumes a sequence number. Gaps are normal; only order matters.
 - **Pooling.** Claim, complete, extend and purge need a free connection besides your transactions; size the pool for
   `dispatcher.concurrency` plus publishers. With PgBouncer use session or transaction pooling; no session state is used.
@@ -170,7 +200,8 @@ same on every database.
   is purged. The publishing transaction rolls back and can simply be retried.
 - A key looks stuck: a pending or processing head blocks it. Inspect `listDeliveries({ status: 'processing' })` and
   `requeue` dead heads; expired leases are reclaimed automatically.
-- Events without any delivery (appended directly through the store) are never purged; `RelayBus` does not create them.
+- `deadlock detected` (`40P01`) or `could not serialize access` (`40001`) while publishing: see Deadlocks and
+  Isolation under Operations; retry the transaction.
 
 ## Testing
 

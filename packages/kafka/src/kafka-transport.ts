@@ -1,6 +1,6 @@
 import {
   ConfigurationError,
-  InvalidEnvelopeError,
+  NonRetryableError,
   RelayBusError,
   toErrorInfo,
   toMilliseconds,
@@ -22,6 +22,7 @@ import type {
   KafkaConsumerLike,
   KafkaEachMessagePayload,
   KafkaProducerLike,
+  KafkaProducerRecord,
 } from './kafka-client.js';
 
 /** A record the transport refused to hand to the bus because it is malformed. */
@@ -36,18 +37,36 @@ export interface InvalidKafkaMessage {
 }
 
 /**
- * What to do with a record that cannot be decoded:
- * - `'skip'` (default): log an error and move on.
+ * What to do with a record that cannot be processed for good (it cannot be
+ * decoded, or the bus rejected it with a `NonRetryableError`):
+ * - `'dead-letter'` (default): the original record is produced to
+ *   `<source topic>.dead` with `relaybus-invalid-reason`, `relaybus-source-topic`,
+ *   `relaybus-source-partition` and `relaybus-source-offset` headers added to the
+ *   original ones; the offset advances only after the broker acked the copy.
+ * - `{ deadLetterTopic }`: same, with a fixed topic name or a function of the
+ *   source topic.
  * - a function: called with the record; if it rejects, the record is retried
  *   like any other failure, so nothing is dropped unless the function returns.
- * - `{ deadLetterTopic }`: the original record is produced to that topic with
- *   `relaybus-invalid-reason`, `relaybus-source-topic`, `relaybus-source-partition`
- *   and `relaybus-source-offset` headers; the offset advances only after the ack.
+ * - `'skip'`: log an error and drop the record. Explicit opt-in only.
+ *
+ * The dead-letter topic must exist or the broker must auto-create topics;
+ * otherwise the send fails and the record stays uncommitted (nothing is lost).
  */
 export type InvalidMessagePolicy =
+  | 'dead-letter'
   | 'skip'
   | ((message: InvalidKafkaMessage) => void | Promise<void>)
-  | { readonly deadLetterTopic: string };
+  | { readonly deadLetterTopic: string | ((sourceTopic: string) => string) };
+
+/** `publish` did not get a broker ack within `publishTimeout`. The outbox retries it. */
+export class PublishTimeoutError extends RelayBusError {
+  override name = 'PublishTimeoutError';
+}
+
+/** A handler failure re-thrown to the Kafka client, stripped of anything that could make it fatal. */
+export class HandlerFailedError extends RelayBusError {
+  override name = 'HandlerFailedError';
+}
 
 /** Bounded in-process retries around the inbound handler (the bus's `receive`). */
 export interface KafkaProcessingOptions {
@@ -56,6 +75,16 @@ export interface KafkaProcessingOptions {
   /** Delay before the second attempt; doubles each attempt. Default `'200ms'`. */
   readonly initialBackoff?: Duration;
   /** Upper bound of the delay between attempts. Default `'5s'`. */
+  readonly maxBackoff?: Duration;
+  /** Interval of the heartbeats sent while sleeping between attempts. Default `'1s'`. */
+  readonly heartbeatInterval?: Duration;
+}
+
+/** Backoff of the consumer restart loop that runs after an unrecoverable crash. */
+export interface KafkaRestartOptions {
+  /** Delay before the second restart attempt; doubles each failure. Default `'1s'`. */
+  readonly initialBackoff?: Duration;
+  /** Upper bound of the delay between restart attempts. Default `'30s'`. */
   readonly maxBackoff?: Duration;
 }
 
@@ -80,7 +109,10 @@ export interface KafkaTransportOptions {
   readonly processing?: KafkaProcessingOptions;
   /** How long `subscribe` waits for the consumer group join before failing. Default `'30s'`. */
   readonly startupTimeout?: Duration;
-  /** Handling of undecodable records. Default `'skip'`. */
+  /** How long `publish` waits for the broker ack before rejecting. Default `'30s'`. */
+  readonly publishTimeout?: Duration;
+  readonly restart?: KafkaRestartOptions;
+  /** Handling of records that cannot be processed for good. Default `'dead-letter'`. */
   readonly onInvalidMessage?: InvalidMessagePolicy;
   /** Default `console`. */
   readonly logger?: RelayBusLogger;
@@ -93,6 +125,10 @@ const DEFAULTS = {
   initialBackoff: '200ms',
   maxBackoff: '5s',
   startupTimeout: '30s',
+  publishTimeout: '30s',
+  heartbeatInterval: '1s',
+  restartInitialBackoff: '1s',
+  restartMaxBackoff: '30s',
 } as const;
 
 type TransportState = 'idle' | 'subscribed' | 'closed';
@@ -102,23 +138,32 @@ interface Settings {
   readonly initialBackoffMs: number;
   readonly maxBackoffMs: number;
   readonly startupTimeoutMs: number;
+  readonly publishTimeoutMs: number;
+  readonly heartbeatIntervalMs: number;
+  readonly restartInitialBackoffMs: number;
+  readonly restartMaxBackoffMs: number;
 }
 
 /**
  * Kafka {@link Transport}. Events travel as CloudEvents binary-mode records
  * (`ce_*` headers, JSON value), so any CloudEvents-aware consumer can read them.
  *
- * Publishing: idempotent producer, `acks=-1`, resolves after the broker ack.
- * The record key is the envelope key, so events sharing a key land on one
+ * Publishing: idempotent producer, `acks=-1`, resolves after the broker ack and
+ * rejects with {@link PublishTimeoutError} after `publishTimeout`. A timed-out
+ * send may still complete later; the outbox then retries it and the duplicate is
+ * absorbed by the consumer's inbox dedup. The record key is the envelope key, so events sharing a key land on one
  * partition and keep their order; events without a key have no ordering.
  *
  * Subscribing: one consumer, one group, one `subscribe` call. `eachMessage`
  * awaits the handler; the client commits the offset only after it resolved. A
  * failing handler is retried in-process (bounded, with backoff) and then the
- * error is rethrown to the client, which does not commit the offset and
- * redelivers the record. A record is therefore never skipped because of a
- * handler failure; the partition simply waits. That is acceptable because the
- * handler is `RelayBus.receive`, a single idempotent insert.
+ * error is rethrown (as a {@link HandlerFailedError}, so the client never treats
+ * it as fatal) and the client does not commit the offset and redelivers the
+ * record. A record is therefore never skipped because of a handler failure; the
+ * partition simply waits. Records that can never succeed (undecodable, or
+ * rejected with a `NonRetryableError`) are dead-lettered instead. If the client
+ * reports an unrecoverable crash anyway, the consumer run loop is restarted with
+ * bounded backoff until the transport is closed.
  */
 export class KafkaTransport implements Transport {
   readonly name: string;
@@ -136,7 +181,11 @@ export class KafkaTransport implements Transport {
   #producer: Promise<KafkaProducerLike> | undefined;
   #consumer: KafkaConsumerLike | undefined;
   #groupJoined = false;
-  #stalled = false;
+  #consuming = false;
+  #producerConnected = false;
+  #restartLoop: Promise<void> | undefined;
+  readonly #stalledPartitions = new Set<string>();
+  #startConsuming: (() => Promise<void>) | undefined;
   #joinWaiter: { resolve(): void; reject(error: unknown): void } | undefined;
 
   constructor(options: KafkaTransportOptions) {
@@ -156,18 +205,31 @@ export class KafkaTransport implements Transport {
     }
     this.#producerConfig = options.producerConfig ?? {};
     this.#consumerConfig = options.consumerConfig ?? {};
-    this.#invalidPolicy = options.onInvalidMessage ?? 'skip';
+    this.#invalidPolicy = options.onInvalidMessage ?? 'dead-letter';
     this.#logger = options.logger ?? console;
     this.#settings = resolveSettings(options);
   }
 
   /**
    * True while the consumer is joined to its group, not between a crash or
-   * rebalance and the next join, and not stalled on a record whose handler keeps
-   * failing. Use it for readiness so a consumer that silently stopped is noticed.
+   * rebalance and the next join, and no partition is stalled on a record whose
+   * handler keeps failing. Use it for readiness so a consumer that silently
+   * stopped is noticed.
    */
   isConsuming(): boolean {
-    return this.#state === 'subscribed' && this.#groupJoined && !this.#stalled;
+    return this.#state === 'subscribed' && this.#groupJoined && this.#stalledPartitions.size === 0;
+  }
+
+  /**
+   * True once the producer is connected and, if the transport subscribed, the
+   * consumer is consuming. False before `connect`, after `close` and while a
+   * dead consumer is being restarted.
+   */
+  isReady(): boolean {
+    if (this.#state === 'closed' || !this.#producerConnected) {
+      return false;
+    }
+    return this.#state === 'idle' || this.isConsuming();
   }
 
   /** Connects the producer. Called by the bus on start; `publish` also connects on demand. */
@@ -178,7 +240,11 @@ export class KafkaTransport implements Transport {
   async publish(envelope: EventEnvelope, destination: string): Promise<void> {
     const producer = await this.#connectedProducer();
     const { key, value, headers } = encodeEnvelope(envelope);
-    await producer.send({ topic: destination, acks: -1, messages: [{ key, value, headers }] });
+    await this.#send(producer, {
+      topic: destination,
+      acks: -1,
+      messages: [{ key, value, headers }],
+    });
   }
 
   /**
@@ -197,8 +263,31 @@ export class KafkaTransport implements Transport {
     const consumer = this.#kafka.consumer({ ...this.#consumerConfig, groupId: this.#groupId! });
     this.#consumer = consumer;
     this.#observeConsumer(consumer);
+    const start = (): Promise<void> => this.#startConsumer(consumer, [...destinations], onMessage);
+    this.#startConsuming = start;
+    try {
+      await start();
+    } catch (error) {
+      // A consumer left half-started would keep running (or retrying) with nobody watching it.
+      await consumer.disconnect().catch(() => undefined);
+      this.#groupJoined = false;
+      this.#consumer = undefined;
+      this.#state = 'idle';
+      throw error;
+    }
+    this.#consuming = true;
+    this.#logger.log(
+      `[KafkaTransport](subscribe) Consuming | transport=${this.name} group=${this.#groupId} topics=${destinations.join(',')}`,
+    );
+  }
+
+  async #startConsumer(
+    consumer: KafkaConsumerLike,
+    destinations: string[],
+    onMessage: TransportMessageHandler,
+  ): Promise<void> {
     await consumer.connect();
-    await consumer.subscribe({ topics: [...destinations], fromBeginning: this.#fromBeginning });
+    await consumer.subscribe({ topics: destinations, fromBeginning: this.#fromBeginning });
     const joined = this.#waitForGroupJoin(consumer);
     try {
       await consumer.run({ eachMessage: (payload) => this.#handleMessage(payload, onMessage) });
@@ -206,9 +295,6 @@ export class KafkaTransport implements Transport {
     } finally {
       joined.dispose();
     }
-    this.#logger.log(
-      `[KafkaTransport](subscribe) Consuming | transport=${this.name} group=${this.#groupId} topics=${destinations.join(',')}`,
-    );
   }
 
   /** Stops consuming and disconnects the consumer and the producer. Safe to call twice. */
@@ -217,11 +303,15 @@ export class KafkaTransport implements Transport {
       return;
     }
     this.#state = 'closed';
+    const pendingProducer = this.#producer;
     this.#groupJoined = false;
+    this.#producerConnected = false;
     for (const wake of this.#sleepers) {
       wake();
     }
-    const producer = await this.#producer?.catch(() => undefined);
+    this.#joinWaiter?.reject(new RelayBusError(`Transport '${this.name}' is closed`));
+    await this.#restartLoop;
+    const producer = await pendingProducer?.catch(() => undefined);
     const results = await Promise.allSettled([
       this.#consumer?.disconnect(),
       producer?.disconnect(),
@@ -247,11 +337,47 @@ export class KafkaTransport implements Transport {
     if (destinations.length === 0) {
       throw new ConfigurationError(`Transport '${this.name}' subscribed to no topics`);
     }
+    for (const topic of destinations) {
+      const deadLetterTopic = this.#deadLetterTopicFor(topic);
+      if (deadLetterTopic !== undefined && destinations.includes(deadLetterTopic)) {
+        throw new ConfigurationError(
+          `Dead letter topic '${deadLetterTopic}' is also consumed, which would loop`,
+        );
+      }
+    }
+  }
+
+  /** The dead-letter topic for records of `sourceTopic`, or undefined when the policy does not use one. */
+  #deadLetterTopicFor(sourceTopic: string): string | undefined {
     const policy = this.#invalidPolicy;
-    if (typeof policy === 'object' && destinations.includes(policy.deadLetterTopic)) {
-      throw new ConfigurationError(
-        `Dead letter topic '${policy.deadLetterTopic}' is also consumed, which would loop`,
-      );
+    if (policy === 'dead-letter') {
+      return `${sourceTopic}.dead`;
+    }
+    if (typeof policy === 'object') {
+      const { deadLetterTopic } = policy;
+      return typeof deadLetterTopic === 'function' ? deadLetterTopic(sourceTopic) : deadLetterTopic;
+    }
+    return undefined;
+  }
+
+  /** Sends with the publish timeout; the late outcome of a timed-out send is ignored. */
+  async #send(producer: KafkaProducerLike, record: KafkaProducerRecord): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(
+          new PublishTimeoutError(
+            `Transport '${this.name}' got no broker ack for topic '${record.topic}' within ${this.#settings.publishTimeoutMs}ms`,
+          ),
+        );
+      }, this.#settings.publishTimeoutMs);
+    });
+    const sending = producer.send(record);
+    sending.catch(() => undefined);
+    try {
+      await Promise.race([sending, timeout]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -275,6 +401,7 @@ export class KafkaTransport implements Transport {
       this.#producer = undefined;
       throw error;
     }
+    this.#producerConnected = this.#state !== 'closed';
     return producer;
   }
 
@@ -287,7 +414,7 @@ export class KafkaTransport implements Transport {
       envelope = decodeEnvelope(payload.message);
     } catch (error) {
       if (!(error instanceof InvalidKafkaMessageError)) {
-        throw error;
+        throw toHandlerFailure(error);
       }
       await this.#withRetries(payload, 'handleInvalid', () =>
         this.#handleInvalid(payload, error.message),
@@ -299,7 +426,7 @@ export class KafkaTransport implements Transport {
         await onMessage(envelope);
       } catch (error) {
         // The bus rejected the event for good; redelivering it would block the partition forever.
-        if (!(error instanceof InvalidEnvelopeError)) {
+        if (!(error instanceof NonRetryableError)) {
           throw error;
         }
         await this.#handleInvalid(payload, error.message);
@@ -311,6 +438,7 @@ export class KafkaTransport implements Transport {
     const { topic, partition, message } = payload;
     const location = `topic=${topic} partition=${partition} offset=${message.offset}`;
     const policy = this.#invalidPolicy;
+    const deadLetterTopic = this.#deadLetterTopicFor(topic);
     if (policy === 'skip') {
       this.#logger.error(
         `[KafkaTransport](handleInvalid) Skipping malformed message | ${location} reason=${reason}`,
@@ -326,8 +454,8 @@ export class KafkaTransport implements Transport {
       });
     } else {
       const producer = await this.#connectedProducer();
-      await producer.send({
-        topic: policy.deadLetterTopic,
+      await this.#send(producer, {
+        topic: deadLetterTopic!,
         acks: -1,
         messages: [
           {
@@ -344,7 +472,7 @@ export class KafkaTransport implements Transport {
         ],
       });
       this.#logger.error(
-        `[KafkaTransport](handleInvalid) Dead-lettered malformed message | ${location} deadLetterTopic=${policy.deadLetterTopic} reason=${reason}`,
+        `[KafkaTransport](handleInvalid) Dead-lettered malformed message | ${location} deadLetterTopic=${deadLetterTopic} reason=${reason}`,
       );
     }
   }
@@ -361,27 +489,44 @@ export class KafkaTransport implements Transport {
   ): Promise<void> {
     const { maxAttempts, initialBackoffMs, maxBackoffMs } = this.#settings;
     const location = `topic=${payload.topic} partition=${payload.partition} offset=${payload.message.offset}`;
+    const partitionKey = `${payload.topic}:${payload.partition}`;
     for (let attempt = 1; ; attempt += 1) {
       try {
         await operation();
-        this.#stalled = false;
+        this.#stalledPartitions.delete(partitionKey);
         return;
       } catch (error) {
         const reason = toErrorInfo(error).message;
         if (attempt >= maxAttempts || this.#state === 'closed') {
-          this.#stalled = true;
+          this.#stalledPartitions.add(partitionKey);
           this.#logger.error(
             `[KafkaTransport](${method}) Giving up for now, the record stays uncommitted and will be redelivered | ${location} attempts=${attempt} error=${reason}`,
           );
-          throw error;
+          throw toHandlerFailure(error);
         }
         this.#logger.warn(
           `[KafkaTransport](${method}) Attempt failed, retrying | ${location} attempt=${attempt} error=${reason}`,
         );
-        await this.#sleep(Math.min(initialBackoffMs * 2 ** (attempt - 1), maxBackoffMs));
-        await payload.heartbeat();
+        await this.#sleepWithHeartbeats(
+          Math.min(initialBackoffMs * 2 ** (attempt - 1), maxBackoffMs),
+          payload,
+        );
       }
     }
+  }
+
+  /** Sleeps in slices and heartbeats after each, so a long backoff never outlives the session timeout. */
+  async #sleepWithHeartbeats(
+    milliseconds: number,
+    payload: KafkaEachMessagePayload,
+  ): Promise<void> {
+    let remaining = milliseconds;
+    do {
+      const slice = Math.min(remaining, this.#settings.heartbeatIntervalMs);
+      await this.#sleep(slice);
+      await payload.heartbeat();
+      remaining -= slice;
+    } while (remaining > 0 && this.#state !== 'closed');
   }
 
   #sleep(milliseconds: number): Promise<void> {
@@ -422,6 +567,8 @@ export class KafkaTransport implements Transport {
     });
     listen(names.REBALANCING, () => {
       this.#groupJoined = false;
+      // The partition assignment is about to change; a stall is re-detected if it persists.
+      this.#stalledPartitions.clear();
       this.#logger.warn(`[KafkaTransport](observeConsumer) Rebalancing | group=${this.#groupId}`);
     });
     listen(names.CRASH, (event) => this.#handleCrash(event));
@@ -440,6 +587,40 @@ export class KafkaTransport implements Transport {
       `[KafkaTransport](handleCrash) Consumer crashed | group=${this.#groupId} restart=${String(restart)} error=${toErrorInfo(error).message}`,
     );
     this.#joinWaiter?.reject(error);
+    if (restart === false && this.#consuming && this.#restartLoop === undefined) {
+      this.#restartLoop = this.#restartConsumer().finally(() => {
+        this.#restartLoop = undefined;
+      });
+    }
+  }
+
+  /**
+   * The client gave up on the consumer (`restart=false`): reconnect it and run
+   * again, with bounded backoff, until it joined or the transport closed.
+   */
+  async #restartConsumer(): Promise<void> {
+    const { restartInitialBackoffMs, restartMaxBackoffMs } = this.#settings;
+    const consumer = this.#consumer!;
+    for (let attempt = 1; this.#state === 'subscribed'; attempt += 1) {
+      await this.#sleep(
+        Math.min(restartInitialBackoffMs * 2 ** (attempt - 1), restartMaxBackoffMs),
+      );
+      if (this.#state !== 'subscribed') {
+        return;
+      }
+      await consumer.disconnect().catch(() => undefined);
+      try {
+        await this.#startConsuming!();
+        this.#logger.log(
+          `[KafkaTransport](restartConsumer) Consumer restarted | group=${this.#groupId} attempt=${attempt}`,
+        );
+        return;
+      } catch (error) {
+        this.#logger.error(
+          `[KafkaTransport](restartConsumer) Restart failed, will retry | group=${this.#groupId} attempt=${attempt} error=${toErrorInfo(error).message}`,
+        );
+      }
+    }
   }
 
   #waitForGroupJoin(consumer: KafkaConsumerLike): { promise: Promise<void>; dispose(): void } {
@@ -490,5 +671,35 @@ function resolveSettings(options: KafkaTransportOptions): Settings {
       options.startupTimeout ?? DEFAULTS.startupTimeout,
       'startupTimeout',
     ),
+    publishTimeoutMs: toMilliseconds(
+      options.publishTimeout ?? DEFAULTS.publishTimeout,
+      'publishTimeout',
+    ),
+    heartbeatIntervalMs: Math.max(
+      1,
+      toMilliseconds(
+        options.processing?.heartbeatInterval ?? DEFAULTS.heartbeatInterval,
+        'processing.heartbeatInterval',
+      ),
+    ),
+    restartInitialBackoffMs: toMilliseconds(
+      options.restart?.initialBackoff ?? DEFAULTS.restartInitialBackoff,
+      'restart.initialBackoff',
+    ),
+    restartMaxBackoffMs: toMilliseconds(
+      options.restart?.maxBackoff ?? DEFAULTS.restartMaxBackoff,
+      'restart.maxBackoff',
+    ),
   };
+}
+
+/**
+ * Wraps a failure in a fresh error before it goes back to the Kafka client.
+ * kafkajs classifies errors by type and cause chain: a handler that throws a
+ * `TypeError` would be marked unrecoverable and kill the consumer for good.
+ * The wrapper carries the original name and message but no `cause`.
+ */
+function toHandlerFailure(error: unknown): Error {
+  const { name, message } = toErrorInfo(error);
+  return new HandlerFailedError(`${name}: ${message}`);
 }

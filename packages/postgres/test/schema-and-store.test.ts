@@ -122,6 +122,17 @@ describe('PostgresEventStore options', () => {
         now: new Date(),
       }),
     ).resolves.toEqual([]);
+    for (const limit of [0, -3, Number.NaN]) {
+      await expect(
+        store.claim({
+          handlers: ['h'],
+          limit,
+          leaseOwner: 'w',
+          leaseExpiresAt: new Date(),
+          now: new Date(),
+        }),
+      ).resolves.toEqual([]);
+    }
     await expect(store.append({} as never, [], new Date())).resolves.toEqual({
       appendedEventIds: [],
       duplicateEventIds: [],

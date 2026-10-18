@@ -26,6 +26,7 @@ import type {
   TransactionOptions,
   UpdateFilter,
 } from 'mongodb';
+import { ClaimScan, orderingIdentity } from './claim-scan.js';
 import {
   toDeliveryDocument,
   toDeliveryRecord,
@@ -69,9 +70,14 @@ const NAMESPACE_EXISTS = 48;
 const DEFAULT_PURGE_BATCH_SIZE = 500;
 const DEFAULT_LIST_LIMIT = 100;
 const MINIMUM_CANDIDATE_BATCH_SIZE = 32;
+/** Deliveries that waited behind one unfinished predecessor before they are parked. */
+const PARK_BACKLOG_THRESHOLD = 32;
+const PARK_UPDATE_CHUNK_SIZE = 1_000;
 
 /** Fields that exist only while a delivery is leased. */
 const LEASE_FIELDS = { leaseOwner: '', leaseToken: '', leaseExpiresAt: '' } as const;
+/** Fields that exist only while a delivery is unfinished. */
+const FINISHED_FIELDS = { dueAt: '', lane: '' } as const;
 
 /**
  * Event store on MongoDB 6+ multi-document transactions (replica set or sharded
@@ -87,7 +93,11 @@ const LEASE_FIELDS = { leaseOwner: '', leaseToken: '', leaseExpiresAt: '' } as c
  *   counter, so the loser conflicts, restarts after the winner committed, and
  *   its sequence is higher: sequence order is commit order.
  * - `claim` selects candidates, then takes each with a conditional update that
- *   re-checks the exact state it selected, so exactly one claimer wins.
+ *   re-checks the exact state it selected, so exactly one claimer wins. A keyed
+ *   delivery waits while an earlier delivery of its handler and key is
+ *   unfinished, or while any other delivery of them runs under a live lease;
+ *   the second rule is re-checked after the update, so a dead letter requeued
+ *   during a claim cannot run alongside its successor.
  * - Every lease operation is fenced by delivery id, status and lease token.
  *
  * `transaction` may run `work` more than once (see {@link MongoEventStore.transaction}).
@@ -150,17 +160,29 @@ export class MongoEventStore implements EventStore<ClientSession> {
     await this.#deliveries.createIndexes([
       // Idempotent appends and lookups by event.
       { key: { eventId: 1, handler: 1 }, name: 'event_handler', unique: true },
-      // Claim: due work of a handler in due order. Holds unfinished deliveries only.
+      // Claim: due work of a handler in due order. Holds ready deliveries only.
       {
         key: { handler: 1, dueAt: 1, _id: 1 },
         name: 'claim',
-        partialFilterExpression: { dueAt: { $exists: true } },
+        partialFilterExpression: { lane: 'ready' },
       },
-      // Ordering: unfinished predecessors of a keyed delivery.
+      // Ordering: unfinished predecessors of a keyed delivery, parked or not.
       {
         key: { handler: 1, key: 1, sequence: 1 },
         name: 'ordering',
         partialFilterExpression: { dueAt: { $exists: true }, sequence: { $exists: true } },
+      },
+      // Parked deliveries: the lowest parked delivery of each key, to move it back once it is next.
+      {
+        key: { handler: 1, key: 1, sequence: 1 },
+        name: 'parked',
+        partialFilterExpression: { lane: 'parked' },
+      },
+      // Live leases: a keyed delivery may not start while another of its key is running.
+      {
+        key: { handler: 1, key: 1, dueAt: 1 },
+        name: 'running',
+        partialFilterExpression: { status: 'processing', key: { $exists: true } },
       },
       // Statistics: oldest due delivery across handlers.
       { key: { dueAt: 1 }, name: 'due', partialFilterExpression: { dueAt: { $exists: true } } },
@@ -172,6 +194,8 @@ export class MongoEventStore implements EventStore<ClientSession> {
       },
       // Listing and status counts.
       { key: { status: 1, createdAt: 1 }, name: 'status_created' },
+      // Purge of dead deliveries.
+      { key: { status: 1, updatedAt: 1 }, name: 'status_updated' },
       { key: { handler: 1, createdAt: 1 }, name: 'handler_created' },
       { key: { eventType: 1, createdAt: 1 }, name: 'type_created' },
     ]);
@@ -226,6 +250,7 @@ export class MongoEventStore implements EventStore<ClientSession> {
     entries: readonly AppendEntry[],
     now: Date,
   ): Promise<AppendResult> {
+    assertInTransaction(session, 'append');
     const eventIds = [...new Set(entries.map((entry) => entry.event.id))];
     const storedEvents = new Map(
       (
@@ -320,13 +345,11 @@ export class MongoEventStore implements EventStore<ClientSession> {
     if (request.handlers.length === 0 || request.limit <= 0) {
       return [];
     }
+    await this.#unparkNextDeliveries(request.handlers);
     const claimed: DeliveryDocument[] = [];
-    // Keys that already have an in-flight delivery of ours, or the lowest sequence
-    // found blocked per key. Every later candidate of the key is blocked as well.
-    const claimedKeys = new Set<string>();
-    const blockedFromSequence = new Map<string, number>();
+    const scan = new ClaimScan();
     const candidates = this.#deliveries.find(
-      { handler: { $in: [...request.handlers] }, dueAt: { $lte: request.now } },
+      { handler: { $in: [...request.handlers] }, dueAt: { $lte: request.now }, lane: 'ready' },
       {
         sort: { dueAt: 1, _id: 1 },
         batchSize: Math.max(request.limit * 2, MINIMUM_CANDIDATE_BATCH_SIZE),
@@ -334,12 +357,7 @@ export class MongoEventStore implements EventStore<ClientSession> {
     );
     try {
       for await (const candidate of candidates) {
-        const leased = await this.#claimCandidate(
-          candidate,
-          request,
-          claimedKeys,
-          blockedFromSequence,
-        );
+        const leased = await this.#claimCandidate(candidate, request, scan);
         if (leased !== undefined) {
           claimed.push(leased);
           if (claimed.length >= request.limit) {
@@ -350,6 +368,7 @@ export class MongoEventStore implements EventStore<ClientSession> {
     } finally {
       await candidates.close();
     }
+    await this.#parkDeliveries(scan.waitingBacklogs(PARK_BACKLOG_THRESHOLD));
     return this.#toClaimedDeliveries(claimed, request.leaseExpiresAt);
   }
 
@@ -360,9 +379,12 @@ export class MongoEventStore implements EventStore<ClientSession> {
   }
 
   async complete(lease: LeaseReference, now: Date, session?: ClientSession): Promise<boolean> {
+    if (session !== undefined) {
+      assertInTransaction(session, 'complete');
+    }
     return this.#updateLeased(lease, session, {
       $set: { status: 'completed', completedAt: now, updatedAt: now },
-      $unset: { ...LEASE_FIELDS, dueAt: '' },
+      $unset: { ...LEASE_FIELDS, ...FINISHED_FIELDS },
     });
   }
 
@@ -395,16 +417,17 @@ export class MongoEventStore implements EventStore<ClientSession> {
   async bury(lease: LeaseReference, error: ErrorInfo, now: Date): Promise<boolean> {
     return this.#updateLeased(lease, undefined, {
       $set: { status: 'dead', lastError: toErrorInfo(error), updatedAt: now },
-      $unset: { ...LEASE_FIELDS, dueAt: '' },
+      $unset: { ...LEASE_FIELDS, ...FINISHED_FIELDS },
     });
   }
 
   async listDeliveries(query: DeliveryQuery): Promise<DeliveryRecord[]> {
+    // Strings only: an object here (say, parsed from an admin request) would be a query operator.
     const filter: Filter<DeliveryDocument> = {
-      ...(query.status === undefined ? {} : { status: query.status }),
-      ...(query.handler === undefined ? {} : { handler: query.handler }),
-      ...(query.eventType === undefined ? {} : { eventType: query.eventType }),
-      ...(query.eventId === undefined ? {} : { eventId: query.eventId }),
+      ...(query.status === undefined ? {} : { status: String(query.status) as DeliveryStatus }),
+      ...(query.handler === undefined ? {} : { handler: String(query.handler) }),
+      ...(query.eventType === undefined ? {} : { eventType: String(query.eventType) }),
+      ...(query.eventId === undefined ? {} : { eventId: String(query.eventId) }),
     };
     const documents = await this.#deliveries
       .find(filter, { sort: { createdAt: 1, _id: 1 }, limit: query.limit ?? DEFAULT_LIST_LIMIT })
@@ -415,8 +438,17 @@ export class MongoEventStore implements EventStore<ClientSession> {
 
   async requeue(deliveryIds: readonly string[], now: Date): Promise<number> {
     const result = await this.#deliveries.updateMany(
-      { _id: { $in: [...deliveryIds] }, status: 'dead' },
-      { $set: { status: 'pending', attempts: 0, availableAt: now, dueAt: now, updatedAt: now } },
+      { _id: { $in: deliveryIds.map(String) }, status: 'dead' },
+      {
+        $set: {
+          status: 'pending',
+          lane: 'ready',
+          attempts: 0,
+          availableAt: now,
+          dueAt: now,
+          updatedAt: now,
+        },
+      },
     );
     return result.modifiedCount;
   }
@@ -440,6 +472,8 @@ export class MongoEventStore implements EventStore<ClientSession> {
   }
 
   async statistics(now: Date): Promise<EventStoreStatistics> {
+    // Four index-only counts: measured at 300k deliveries they take 27 ms in parallel, against
+    // 121 ms for one $group, which has to read every document or index entry.
     const statuses: DeliveryStatus[] = ['pending', 'processing', 'completed', 'dead'];
     const [pending, processing, completed, dead] = await Promise.all(
       statuses.map((status) => this.#deliveries.countDocuments({ status })),
@@ -470,27 +504,62 @@ export class MongoEventStore implements EventStore<ClientSession> {
   async #claimCandidate(
     candidate: DeliveryDocument,
     request: ClaimRequest,
-    claimedKeys: Set<string>,
-    blockedFromSequence: Map<string, number>,
+    scan: ClaimScan,
   ): Promise<DeliveryDocument | undefined> {
     const { key, sequence } = candidate;
-    const orderingId = key === undefined ? undefined : `${candidate.handler}\u0000${key}`;
-    if (orderingId !== undefined) {
-      const blockedFrom = blockedFromSequence.get(orderingId);
-      if (claimedKeys.has(orderingId) || (blockedFrom !== undefined && sequence! >= blockedFrom)) {
-        return undefined;
-      }
-      if (await this.#hasUnfinishedPredecessor(candidate.handler, key!, sequence!)) {
-        blockedFromSequence.set(orderingId, Math.min(blockedFrom ?? sequence!, sequence!));
-        return undefined;
-      }
+    if (key === undefined) {
+      return this.#lease(candidate, request);
     }
-    // The filter pins the exact state that was selected, so a competing claimer,
-    // a finished lease or a reschedule since then makes this update match nothing.
+    const orderingId = orderingIdentity(candidate.handler, key);
+    const known = scan.verdict(orderingId, sequence!);
+    if (known === 'open-predecessor') {
+      scan.noteWaiting(orderingId, candidate);
+      return undefined;
+    }
+    if (known === 'live-lease') {
+      return undefined;
+    }
+    const predecessor = await this.#findUnfinishedPredecessor(candidate.handler, key, sequence!);
+    if (predecessor !== undefined) {
+      scan.noteOpen(orderingId, predecessor);
+      scan.noteWaiting(orderingId, candidate);
+      return undefined;
+    }
+    if (await this.#hasLiveLease(candidate.handler, key, request.now)) {
+      scan.noteLeaseHeld(orderingId);
+      return undefined;
+    }
+    const leased = await this.#lease(candidate, request);
+    if (leased === undefined) {
+      return undefined;
+    }
+    // A dead letter requeued after the checks above can be claimed by another worker
+    // before this lease is visible to it, and neither check would see the other. Only
+    // the later delivery gives way, so exactly one of the two keeps running.
+    const lateBlocker = await this.#findUnfinishedPredecessor(candidate.handler, key, sequence!);
+    if (lateBlocker !== undefined) {
+      await this.#restore(candidate, leased);
+      scan.noteOpen(orderingId, lateBlocker);
+      return undefined;
+    }
+    scan.noteClaimed(orderingId, sequence!);
+    return leased;
+  }
+
+  /**
+   * Takes the delivery with one conditional update that pins the exact state
+   * that was selected, so a competing claimer, a finished lease, a reschedule
+   * or a parking since then makes it match nothing.
+   */
+  async #lease(
+    candidate: DeliveryDocument,
+    request: ClaimRequest,
+  ): Promise<DeliveryDocument | undefined> {
     const leased = await this.#deliveries.findOneAndUpdate(
       {
         _id: candidate._id,
         status: candidate.status,
+        lane: 'ready',
         attempts: candidate.attempts,
         dueAt: candidate.dueAt!,
       },
@@ -507,22 +576,114 @@ export class MongoEventStore implements EventStore<ClientSession> {
       },
       { returnDocument: 'after' },
     );
-    if (leased !== null && orderingId !== undefined) {
-      claimedKeys.add(orderingId);
-    }
     return leased ?? undefined;
   }
 
-  async #hasUnfinishedPredecessor(
+  /** Puts a delivery that was leased a moment ago back exactly as it was selected. */
+  async #restore(selected: DeliveryDocument, leased: DeliveryDocument): Promise<void> {
+    const state = {
+      status: selected.status,
+      attempts: selected.attempts,
+      dueAt: selected.dueAt!,
+      updatedAt: selected.updatedAt,
+    };
+    await this.#deliveries.updateOne(
+      { _id: leased._id, status: 'processing', leaseToken: leased.leaseToken! },
+      selected.status === 'processing'
+        ? {
+            $set: {
+              ...state,
+              leaseOwner: selected.leaseOwner!,
+              leaseToken: selected.leaseToken!,
+              leaseExpiresAt: selected.leaseExpiresAt!,
+            },
+          }
+        : { $set: state, $unset: LEASE_FIELDS },
+    );
+  }
+
+  /** Sequence of the lowest unfinished delivery of the handler and key before `sequence`, if any. */
+  async #findUnfinishedPredecessor(
     handler: string,
     key: string,
     sequence: number,
-  ): Promise<boolean> {
+  ): Promise<number | undefined> {
     const predecessor = await this.#deliveries.findOne(
       { handler, key, sequence: { $lt: sequence }, dueAt: { $exists: true } },
+      { sort: { sequence: 1 }, projection: { sequence: 1 } },
+    );
+    return predecessor?.sequence;
+  }
+
+  /** Whether some delivery of the handler and key runs under a lease that has not expired. */
+  async #hasLiveLease(handler: string, key: string, now: Date): Promise<boolean> {
+    const running = await this.#deliveries.findOne(
+      { handler, key, status: 'processing', dueAt: { $gt: now } },
       { projection: { _id: 1 } },
     );
-    return predecessor !== null;
+    return running !== null;
+  }
+
+  /**
+   * Parks pending deliveries that waited behind an unfinished predecessor, which
+   * removes them from the claim index until their turn. Parking is a hint, not a
+   * guarantee: a predecessor that finishes meanwhile is found by the next
+   * {@link MongoEventStore.claim}, which moves the lowest parked delivery back.
+   */
+  async #parkDeliveries(deliveryIds: readonly string[]): Promise<void> {
+    for (let offset = 0; offset < deliveryIds.length; offset += PARK_UPDATE_CHUNK_SIZE) {
+      await this.#deliveries.updateMany(
+        {
+          _id: { $in: deliveryIds.slice(offset, offset + PARK_UPDATE_CHUNK_SIZE) },
+          status: 'pending',
+          lane: 'ready',
+        },
+        { $set: { lane: 'parked' } },
+      );
+    }
+  }
+
+  /**
+   * Moves the lowest parked delivery of every parked key of `handlers` back into
+   * the claim index when nothing unfinished precedes it. Level-triggered on
+   * purpose: it looks at the current state only, so a crash anywhere, or a
+   * predecessor finishing while its followers were being parked, can delay a key
+   * until the next claim but never strand it.
+   */
+  async #unparkNextDeliveries(handlers: readonly string[]): Promise<void> {
+    const anyParked = await this.#deliveries.findOne(
+      { handler: { $in: [...handlers] }, lane: 'parked' },
+      // The sort lets the planner pick the small partial index over the handler's whole history.
+      { sort: { handler: 1, key: 1, sequence: 1 }, projection: { _id: 1 } },
+    );
+    if (anyParked === null) {
+      return;
+    }
+    for (const handler of new Set(handlers)) {
+      let afterKey: string | undefined;
+      for (;;) {
+        const lowest = await this.#deliveries.findOne(
+          {
+            handler,
+            lane: 'parked',
+            ...(afterKey === undefined ? {} : { key: { $gt: afterKey } }),
+          },
+          { sort: { key: 1, sequence: 1 }, projection: { key: 1, sequence: 1 } },
+        );
+        if (lowest === null) {
+          break;
+        }
+        afterKey = lowest.key!;
+        if (
+          (await this.#findUnfinishedPredecessor(handler, afterKey, lowest.sequence!)) === undefined
+        ) {
+          await this.#deliveries.updateOne(
+            { _id: lowest._id, lane: 'parked' },
+            { $set: { lane: 'ready' } },
+          );
+        }
+      }
+    }
   }
 
   async #toClaimedDeliveries(
@@ -555,53 +716,65 @@ export class MongoEventStore implements EventStore<ClientSession> {
       update,
       session === undefined ? {} : { session },
     );
-    return result.modifiedCount === 1;
+    // Matched, not modified: a repeated renewal with identical values changes nothing but still holds the lease.
+    return result.matchedCount === 1;
   }
 
+  /**
+   * Deletes batches of matching deliveries together with the events no delivery
+   * references any more, each batch in one transaction, so a crash can never
+   * leave an event without deliveries behind. An append adding a delivery to the
+   * same event writes the event document, so the two conflict and one restarts
+   * instead of leaving a delivery without event. A delivery requeued since the
+   * batch was read conflicts with its deletion and is read again.
+   */
   async #purgeMatching(filter: Filter<DeliveryDocument>): Promise<PurgeResult> {
     let deletedDeliveries = 0;
     let deletedEvents = 0;
     for (;;) {
-      const batch = await this.#deliveries
-        .find(filter, { projection: { eventId: 1 }, limit: this.#purgeBatchSize })
-        .toArray();
-      if (batch.length === 0) {
-        return { deletedDeliveries, deletedEvents };
-      }
-      // The filter is repeated so a delivery requeued since the read is kept.
-      const deleted = await this.#deliveries.deleteMany({
-        $and: [{ _id: { $in: batch.map((document) => document._id) } }, filter],
+      const step = await this.transaction(async (session) => {
+        const batch = await this.#deliveries
+          .find(filter, { session, projection: { eventId: 1 }, limit: this.#purgeBatchSize })
+          .toArray();
+        const eventIds = [...new Set(batch.map((document) => document.eventId))];
+        const deliveries = await this.#deliveries.deleteMany(
+          { _id: { $in: batch.map((document) => document._id) } },
+          { session },
+        );
+        const stillReferenced = new Set(
+          (
+            await this.#deliveries
+              .find({ eventId: { $in: eventIds } }, { session, projection: { eventId: 1 } })
+              .toArray()
+          ).map((document) => document.eventId),
+        );
+        const events = await this.#events.deleteMany(
+          { _id: { $in: eventIds.filter((eventId) => !stillReferenced.has(eventId)) } },
+          { session },
+        );
+        return {
+          batchSize: batch.length,
+          deletedDeliveries: deliveries.deletedCount,
+          deletedEvents: events.deletedCount,
+        };
       });
-      deletedDeliveries += deleted.deletedCount;
-      deletedEvents += await this.#deleteOrphanedEvents(batch.map((document) => document.eventId));
-      if (batch.length < this.#purgeBatchSize) {
+      deletedDeliveries += step.deletedDeliveries;
+      deletedEvents += step.deletedEvents;
+      if (step.batchSize < this.#purgeBatchSize) {
         return { deletedDeliveries, deletedEvents };
       }
     }
-  }
-
-  /**
-   * Deletes the given events that no delivery references. Runs in a transaction:
-   * an append adding a delivery to the same event writes the event document, so
-   * the two conflict and one restarts instead of leaving a delivery without event.
-   */
-  async #deleteOrphanedEvents(eventIds: readonly string[]): Promise<number> {
-    const candidateIds = [...new Set(eventIds)];
-    return this.transaction(async (session) => {
-      const referenced = new Set(
-        (
-          await this.#deliveries
-            .find({ eventId: { $in: candidateIds } }, { session, projection: { eventId: 1 } })
-            .toArray()
-        ).map((document) => document.eventId),
-      );
-      const orphanedIds = candidateIds.filter((eventId) => !referenced.has(eventId));
-      const deleted = await this.#events.deleteMany({ _id: { $in: orphanedIds } }, { session });
-      return deleted.deletedCount;
-    });
   }
 }
 
 function deliveryPairKey(eventId: string, handler: string): string {
   return `${eventId}\u0000${handler}`;
+}
+
+function assertInTransaction(session: ClientSession, operation: string): void {
+  if (!session.inTransaction()) {
+    throw new ConfigurationError(
+      `MongoEventStore.${operation} needs a ClientSession inside a started transaction (session.withTransaction or startTransaction). Without one, MongoDB commits each write immediately and the write is no longer atomic with yours`,
+    );
+  }
 }

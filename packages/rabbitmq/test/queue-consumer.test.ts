@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { InvalidEnvelopeError, createRetryPolicy, type EventEnvelope } from '@relaybus/core';
-import { QueueConsumer } from '../src/queue-consumer.js';
+import type { AmqpMessage } from '../src/amqp-types.js';
+import { QueueConsumer, type ConfirmedRepublish } from '../src/queue-consumer.js';
+import {
+  DEAD_LETTER_REASON_HEADER,
+  FIRST_FAILURE_HEADER,
+  REDELIVERIES_HEADER,
+} from '../src/redelivery.js';
 import {
   FakeChannel,
   createDelivery,
@@ -11,30 +17,57 @@ import {
 } from './fakes.js';
 
 const RETRY = createRetryPolicy({ attempts: 3, initialDelay: 5, maxDelay: 5, jitter: 'none' });
+const REDELIVERY = createRetryPolicy(
+  { attempts: Infinity, initialDelay: 100, maxDelay: 400, factor: 2, jitter: 'none' },
+  { ...RETRY, attempts: Infinity },
+);
+
+interface SetupOverrides {
+  handlerRetry?: typeof RETRY;
+  redelivery?: typeof REDELIVERY;
+  retryLadder?: readonly number[];
+  redeliveryMaxAgeMs?: number;
+  ordered?: boolean;
+  shutdownTimeoutMs?: number;
+  republish?: ConfirmedRepublish;
+}
 
 function setup(
   onMessage: (envelope: EventEnvelope) => Promise<void> = async () => undefined,
-  overrides: {
-    handlerRetry?: typeof RETRY;
-    shutdownTimeoutMs?: number;
-    deliveryLimit?: number;
-  } = {},
+  overrides: SetupOverrides = {},
 ) {
   const logger = createLogger();
   const onConsumerLost = vi.fn();
   const handler = vi.fn(onMessage);
+  const republish = vi.fn<ConfirmedRepublish>(overrides.republish ?? (async () => undefined));
   const consumer = new QueueConsumer({
     queue: 'relaybus.billing',
     prefetch: 7,
-    deliveryLimit: overrides.deliveryLimit ?? 10,
     handlerRetry: overrides.handlerRetry ?? RETRY,
+    redelivery: overrides.redelivery ?? REDELIVERY,
+    retryLadder: overrides.retryLadder ?? [100, 200, 400],
+    redeliveryMaxAgeMs: overrides.redeliveryMaxAgeMs ?? 10_000,
+    ordered: overrides.ordered ?? false,
+    deadLetterExchange: 'relaybus.dead',
     shutdownTimeoutMs: overrides.shutdownTimeoutMs ?? 1_000,
     onMessage: handler,
     onConsumerLost,
+    republish,
     logger,
     random: () => 0.5,
   });
-  return { consumer, handler, logger, onConsumerLost, channel: new FakeChannel() };
+  return { consumer, handler, logger, onConsumerLost, republish, channel: new FakeChannel() };
+}
+
+const failing = async (): Promise<void> => {
+  throw new Error('database down');
+};
+
+function withHeaders(message: AmqpMessage, headers: Record<string, unknown>): AmqpMessage {
+  return {
+    ...message,
+    properties: { ...message.properties, headers: { ...message.properties.headers, ...headers } },
+  };
 }
 
 describe('QueueConsumer', () => {
@@ -45,7 +78,9 @@ describe('QueueConsumer', () => {
 
   it('consumes with manual acknowledgements and the configured prefetch', async () => {
     const { consumer, channel } = setup();
+    expect(consumer.isActive()).toBe(false);
     await consumer.attach(channel);
+    expect(consumer.isActive()).toBe(true);
     expect(channel.prefetch).toHaveBeenCalledWith(7);
     expect(channel.consume).toHaveBeenCalledWith('relaybus.billing', expect.any(Function), {
       noAck: false,
@@ -54,7 +89,7 @@ describe('QueueConsumer', () => {
 
   it('acknowledges only after the handler resolved, handing it the decoded envelope', async () => {
     const gate = deferred();
-    const { consumer, channel, handler } = setup(() => gate.promise);
+    const { consumer, channel, handler, republish } = setup(() => gate.promise);
     await consumer.attach(channel);
     channel.deliver!(message);
     await waitFor(() => handler.mock.calls.length === 1);
@@ -64,11 +99,12 @@ describe('QueueConsumer', () => {
     await waitFor(() => channel.ack.mock.calls.length === 1);
     expect(channel.ack).toHaveBeenCalledWith(message);
     expect(channel.nack).not.toHaveBeenCalled();
+    expect(republish).not.toHaveBeenCalled();
   });
 
   it('retries a failing handler on the same delivery before acknowledging', async () => {
     let calls = 0;
-    const { consumer, channel, logger } = setup(async () => {
+    const { consumer, channel, logger, republish } = setup(async () => {
       calls += 1;
       if (calls < 3) {
         throw new Error('database down');
@@ -78,6 +114,7 @@ describe('QueueConsumer', () => {
     channel.deliver!(message);
     await waitFor(() => channel.ack.mock.calls.length === 1);
     expect(calls).toBe(3);
+    expect(republish).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining(
         '[QueueConsumer](process) Handler failed, retrying | queue=relaybus.billing',
@@ -85,67 +122,279 @@ describe('QueueConsumer', () => {
     );
   });
 
-  it('requeues the message once the local attempts are spent', async () => {
-    const { consumer, channel, handler, logger } = setup(async () => {
-      throw new Error('always fails');
+  describe('delayed redelivery', () => {
+    it('parks a copy in the retry queue once the local attempts are spent, and acknowledges only after the broker confirmed it', async () => {
+      const confirmed = deferred();
+      const { consumer, channel, handler, republish, logger } = setup(failing, {
+        republish: () => confirmed.promise,
+      });
+      await consumer.attach(channel);
+      const before = Date.now();
+      channel.deliver!(
+        withHeaders(message, {
+          'x-delivery-count': 4,
+          'x-acquired-count': 4,
+          [DEAD_LETTER_REASON_HEADER]: 'stale',
+        }),
+      );
+      await waitFor(() => republish.mock.calls.length === 1);
+      expect(handler).toHaveBeenCalledTimes(3);
+      expect(channel.ack).not.toHaveBeenCalled();
+      expect(channel.nack).not.toHaveBeenCalled();
+
+      const [exchange, routingKey, content, options] = republish.mock.calls[0]!;
+      expect(exchange).toBe('');
+      expect(routingKey).toBe('relaybus.billing.retry.100');
+      expect(content).toBe(message.content);
+      expect(options).toMatchObject({
+        contentType: 'application/json',
+        persistent: true,
+        messageId: createEnvelope().id,
+        type: 'order.placed.v1',
+        appId: 'orders-service',
+      });
+      expect(options.headers).toMatchObject({
+        'cloudEvents:id': createEnvelope().id,
+        'relaybus:traceparent': '00-abc-def-01',
+        [REDELIVERIES_HEADER]: '1',
+      });
+      expect(options.headers).not.toHaveProperty('x-delivery-count');
+      expect(options.headers).not.toHaveProperty('x-acquired-count');
+      expect(options.headers).not.toHaveProperty(DEAD_LETTER_REASON_HEADER);
+      expect(Number(options.headers[FIRST_FAILURE_HEADER])).toBeGreaterThanOrEqual(before);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Handler attempts spent, retrying later'),
+      );
+
+      confirmed.resolve();
+      await waitFor(() => channel.ack.mock.calls.length === 1);
+      expect(channel.ack).toHaveBeenCalledWith(
+        expect.objectContaining({ content: message.content }),
+      );
     });
-    await consumer.attach(channel);
-    channel.deliver!(message);
-    await waitFor(() => channel.nack.mock.calls.length === 1);
-    expect(handler).toHaveBeenCalledTimes(3);
-    expect(channel.nack).toHaveBeenCalledWith(message, false, true);
-    expect(channel.ack).not.toHaveBeenCalled();
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Handler attempts spent'));
+
+    it('grows the delay with every redelivery, up to the largest retry queue, and keeps the first failure time', async () => {
+      const firstFailureAt = Date.now() - 1_000;
+      const { consumer, channel, republish } = setup(failing);
+      await consumer.attach(channel);
+      channel.deliver!(
+        withHeaders(message, {
+          [REDELIVERIES_HEADER]: 1,
+          [FIRST_FAILURE_HEADER]: String(firstFailureAt),
+        }),
+      );
+      channel.deliver!(
+        withHeaders(message, {
+          [REDELIVERIES_HEADER]: '7',
+          [FIRST_FAILURE_HEADER]: String(firstFailureAt),
+        }),
+      );
+      await waitFor(() => republish.mock.calls.length === 2);
+      const byQueue = Object.fromEntries(
+        republish.mock.calls.map(([, routingKey, , options]) => [routingKey, options.headers]),
+      );
+      expect(byQueue['relaybus.billing.retry.200']).toMatchObject({
+        [REDELIVERIES_HEADER]: '2',
+        [FIRST_FAILURE_HEADER]: String(firstFailureAt),
+      });
+      expect(byQueue['relaybus.billing.retry.400']).toMatchObject({
+        [REDELIVERIES_HEADER]: '8',
+      });
+    });
+
+    it('treats unreadable redelivery state as a first failure', async () => {
+      const { consumer, channel, republish } = setup(failing);
+      await consumer.attach(channel);
+      channel.deliver!(
+        withHeaders(message, { [REDELIVERIES_HEADER]: 'many', [FIRST_FAILURE_HEADER]: -5 }),
+      );
+      await waitFor(() => republish.mock.calls.length === 1);
+      expect(republish.mock.calls[0]![1]).toBe('relaybus.billing.retry.100');
+      expect(republish.mock.calls[0]![3].headers[REDELIVERIES_HEADER]).toBe('1');
+    });
+
+    it('requeues the original, not acknowledging it, when the copy cannot be confirmed', async () => {
+      const { consumer, channel, logger } = setup(failing, {
+        republish: async () => {
+          throw new Error('nacked');
+        },
+      });
+      await consumer.attach(channel);
+      channel.deliver!(message);
+      await waitFor(() => channel.nack.mock.calls.length === 1);
+      expect(channel.nack).toHaveBeenCalledWith(message, false, true);
+      expect(channel.ack).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Could not park the message in the retry queue, requeueing it'),
+      );
+    });
+
+    it('does not wait out the fallback delay when it stops', async () => {
+      const { consumer, channel, republish } = setup(failing, {
+        retryLadder: [600_000],
+        redeliveryMaxAgeMs: 3_600_000,
+        republish: async () => {
+          throw new Error('nacked');
+        },
+      });
+      await consumer.attach(channel);
+      channel.deliver!(message);
+      await waitFor(() => republish.mock.calls.length === 1);
+      await consumer.stop();
+      expect(channel.nack).toHaveBeenCalledWith(message, false, true);
+    });
   });
 
-  it.each([
-    ['x-acquired-count', { 'x-acquired-count': 2 }],
-    ['x-delivery-count', { 'x-delivery-count': 2 }],
-    ['both counters', { 'x-delivery-count': 1, 'x-acquired-count': 2 }],
-  ])('dead-letters instead of requeueing on the last delivery (%s)', async (_label, headers) => {
-    const { consumer, channel, logger } = setup(
-      async () => {
-        throw new Error('always fails');
-      },
-      { deliveryLimit: 3 },
-    );
-    await consumer.attach(channel);
-    channel.deliver!({
-      ...message,
-      properties: { ...message.properties, headers: { ...message.properties.headers, ...headers } },
+  describe('dead-lettering', () => {
+    it('dead-letters through a confirmed copy without retry state once the message failed for too long', async () => {
+      const { consumer, channel, logger, republish } = setup(failing, {
+        redeliveryMaxAgeMs: 5_000,
+      });
+      await consumer.attach(channel);
+      channel.deliver!(
+        withHeaders(message, {
+          [REDELIVERIES_HEADER]: 12,
+          [FIRST_FAILURE_HEADER]: String(Date.now() - 60_000),
+        }),
+      );
+      await waitFor(() => channel.ack.mock.calls.length === 1);
+      expect(republish).toHaveBeenCalledTimes(1);
+      const [exchange, routingKey, , options] = republish.mock.calls[0]!;
+      expect(exchange).toBe('relaybus.dead');
+      expect(routingKey).toBe('relaybus.billing');
+      expect(options.headers[DEAD_LETTER_REASON_HEADER]).toBe('redelivery window exhausted');
+      expect(options.headers).not.toHaveProperty(REDELIVERIES_HEADER);
+      expect(options.headers).not.toHaveProperty(FIRST_FAILURE_HEADER);
+      expect(options.headers['cloudEvents:id']).toBe(createEnvelope().id);
+      expect(channel.nack).not.toHaveBeenCalled();
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('Dead-lettering message that kept failing'),
+      );
     });
-    await waitFor(() => channel.nack.mock.calls.length === 1);
-    expect(channel.nack).toHaveBeenCalledWith(expect.anything(), false, false);
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining('deliveries=3 deliveryLimit=3'),
-    );
+
+    it('dead-letters immediately when the error must not be retried', async () => {
+      const { consumer, channel, handler, logger, republish } = setup(async () => {
+        throw new InvalidEnvelopeError('invalid occurredAt');
+      });
+      await consumer.attach(channel);
+      channel.deliver!(message);
+      await waitFor(() => channel.ack.mock.calls.length === 1);
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(republish.mock.calls[0]![0]).toBe('relaybus.dead');
+      expect(republish.mock.calls[0]![3].headers[DEAD_LETTER_REASON_HEADER]).toBe(
+        'non-retryable handler error',
+      );
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('Dead-lettering message the handler cannot process'),
+      );
+    });
+
+    it('dead-letters a malformed message without calling the handler, keeping its bytes', async () => {
+      const { consumer, channel, handler, logger, republish } = setup();
+      await consumer.attach(channel);
+      const malformed = { ...message, content: Buffer.from('not json') };
+      channel.deliver!(malformed);
+      await waitFor(() => channel.ack.mock.calls.length === 1);
+      expect(handler).not.toHaveBeenCalled();
+      expect(republish.mock.calls[0]![2]).toBe(malformed.content);
+      expect(republish.mock.calls[0]![3].headers[DEAD_LETTER_REASON_HEADER]).toBe(
+        'malformed message',
+      );
+      expect(logger.error).toHaveBeenCalledWith(
+        '[QueueConsumer](process) Dead-lettering malformed message | queue=relaybus.billing routingKey=order.placed.v1 error=Message body is not valid JSON',
+      );
+    });
+
+    it('dead-letters a message without any properties', async () => {
+      const { consumer, channel, republish } = setup();
+      await consumer.attach(channel);
+      channel.deliver!({ content: Buffer.from('x'), fields: { routingKey: 'x' }, properties: {} });
+      await waitFor(() => channel.ack.mock.calls.length === 1);
+      expect(republish.mock.calls[0]![3]).toEqual({
+        contentType: 'application/json',
+        persistent: true,
+        headers: { [DEAD_LETTER_REASON_HEADER]: 'malformed message' },
+      });
+    });
+
+    it('lets the broker dead-letter the message when the copy cannot be confirmed', async () => {
+      const { consumer, channel, logger } = setup(
+        async () => {
+          throw new InvalidEnvelopeError('bad');
+        },
+        {
+          republish: async () => {
+            throw new Error('channel closed');
+          },
+        },
+      );
+      await consumer.attach(channel);
+      channel.deliver!(message);
+      await waitFor(() => channel.nack.mock.calls.length === 1);
+      expect(channel.nack).toHaveBeenCalledWith(message, false, false);
+      expect(channel.ack).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Could not publish to the dead-letter exchange'),
+      );
+    });
   });
 
-  it('dead-letters immediately when the error must not be retried', async () => {
-    const { consumer, channel, handler, logger } = setup(async () => {
-      throw new InvalidEnvelopeError('invalid occurredAt');
-    });
-    await consumer.attach(channel);
-    channel.deliver!(message);
-    await waitFor(() => channel.nack.mock.calls.length === 1);
-    expect(handler).toHaveBeenCalledTimes(1);
-    expect(channel.nack).toHaveBeenCalledWith(message, false, false);
-    expect(logger.error).toHaveBeenCalledWith(
-      expect.stringContaining('Dead-lettering message the handler cannot process'),
+  describe('ordered mode', () => {
+    const orderedRedelivery = createRetryPolicy(
+      { attempts: Infinity, initialDelay: 5, maxDelay: 5, jitter: 'none' },
+      { ...RETRY, attempts: Infinity },
     );
-  });
 
-  it('dead-letters a malformed message without calling the handler', async () => {
-    const { consumer, channel, handler, logger } = setup();
-    await consumer.attach(channel);
-    channel.deliver!({ ...message, content: Buffer.from('not json') });
-    await waitFor(() => channel.nack.mock.calls.length === 1);
-    expect(handler).not.toHaveBeenCalled();
-    expect(channel.nack.mock.calls[0]![1]).toBe(false);
-    expect(channel.nack.mock.calls[0]![2]).toBe(false);
-    expect(logger.error).toHaveBeenCalledWith(
-      '[QueueConsumer](process) Dead-lettering malformed message | queue=relaybus.billing routingKey=order.placed.v1 error=Message body is not valid JSON',
-    );
+    it('retries in place, beyond the local attempts, and never moves the message', async () => {
+      let calls = 0;
+      const { consumer, channel, republish } = setup(
+        async () => {
+          calls += 1;
+          if (calls < 8) {
+            throw new Error('database down');
+          }
+        },
+        { ordered: true, redelivery: orderedRedelivery, retryLadder: [] },
+      );
+      await consumer.attach(channel);
+      channel.deliver!(message);
+      await waitFor(() => channel.ack.mock.calls.length === 1);
+      expect(calls).toBe(8);
+      expect(republish).not.toHaveBeenCalled();
+      expect(channel.nack).not.toHaveBeenCalled();
+    });
+
+    it('requeues a message waiting between in-place retries when it stops', async () => {
+      const { consumer, channel, handler } = setup(failing, {
+        ordered: true,
+        handlerRetry: createRetryPolicy({ attempts: 1 }),
+        redelivery: createRetryPolicy(
+          { attempts: Infinity, initialDelay: 600_000, jitter: 'none' },
+          { ...RETRY, attempts: Infinity },
+        ),
+        redeliveryMaxAgeMs: 3_600_000,
+        retryLadder: [],
+      });
+      await consumer.attach(channel);
+      channel.deliver!(message);
+      await waitFor(() => handler.mock.calls.length === 1);
+      await consumer.stop();
+      expect(channel.nack).toHaveBeenCalledWith(message, false, true);
+    });
+
+    it('dead-letters after the retry window like the unordered mode', async () => {
+      const { consumer, channel, republish } = setup(failing, {
+        ordered: true,
+        redelivery: orderedRedelivery,
+        redeliveryMaxAgeMs: 40,
+        retryLadder: [],
+      });
+      await consumer.attach(channel);
+      channel.deliver!(message);
+      await waitFor(() => channel.ack.mock.calls.length === 1);
+      expect(republish).toHaveBeenCalledTimes(1);
+      expect(republish.mock.calls[0]![0]).toBe('relaybus.dead');
+    });
   });
 
   it('logs and carries on when the channel can no longer acknowledge', async () => {
@@ -161,11 +410,12 @@ describe('QueueConsumer', () => {
     );
   });
 
-  it('reports a consumer cancelled by the broker', async () => {
+  it('reports a consumer cancelled by the broker and stops counting as active', async () => {
     const { consumer, channel, onConsumerLost } = setup();
     await consumer.attach(channel);
     channel.deliver!(null);
     expect(onConsumerLost).toHaveBeenCalledWith('consumer cancelled by the broker');
+    expect(consumer.isActive()).toBe(false);
   });
 
   it('reports its channel closing, unless it detached or stopped first', async () => {
@@ -177,12 +427,26 @@ describe('QueueConsumer', () => {
     );
     channel.emit('close');
     expect(onConsumerLost).toHaveBeenCalledWith('consumer channel closed');
+    expect(consumer.isActive()).toBe(false);
 
     const second = setup();
     await second.consumer.attach(second.channel);
     second.consumer.detach();
     second.channel.emit('close');
     expect(second.onConsumerLost).not.toHaveBeenCalled();
+  });
+
+  it('fails to attach when the channel closed while the consumer was being registered', async () => {
+    const { consumer, channel, onConsumerLost } = setup();
+    channel.consume.mockImplementationOnce(async () => {
+      channel.emit('close');
+      return { consumerTag: 'consumer-1' };
+    });
+    await expect(consumer.attach(channel)).rejects.toThrow(
+      /Consumer channel closed while the consumer was being set up/,
+    );
+    expect(consumer.isActive()).toBe(false);
+    expect(onConsumerLost).not.toHaveBeenCalled();
   });
 
   it('stops: cancels the consumer, waits for running handlers, closes the channel', async () => {
@@ -203,12 +467,7 @@ describe('QueueConsumer', () => {
 
   it('requeues messages that are waiting between attempts when it stops', async () => {
     const slowRetry = createRetryPolicy({ attempts: 3, initialDelay: 60_000, jitter: 'none' });
-    const { consumer, channel, handler } = setup(
-      async () => {
-        throw new Error('fails');
-      },
-      { handlerRetry: slowRetry },
-    );
+    const { consumer, channel, handler } = setup(failing, { handlerRetry: slowRetry });
     await consumer.attach(channel);
     channel.deliver!(message);
     await waitFor(() => handler.mock.calls.length === 1);

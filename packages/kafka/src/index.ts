@@ -1,5 +1,6 @@
 export {
   InvalidKafkaMessageError,
+  UnencodableEventError,
   decodeEnvelope,
   encodeEnvelope,
   type DecodableMessage,
@@ -23,9 +24,12 @@ export type {
   KafkaRunConfig,
 } from './kafka-client.js';
 export {
+  HandlerFailedError,
   KafkaTransport,
+  PublishTimeoutError,
   type InvalidKafkaMessage,
   type InvalidMessagePolicy,
   type KafkaProcessingOptions,
+  type KafkaRestartOptions,
   type KafkaTransportOptions,
 } from './kafka-transport.js';

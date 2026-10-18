@@ -8,19 +8,46 @@ import {
   type TransportMessageHandler,
 } from '@relaybus/core';
 import { abortableSleep } from './abortable-sleep.js';
-import type { AmqpChannel, AmqpMessage } from './amqp-types.js';
+import type { AmqpChannel, AmqpMessage, AmqpPublishOptions } from './amqp-types.js';
+import { RabbitMqUnavailableError } from './errors.js';
+import {
+  DEAD_LETTER_REASON_HEADER,
+  FIRST_FAILURE_HEADER,
+  REDELIVERIES_HEADER,
+  chooseRetryTier,
+  copyForRepublish,
+  readCounterHeader,
+} from './redelivery.js';
+import { retryQueueName } from './topology.js';
 import { decodeEnvelope } from './wire-format.js';
+
+/** Publishes a message and resolves only after the broker confirmed it was routed to a queue. */
+export type ConfirmedRepublish = (
+  exchange: string,
+  routingKey: string,
+  content: Buffer,
+  options: AmqpPublishOptions,
+) => Promise<void>;
 
 export interface QueueConsumerSettings {
   readonly queue: string;
   readonly prefetch: number;
-  /** Deliveries after which a failing message is dead-lettered instead of requeued. */
-  readonly deliveryLimit: number;
   readonly handlerRetry: RetryPolicy;
+  /** Backoff between delayed redeliveries. */
+  readonly redelivery: RetryPolicy;
+  /** Delays of the retry queues, ascending. Unused when ordered. */
+  readonly retryLadder: readonly number[];
+  /** A message failing for longer than this is dead-lettered. */
+  readonly redeliveryMaxAgeMs: number;
+  /** Retry in place instead of through the retry queues, so order is kept. */
+  readonly ordered: boolean;
+  readonly deadLetterExchange: string;
   readonly shutdownTimeoutMs: number;
   readonly onMessage: TransportMessageHandler;
   /** The consumer's channel closed or the broker cancelled the consumer. */
   readonly onConsumerLost: (reason: string) => void;
+  /** Publishes to another queue on a confirm channel; rejects when the copy is not confirmed. */
+  readonly republish: ConfirmedRepublish;
   readonly logger: RelayBusLogger;
   readonly random: () => number;
 }
@@ -31,11 +58,21 @@ type Settlement = 'ack' | 'requeue' | 'dead-letter';
  * Consumes one queue with manual acknowledgements.
  *
  * A message is acknowledged only after the handler resolved. When the handler
- * fails it is retried on the same delivery with backoff, so a failing message
- * cannot hot-loop through the broker; once those attempts are spent the message
- * is requeued, and the quorum queue's delivery limit eventually dead-letters it.
- * Malformed messages and non-retryable errors are dead-lettered immediately.
- * Nothing is ever acknowledged without having been handled or dead-lettered.
+ * fails it is first retried on the same delivery with short backoff
+ * (`handlerRetry`). If that does not help, a copy goes to the retry queue whose
+ * TTL matches the next backoff step, and the original is acknowledged only
+ * after the broker confirmed the copy; the copy returns to the main queue when
+ * its TTL expires. This waits out a long outage of the handler's dependency.
+ *
+ * Malformed messages, non-retryable errors and messages that kept failing for
+ * `redeliveryMaxAgeMs` go to the dead-letter exchange through a confirmed copy
+ * (carrying the reason, without retry state, so a replay starts fresh) and the
+ * original is acknowledged afterwards. If a copy cannot be confirmed the
+ * original is requeued or rejected without requeue, which makes the broker
+ * dead-letter it; it is never acknowledged unprocessed, so nothing is lost.
+ *
+ * In ordered mode nothing is moved: the failing message is retried in place with
+ * the same backoff, holding the queue.
  */
 export class QueueConsumer {
   readonly #settings: QueueConsumerSettings;
@@ -48,14 +85,25 @@ export class QueueConsumer {
     this.#settings = settings;
   }
 
-  /** Starts consuming on a channel whose topology is already declared. */
+  /** True while a consumer is registered on a live channel. */
+  isActive(): boolean {
+    return this.#consumerTag !== undefined;
+  }
+
+  /**
+   * Starts consuming on a channel whose topology is already declared.
+   *
+   * @throws {RabbitMqUnavailableError} the channel closed while it was being set up
+   */
   async attach(channel: AmqpChannel): Promise<void> {
+    let closedDuringSetup = false;
     channel.on('error', (error: Error) => {
       this.#settings.logger.warn(
         `[QueueConsumer](attach) Channel error | queue=${this.#settings.queue} error=${error.message}`,
       );
     });
     channel.on('close', () => {
+      closedDuringSetup = true;
       if (this.#channel === channel) {
         this.#channel = undefined;
         this.#consumerTag = undefined;
@@ -68,6 +116,11 @@ export class QueueConsumer {
       (message) => this.#receive(channel, message),
       { noAck: false },
     );
+    if (closedDuringSetup) {
+      throw new RabbitMqUnavailableError(
+        `[QueueConsumer](attach) Consumer channel closed while the consumer was being set up | queue=${this.#settings.queue}`,
+      );
+    }
     this.#channel = channel;
     this.#consumerTag = consumerTag;
   }
@@ -112,6 +165,7 @@ export class QueueConsumer {
 
   #receive(channel: AmqpChannel, message: AmqpMessage | null): void {
     if (message === null) {
+      this.#consumerTag = undefined;
       this.#settings.onConsumerLost('consumer cancelled by the broker');
       return;
     }
@@ -130,9 +184,11 @@ export class QueueConsumer {
       this.#settings.logger.error(
         `[QueueConsumer](process) Dead-lettering malformed message | queue=${queue} routingKey=${message.fields.routingKey} error=${toErrorInfo(error).message}`,
       );
-      this.#settle(channel, message, 'dead-letter');
+      await this.#deadLetter(channel, message, 'malformed message');
       return;
     }
+    let redeliveries = readCounterHeader(message, REDELIVERIES_HEADER) ?? 0;
+    let firstFailureAt = readCounterHeader(message, FIRST_FAILURE_HEADER);
     for (let attempt = 1; ; attempt += 1) {
       try {
         await this.#settings.onMessage(envelope);
@@ -144,22 +200,39 @@ export class QueueConsumer {
           this.#settings.logger.error(
             `[QueueConsumer](process) Dead-lettering message the handler cannot process | ${failure}`,
           );
-          this.#settle(channel, message, 'dead-letter');
+          await this.#deadLetter(channel, message, 'non-retryable handler error');
           return;
         }
-        if (attempt >= handlerRetry.attempts) {
+        if (attempt < handlerRetry.attempts) {
+          const delayMs = computeRetryDelay(handlerRetry, attempt, this.#settings.random);
           this.#settings.logger.warn(
-            `[QueueConsumer](process) Handler attempts spent | ${failure} deliveries=${previousDeliveries(message) + 1} deliveryLimit=${this.#settings.deliveryLimit}`,
+            `[QueueConsumer](process) Handler failed, retrying | ${failure} delayMs=${delayMs}`,
           );
-          this.#settle(channel, message, this.#exhausted(message) ? 'dead-letter' : 'requeue');
+          if (await this.#interrupted(delayMs)) {
+            this.#settle(channel, message, 'requeue');
+            return;
+          }
+          continue;
+        }
+        redeliveries += 1;
+        const now = Date.now();
+        firstFailureAt ??= now;
+        const delayMs = this.#redeliveryDelay(redeliveries);
+        if (now + delayMs - firstFailureAt > this.#settings.redeliveryMaxAgeMs) {
+          this.#settings.logger.error(
+            `[QueueConsumer](process) Dead-lettering message that kept failing | ${failure} redeliveries=${redeliveries - 1} failingForMs=${now - firstFailureAt} maxAgeMs=${this.#settings.redeliveryMaxAgeMs}`,
+          );
+          await this.#deadLetter(channel, message, 'redelivery window exhausted');
           return;
         }
-        const delayMs = computeRetryDelay(handlerRetry, attempt, this.#settings.random);
         this.#settings.logger.warn(
-          `[QueueConsumer](process) Handler failed, retrying | ${failure} delayMs=${delayMs}`,
+          `[QueueConsumer](process) Handler attempts spent, retrying later | ${failure} redeliveries=${redeliveries} delayMs=${delayMs}`,
         );
-        await abortableSleep(delayMs, this.#stopping.signal);
-        if (this.#stopping.signal.aborted) {
+        if (!this.#settings.ordered) {
+          await this.#redeliverLater(channel, message, delayMs, redeliveries, firstFailureAt);
+          return;
+        }
+        if (await this.#interrupted(delayMs)) {
           this.#settle(channel, message, 'requeue');
           return;
         }
@@ -167,13 +240,79 @@ export class QueueConsumer {
     }
   }
 
+  /** The backoff before the next delayed redelivery: a retry queue's TTL, or an exact wait when ordered. */
+  #redeliveryDelay(redeliveries: number): number {
+    const { redelivery, retryLadder, ordered, random } = this.#settings;
+    const delayMs = computeRetryDelay(redelivery, redeliveries, random);
+    return ordered ? delayMs : chooseRetryTier(retryLadder, delayMs, random);
+  }
+
+  /** Sleeps; true when the consumer is stopping, so the caller must give the message back. */
+  async #interrupted(delayMs: number): Promise<boolean> {
+    await abortableSleep(delayMs, this.#stopping.signal);
+    return this.#stopping.signal.aborted;
+  }
+
   /**
-   * The broker's own `x-delivery-limit` does not count `nack(requeue)` from
-   * AMQP 0-9-1 consumers on RabbitMQ 4, so the consumer enforces the limit from
-   * the delivery counters the broker stamps on redelivered messages.
+   * Parks a copy in the retry queue of `delayMs` and acknowledges the original
+   * only once the broker confirmed the copy. When the copy cannot be confirmed
+   * the original is requeued after the same delay, so it is neither lost nor
+   * hot-looped.
    */
-  #exhausted(message: AmqpMessage): boolean {
-    return previousDeliveries(message) + 1 >= this.#settings.deliveryLimit;
+  async #redeliverLater(
+    channel: AmqpChannel,
+    message: AmqpMessage,
+    delayMs: number,
+    redeliveries: number,
+    firstFailureAt: number,
+  ): Promise<void> {
+    const { content, options } = copyForRepublish(message, {
+      [REDELIVERIES_HEADER]: String(redeliveries),
+      [FIRST_FAILURE_HEADER]: String(firstFailureAt),
+    });
+    try {
+      await this.#settings.republish(
+        '',
+        retryQueueName(this.#settings.queue, delayMs),
+        content,
+        options,
+      );
+    } catch (error) {
+      this.#settings.logger.warn(
+        `[QueueConsumer](redeliverLater) Could not park the message in the retry queue, requeueing it | queue=${this.#settings.queue} delayMs=${delayMs} error=${toErrorInfo(error).message}`,
+      );
+      await this.#interrupted(delayMs);
+      this.#settle(channel, message, 'requeue');
+      return;
+    }
+    this.#settle(channel, message, 'ack');
+  }
+
+  /**
+   * Moves the message to the dead-letter queue through a confirmed copy that
+   * carries the reason and no retry state. If the copy cannot be confirmed the
+   * message is rejected without requeue, which makes the broker dead-letter it
+   * (at-least-once), so it still ends up in the dead-letter queue.
+   */
+  async #deadLetter(channel: AmqpChannel, message: AmqpMessage, reason: string): Promise<void> {
+    const { content, options } = copyForRepublish(message, {
+      [DEAD_LETTER_REASON_HEADER]: reason,
+    });
+    try {
+      await this.#settings.republish(
+        this.#settings.deadLetterExchange,
+        this.#settings.queue,
+        content,
+        options,
+      );
+    } catch (error) {
+      this.#settings.logger.warn(
+        `[QueueConsumer](deadLetter) Could not publish to the dead-letter exchange, leaving it to the broker | queue=${this.#settings.queue} error=${toErrorInfo(error).message}`,
+      );
+      this.#settle(channel, message, 'dead-letter');
+      return;
+    }
+    this.#settle(channel, message, 'ack');
   }
 
   #settle(channel: AmqpChannel, message: AmqpMessage, settlement: Settlement): void {
@@ -190,12 +329,4 @@ export class QueueConsumer {
       );
     }
   }
-}
-
-/** Earlier deliveries of a message: `x-delivery-count` (RabbitMQ 3.x) or `x-acquired-count` (4.x). */
-function previousDeliveries(message: AmqpMessage): number {
-  // A message that decoded has headers: `cloudEvents:specversion` is required.
-  const headers = message.properties.headers!;
-  const counts = [headers['x-delivery-count'], headers['x-acquired-count']];
-  return Math.max(0, ...counts.filter((count): count is number => typeof count === 'number'));
 }

@@ -27,6 +27,17 @@ function countChanged(dml: string): string {
   return `WITH changed AS (${dml} RETURNING 1) SELECT count(*)::int AS count FROM changed`;
 }
 
+/**
+ * Due deliveries the fast claim examines before it gives up and lets the slow
+ * claim look at the heads of all keys.
+ */
+const CLAIM_SCAN_WINDOW = 256;
+
+const UNFINISHED_PREDICATE = (alias: string): string =>
+  `${alias}.status IN ('pending', 'processing')`;
+
+const HANDLER_PREDICATE = `delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))`;
+
 const CLEAR_LEASE = 'lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL';
 
 /**
@@ -43,9 +54,13 @@ export class PostgresStatements {
     this.#names = names;
   }
 
-  /** Lock advisory key text for {@link setupLock}. */
+  /**
+   * Lock advisory key text for {@link setupLock}. It is derived from the schema
+   * name only, so stores with different table prefixes in one schema also
+   * serialize their `CREATE SCHEMA IF NOT EXISTS`, which is not race-free.
+   */
   get setupLockKey(): string {
-    return `relaybus:${this.#names.events}`;
+    return `relaybus:${this.#names.schema}`;
   }
 
   get setupLock(): string {
@@ -54,8 +69,8 @@ export class PostgresStatements {
 
   /**
    * Reserves sequence numbers per key. Parameters: `[{ key, count }]` as JSON.
-   * Keys are locked in sorted order so concurrent publishers cannot deadlock;
-   * each row lock is held until the publishing transaction ends, which makes
+   * Keys are locked in sorted order, so publishers cannot deadlock within one
+   * call (across calls of one transaction they can, see the README); each row lock is held until the publishing transaction ends, which makes
    * sequence order equal commit order for a key.
    */
   get reserveSequences(): string {
@@ -100,16 +115,26 @@ RETURNING id`;
   }
 
   /**
-   * Leases due deliveries in one statement. Parameters:
+   * Fast claim: leases from the first {@link CLAIM_SCAN_WINDOW} due deliveries
+   * in due order, which is everything the claim needs while the front of the
+   * queue is not clogged with blocked followers of busy keys. Parameters:
    * `[now, handlersJson, limit, leaseOwner, leaseExpiresAt]`.
    *
+   * Always returns one row per leased delivery, or a single row whose
+   * `delivery_id` is null when nothing was leased. `window_saturated` says
+   * whether the window was full: when it is and fewer than `limit` deliveries
+   * were leased, deliveries beyond the window may still be claimable and the
+   * caller runs {@link claimBehindBlockedKeys}. When the window is not
+   * saturated every due delivery was examined, so the result is complete.
+   *
    * Candidates are chosen with `FOR UPDATE SKIP LOCKED`, so two claimers never
-   * lock the same row. A keyed delivery is only a candidate while
-   * (a) no earlier delivery of the same handler and key is pending or
-   * processing, and (b) no other delivery of that handler and key is
-   * processing. Rule (a) is the ordering guarantee. Rule (b) protects the
-   * rare case of a delivery that re-enters the key behind a running one
-   * (requeue, or a handler added to an old event).
+   * lock the same row. A keyed delivery is a candidate only when it is the head
+   * of its (handler, key), that is (a) no earlier delivery of that handler and
+   * key is pending or processing, which is the ordering guarantee, and (b) no
+   * other delivery of that handler and key holds a live lease. Rule b covers a
+   * delivery that re-enters the key behind a running one (requeue, or a handler
+   * added to an old event); an expired lease does not count, because its worker
+   * is presumed dead and the key must not stall behind it.
    *
    * Why SKIP LOCKED alone is enough for ordering: only the head of a key can
    * ever be a candidate, and the head is a single row. Two claimers racing
@@ -121,33 +146,109 @@ RETURNING id`;
    */
   get claim(): string {
     const deliveries = this.#names.deliveries;
-    return `WITH candidates AS MATERIALIZED (
-  SELECT delivery.id, ${dueAtExpression('delivery')} AS due_at
+    return `WITH due_window AS MATERIALIZED (
+  SELECT delivery.id
   FROM ${deliveries} AS delivery
-  WHERE delivery.status IN ('pending', 'processing')
+  WHERE ${UNFINISHED_PREDICATE('delivery')}
     AND ${dueAtExpression('delivery')} <= $1::timestamptz
-    AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+    AND ${HANDLER_PREDICATE}
+  ORDER BY ${dueAtExpression('delivery')}, delivery.id
+  LIMIT ${CLAIM_SCAN_WINDOW}
+), candidates AS MATERIALIZED (
+  SELECT delivery.id, ${dueAtExpression('delivery')} AS due_at
+  FROM due_window
+  JOIN ${deliveries} AS delivery ON delivery.id = due_window.id
+  WHERE ${UNFINISHED_PREDICATE('delivery')}
+    AND ${dueAtExpression('delivery')} <= $1::timestamptz
     AND (
       delivery.key IS NULL
       OR NOT (
         EXISTS (
           SELECT 1 FROM ${deliveries} AS earlier
-          WHERE earlier.handler = delivery.handler AND earlier.key = delivery.key
-            AND earlier.status IN ('pending', 'processing')
+          WHERE earlier.key IS NOT NULL AND earlier.handler = delivery.handler AND earlier.key = delivery.key
+            AND ${UNFINISHED_PREDICATE('earlier')}
             AND earlier.sequence < delivery.sequence
         )
-        OR EXISTS (
-          SELECT 1 FROM ${deliveries} AS running
-          WHERE running.handler = delivery.handler AND running.key = delivery.key
-            AND running.status = 'processing' AND running.id <> delivery.id
-        )
+        OR ${this.#liveLeaseElsewhere()}
       )
     )
   ORDER BY due_at, delivery.id
   LIMIT $3::int
   FOR UPDATE OF delivery SKIP LOCKED
-), claimed AS (
-  UPDATE ${deliveries} AS target
+), ${this.#leaseCandidates()}
+SELECT (SELECT count(*) FROM due_window) >= ${CLAIM_SCAN_WINDOW} AS window_saturated, leased.*
+FROM (SELECT 1) AS anchor
+LEFT JOIN (${this.#leasedRows()}) AS leased ON true
+ORDER BY leased.due_at, leased.delivery_id`;
+  }
+
+  /**
+   * Slow claim, run when {@link claim} leased too few deliveries from a full
+   * window: the front of the due queue is mostly followers of blocked keys.
+   * Same parameters, rules and locking as {@link claim}, but heads are found
+   * with `DISTINCT ON (handler, key)` over the unfinished-key index, so the
+   * cost follows the number of unfinished keyed deliveries (one index-only
+   * scan) instead of one probe per due follower.
+   */
+  get claimBehindBlockedKeys(): string {
+    const deliveries = this.#names.deliveries;
+    return `WITH heads AS MATERIALIZED (
+  SELECT DISTINCT ON (head.handler, head.key) head.id
+  FROM ${deliveries} AS head
+  WHERE head.key IS NOT NULL
+    AND ${UNFINISHED_PREDICATE('head')}
+    AND head.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+  ORDER BY head.handler, head.key, head.sequence
+), keyed AS MATERIALIZED (
+  SELECT delivery.id, ${dueAtExpression('delivery')} AS due_at
+  FROM heads
+  JOIN ${deliveries} AS delivery ON delivery.id = heads.id
+  WHERE ${UNFINISHED_PREDICATE('delivery')}
+    AND ${dueAtExpression('delivery')} <= $1::timestamptz
+    AND NOT ${this.#liveLeaseElsewhere()}
+  ORDER BY due_at, delivery.id
+  LIMIT $3::int
+  FOR UPDATE OF delivery SKIP LOCKED
+), unkeyed AS MATERIALIZED (
+  SELECT delivery.id, ${dueAtExpression('delivery')} AS due_at
+  FROM ${deliveries} AS delivery
+  WHERE delivery.key IS NULL
+    AND ${UNFINISHED_PREDICATE('delivery')}
+    AND ${dueAtExpression('delivery')} <= $1::timestamptz
+    AND ${HANDLER_PREDICATE}
+  ORDER BY due_at, delivery.id
+  LIMIT $3::int
+  FOR UPDATE OF delivery SKIP LOCKED
+), candidates AS MATERIALIZED (
+  SELECT id, due_at FROM (
+    SELECT id, due_at FROM keyed
+    UNION ALL
+    SELECT id, due_at FROM unkeyed
+  ) AS both_sets
+  ORDER BY due_at, id
+  LIMIT $3::int
+), ${this.#leaseCandidates()}
+SELECT false AS window_saturated, leased.*
+FROM (SELECT 1) AS anchor
+LEFT JOIN (${this.#leasedRows()}) AS leased ON true
+ORDER BY leased.due_at, leased.delivery_id`;
+  }
+
+  /** True when another delivery of the candidate's handler and key holds a live lease. */
+  #liveLeaseElsewhere(): string {
+    return `EXISTS (
+          SELECT 1 FROM ${this.#names.deliveries} AS running
+          WHERE running.key IS NOT NULL
+            AND running.handler = delivery.handler AND running.key = delivery.key
+            AND running.status = 'processing' AND running.lease_expires_at > $1::timestamptz
+            AND running.id <> delivery.id
+        )`;
+  }
+
+  /** The `claimed` CTE: leases every row of `candidates`. */
+  #leaseCandidates(): string {
+    return `claimed AS (
+  UPDATE ${this.#names.deliveries} AS target
   SET status = 'processing',
       attempts = target.attempts + 1,
       lease_owner = $4::text,
@@ -157,12 +258,15 @@ RETURNING id`;
   FROM candidates
   WHERE target.id = candidates.id
   RETURNING target.id, target.event_id, target.handler, target.attempts, target.lease_token, candidates.due_at
-)
-SELECT claimed.id AS delivery_id, claimed.handler, claimed.attempts::int AS attempts, claimed.lease_token,
+)`;
+  }
+
+  /** Leased deliveries joined with their events, as the claim result columns. */
+  #leasedRows(): string {
+    return `SELECT claimed.due_at, claimed.id AS delivery_id, claimed.handler, claimed.attempts::int AS attempts, claimed.lease_token,
   ${eventColumns('event')}
 FROM claimed
-JOIN ${this.#names.events} AS event ON event.id = claimed.event_id
-ORDER BY claimed.due_at, claimed.id`;
+JOIN ${this.#names.events} AS event ON event.id = claimed.event_id`;
   }
 
   /** Parameters: `[deliveryId, leaseToken, leaseExpiresAt, now]`. */
@@ -278,6 +382,20 @@ LIMIT ${limit}`;
 
   purgeDeadBatch(): string {
     return this.#purgeBatch(`status = 'dead' AND updated_at < $1::timestamptz`, 'updated_at');
+  }
+
+  /**
+   * Selects and locks one bounded batch of events created before the cutoff
+   * that no delivery references. Parameters: `[cutoff, batchSize]`. The ids go
+   * through {@link deleteOrphanEvents}, which re-checks under a fresh snapshot.
+   */
+  get lockOrphanEventsBatch(): string {
+    return `SELECT event.id FROM ${this.#names.events} AS event
+WHERE event.created_at < $1::timestamptz
+  AND NOT EXISTS (SELECT 1 FROM ${this.#names.deliveries} AS delivery WHERE delivery.event_id = event.id)
+ORDER BY event.created_at, event.id
+LIMIT $2::int
+FOR UPDATE OF event SKIP LOCKED`;
   }
 
   /**

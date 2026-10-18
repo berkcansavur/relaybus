@@ -4,6 +4,7 @@ import { Kafka, Partitioners, logLevel, type Consumer } from 'kafkajs';
 import { KafkaContainer, type StartedKafkaContainer } from '@testcontainers/kafka';
 import {
   InMemoryEventStore,
+  NonRetryableError,
   RelayBus,
   defineEvent,
   type EventEnvelope,
@@ -220,7 +221,7 @@ describe('KafkaTransport against a real broker', () => {
   it('skips malformed records with a logged error and keeps consuming', async () => {
     const topic = uniqueName('malformed');
     await createTopics(topic);
-    const { transport: consumerSide, logger } = createTransport();
+    const { transport: consumerSide, logger } = createTransport({ onInvalidMessage: 'skip' });
     const received: EventEnvelope[] = [];
     await produceRaw(topic, [
       { value: 'not even json' },
@@ -266,6 +267,148 @@ describe('KafkaTransport against a real broker', () => {
     expect(deadLetter!.headers['relaybus-invalid-reason']).toContain('ce_specversion');
     await consumerSide.close();
   });
+
+  it('dead-letters malformed records to <topic>.dead by default and keeps consuming', async () => {
+    const topic = uniqueName('malformed-default');
+    await createTopics(topic, `${topic}.dead`);
+    const { transport: consumerSide } = createTransport();
+    const received: EventEnvelope[] = [];
+    await produceRaw(topic, [{ key: 'k1', value: 'garbage', headers: { origin: 'legacy' } }]);
+    await consumerSide.subscribe([topic], async (envelope) => {
+      received.push(envelope);
+    });
+    const [deadLetter] = await readRaw(`${topic}.dead`, 1);
+    expect(deadLetter).toMatchObject({
+      key: 'k1',
+      value: 'garbage',
+      headers: { origin: 'legacy' },
+    });
+    const { transport: producerSide } = createTransport();
+    await producerSide.publish(createEnvelope({ id: 'valid' }), topic);
+    await waitFor(() => received.length === 1);
+    await producerSide.close();
+    await consumerSide.close();
+  });
+
+  it('dead-letters an event the handler rejects with a NonRetryableError', async () => {
+    const topic = uniqueName('non-retryable');
+    await createTopics(topic, `${topic}.dead`);
+    const { transport: producerSide } = createTransport();
+    const { transport: consumerSide } = createTransport();
+    await consumerSide.subscribe([topic], async () => {
+      throw new NonRetryableError('schema mismatch');
+    });
+    await producerSide.publish(createEnvelope({ id: 'poison' }), topic);
+    const [deadLetter] = await readRaw(`${topic}.dead`, 1);
+    expect(deadLetter!.headers['relaybus-invalid-reason']).toBe('schema mismatch');
+    expect(deadLetter!.headers['ce_id']).toBe('poison');
+    await producerSide.close();
+    await consumerSide.close();
+  });
+
+  it('decodes a record from a plain CloudEvents producer that sends no ce_time', async () => {
+    const topic = uniqueName('plain-cloudevents');
+    await createTopics(topic);
+    const { transport: consumerSide } = createTransport();
+    const received: EventEnvelope[] = [];
+    await consumerSide.subscribe([topic], async (envelope) => {
+      received.push(envelope);
+    });
+    const before = Date.now();
+    await produceRaw(topic, [
+      {
+        value: '{"orderId":"9"}',
+        headers: {
+          ce_specversion: '1.0',
+          ce_id: 'plain-1',
+          ce_type: 'order.placed.v1',
+          ce_source: '//legacy',
+          'content-type': 'application/json',
+        },
+      },
+    ]);
+    await waitFor(() => received.length === 1);
+    expect(received[0]!.id).toBe('plain-1');
+    expect(received[0]!.occurredAt.getTime()).toBeGreaterThanOrEqual(before - 5_000);
+    await consumerSide.close();
+  });
+
+  it.each([
+    ['TypeError', () => new TypeError('x is not a function')],
+    ['RangeError', () => new RangeError('out of range')],
+    ['ReferenceError', () => new ReferenceError('y is not defined')],
+    ['SyntaxError', () => new SyntaxError('bad json')],
+  ])(
+    'keeps consuming and delivers the event after a handler threw a %s repeatedly',
+    async (_name, createError) => {
+      const topic = uniqueName('handler-bug');
+      await createTopics(topic);
+      const { transport: producerSide } = createTransport();
+      const { transport: consumerSide } = createTransport({
+        processing: { maxAttempts: 2, initialBackoff: 20, maxBackoff: 20 },
+      });
+      let calls = 0;
+      const stored: string[] = [];
+      await consumerSide.subscribe([topic], async (envelope) => {
+        calls += 1;
+        if (calls <= 5) {
+          throw createError();
+        }
+        stored.push(envelope.id);
+      });
+      await producerSide.publish(createEnvelope({ id: 'survivor' }), topic);
+      await waitFor(() => stored.length === 1, 90_000);
+      expect(stored).toEqual(['survivor']);
+      await waitFor(() => consumerSide.isConsuming());
+      await producerSide.close();
+      await consumerSide.close();
+    },
+    120_000,
+  );
+
+  it('restarts the consumer run loop after the client reported an unrecoverable crash', async () => {
+    const topic = uniqueName('crash-restart');
+    await createTopics(topic);
+    const client = createClient();
+    let crashed = false;
+    // Makes kafkajs see a raw TypeError from eachMessage, which it marks as unrecoverable.
+    const crashingClient = {
+      producer: (config: Parameters<Kafka['producer']>[0]) => client.producer(config),
+      consumer: (config: Parameters<Kafka['consumer']>[0]) => {
+        const consumer = client.consumer(config);
+        return Object.assign(Object.create(consumer) as Consumer, {
+          run: (runConfig: NonNullable<Parameters<Consumer['run']>[0]>) =>
+            consumer.run({
+              eachMessage: async (payload) => {
+                if (!crashed) {
+                  crashed = true;
+                  throw new TypeError('raw bug escaped the transport');
+                }
+                await runConfig.eachMessage!(payload);
+              },
+            }),
+        });
+      },
+    };
+    const { transport: producerSide } = createTransport();
+    const { transport: consumerSide, logger } = createTransport({
+      kafka: crashingClient as unknown as Kafka,
+      restart: { initialBackoff: 100, maxBackoff: 500 },
+    });
+    const received: string[] = [];
+    await consumerSide.subscribe([topic], async (envelope) => {
+      received.push(envelope.id);
+    });
+    await producerSide.publish(createEnvelope({ id: 'after-crash' }), topic);
+    await waitFor(() => received.length === 1, 90_000);
+    expect(received).toEqual(['after-crash']);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('restart=false'));
+    expect(logger.log).toHaveBeenCalledWith(expect.stringContaining('Consumer restarted'));
+    await waitFor(() => consumerSide.isConsuming());
+    expect(consumerSide.isReady()).toBe(false);
+    await producerSide.close();
+    await consumerSide.close();
+  }, 120_000);
 
   it('fails start-up when the broker is unreachable instead of looking healthy', async () => {
     const { transport } = createTransport({

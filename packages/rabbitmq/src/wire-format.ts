@@ -1,6 +1,7 @@
 import type { EventEnvelope, EventHeaders } from '@relaybus/core';
 import type { AmqpMessage, AmqpPublishOptions } from './amqp-types.js';
-import { MalformedMessageError } from './errors.js';
+import { AmqpLimitExceededError, MalformedMessageError } from './errors.js';
+import { assertJsonPayload } from './json-payload.js';
 
 /**
  * Wire format: CloudEvents 1.0 in binary content mode, following the CloudEvents
@@ -19,12 +20,22 @@ import { MalformedMessageError } from './errors.js';
  *   collide with CloudEvents attributes or broker headers such as `x-death`.
  *
  * On receive the `cloudEvents:` headers win; the AMQP properties are the
- * fallback for events produced by other CloudEvents libraries.
+ * fallback for events produced by other CloudEvents libraries (the AMQP
+ * timestamp only when `cloudEvents:time` is absent; a present but malformed
+ * time is rejected).
+ *
+ * AMQP 0-9-1 short strings (message properties, header names, routing keys) are
+ * limited to 255 bytes. The event id, a header name or a routing key beyond
+ * that is refused with {@link AmqpLimitExceededError}, because the event could
+ * never be published. The `type`, `appId` and `correlationId` mirrors are
+ * skipped when they do not fit; the `cloudEvents:` headers always carry them.
  */
 const ATTRIBUTE_PREFIX = 'cloudEvents:';
 const EVENT_HEADER_PREFIX = 'relaybus:';
 const SPEC_VERSION = '1.0';
 const JSON_CONTENT_TYPE = 'application/json';
+const SHORT_STRING_LIMIT_BYTES = 255;
+const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/i;
 
 /** A serialized event, ready for `channel.publish`. */
 export interface EncodedMessage {
@@ -32,8 +43,15 @@ export interface EncodedMessage {
   readonly options: AmqpPublishOptions;
 }
 
-/** Serializes an envelope. Throws when the payload cannot be turned into JSON. */
+/**
+ * Serializes an envelope.
+ *
+ * @throws {UnserializablePayloadError} the payload is not representable as JSON
+ * @throws {AmqpLimitExceededError} the id or a header name exceeds 255 bytes
+ */
 export function encodeEnvelope(envelope: EventEnvelope): EncodedMessage {
+  assertJsonPayload(envelope.payload, envelope.id);
+  assertShortString('Event id', envelope.id);
   const headers: Record<string, string> = {
     [`${ATTRIBUTE_PREFIX}specversion`]: SPEC_VERSION,
     [`${ATTRIBUTE_PREFIX}id`]: envelope.id,
@@ -52,21 +70,48 @@ export function encodeEnvelope(envelope: EventEnvelope): EncodedMessage {
     headers[`${ATTRIBUTE_PREFIX}correlationid`] = envelope.correlationId;
   }
   for (const [name, value] of Object.entries(envelope.headers)) {
+    assertShortString(
+      `Header name '${EVENT_HEADER_PREFIX}${name}'`,
+      `${EVENT_HEADER_PREFIX}${name}`,
+    );
     headers[`${EVENT_HEADER_PREFIX}${name}`] = value;
   }
   return {
-    content: Buffer.from(JSON.stringify(envelope.payload ?? null), 'utf8'),
+    content: Buffer.from(JSON.stringify(envelope.payload), 'utf8'),
     options: {
       contentType: JSON_CONTENT_TYPE,
       persistent: true,
       messageId: envelope.id,
-      type: envelope.type,
-      appId: envelope.source,
       timestamp: Math.floor(envelope.occurredAt.getTime() / 1_000),
-      ...(envelope.correlationId === null ? {} : { correlationId: envelope.correlationId }),
+      ...mirror('type', envelope.type),
+      ...mirror('appId', envelope.source),
+      ...(envelope.correlationId === null ? {} : mirror('correlationId', envelope.correlationId)),
       headers,
     },
   };
+}
+
+/**
+ * Throws {@link AmqpLimitExceededError} when `value` does not fit an AMQP short
+ * string (255 bytes of UTF-8), which amqplib would otherwise reject on every
+ * attempt.
+ */
+export function assertShortString(label: string, value: string): void {
+  const bytes = Buffer.byteLength(value, 'utf8');
+  if (bytes > SHORT_STRING_LIMIT_BYTES) {
+    throw new AmqpLimitExceededError(
+      `${label} is ${bytes} bytes, above the AMQP limit of ${SHORT_STRING_LIMIT_BYTES} bytes`,
+    );
+  }
+}
+
+function mirror<TName extends 'type' | 'appId' | 'correlationId'>(
+  name: TName,
+  value: string,
+): { [Name in TName]?: string } {
+  return Buffer.byteLength(value, 'utf8') > SHORT_STRING_LIMIT_BYTES
+    ? {}
+    : ({ [name]: value } as { [Name in TName]?: string });
 }
 
 /** Rebuilds an envelope. Throws {@link MalformedMessageError} when the message is not a relaybus event. */
@@ -93,7 +138,7 @@ export function decodeEnvelope(message: AmqpMessage): EventEnvelope {
       text(properties.correlationId) ??
       null,
     causationId: text(attributes[`${ATTRIBUTE_PREFIX}causationid`]) ?? null,
-    occurredAt: parseTime(text(attributes[`${ATTRIBUTE_PREFIX}time`]), properties.timestamp),
+    occurredAt: parseTime(attributes[`${ATTRIBUTE_PREFIX}time`], properties.timestamp),
   };
 }
 
@@ -101,7 +146,13 @@ function extractEventHeaders(attributes: Readonly<Record<string, unknown>>): Eve
   const headers: Record<string, string> = {};
   for (const [name, value] of Object.entries(attributes)) {
     if (name.startsWith(EVENT_HEADER_PREFIX) && typeof value === 'string') {
-      headers[name.slice(EVENT_HEADER_PREFIX.length)] = value;
+      // defineProperty, because assigning `__proto__` would set the prototype and lose the header.
+      Object.defineProperty(headers, name.slice(EVENT_HEADER_PREFIX.length), {
+        value,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
     }
   }
   return headers;
@@ -115,15 +166,21 @@ function parsePayload(content: Buffer): unknown {
   }
 }
 
-function parseTime(isoTime: string | undefined, timestampSeconds: unknown): Date {
+function parseTime(rawTime: unknown, timestampSeconds: unknown): Date {
+  if (rawTime === undefined) {
+    const fallback =
+      typeof timestampSeconds === 'number' ? new Date(timestampSeconds * 1_000) : undefined;
+    if (fallback === undefined || Number.isNaN(fallback.getTime())) {
+      throw new MalformedMessageError('Message has no valid time (header cloudEvents:time)');
+    }
+    return fallback;
+  }
   const occurredAt =
-    isoTime !== undefined
-      ? new Date(isoTime)
-      : typeof timestampSeconds === 'number'
-        ? new Date(timestampSeconds * 1_000)
-        : new Date(Number.NaN);
-  if (Number.isNaN(occurredAt.getTime())) {
-    throw new MalformedMessageError('Message has no valid time (header cloudEvents:time)');
+    typeof rawTime === 'string' && RFC3339_PATTERN.test(rawTime) ? new Date(rawTime) : undefined;
+  if (occurredAt === undefined || Number.isNaN(occurredAt.getTime())) {
+    throw new MalformedMessageError(
+      'Message time (header cloudEvents:time) is not an RFC 3339 timestamp',
+    );
   }
   return occurredAt;
 }

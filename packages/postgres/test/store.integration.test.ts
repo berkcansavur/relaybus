@@ -1,8 +1,12 @@
-import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createUuidV7, type EventEnvelope } from '@relaybus/core';
 import { createPostgresSchemaSql, PostgresEventStore } from '../src/index.js';
-import { startDatabase, uniqueSchema, type TestDatabase } from './support/postgres-container.js';
+import {
+  createTestPool,
+  startDatabase,
+  uniqueSchema,
+  type TestDatabase,
+} from './support/postgres-container.js';
 
 const NOW = new Date('2026-01-01T00:00:00.000Z');
 
@@ -91,7 +95,7 @@ describe('setup', () => {
 
 describe('pool ownership', () => {
   it('does not close a pool it was given', async () => {
-    const pool = new Pool({ connectionString: database.connectionString });
+    const pool = createTestPool(database.connectionString, 10);
     const store = new PostgresEventStore({ pool, schema: uniqueSchema() });
     await store.setup();
     await store.close();

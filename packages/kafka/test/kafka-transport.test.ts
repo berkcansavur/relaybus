@@ -1,14 +1,23 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   ConfigurationError,
+  EventValidationError,
   InvalidEnvelopeError,
-  RelayBusError,
+  NonRetryableError,
   type EventEnvelope,
 } from '@relaybus/core';
-import { KafkaTransport, type KafkaTransportOptions } from '../src/index.js';
+import {
+  HandlerFailedError,
+  KafkaTransport,
+  PublishTimeoutError,
+  type InvalidMessagePolicy,
+  UnencodableEventError,
+  type KafkaTransportOptions,
+} from '../src/index.js';
 import { EVENT_NAMES, FakeKafka, asIncoming, createEnvelope, createLogger } from './fakes.js';
 
 const FAST = { maxAttempts: 3, initialBackoff: 1, maxBackoff: 2 } as const;
+const FAST_RESTART = { initialBackoff: 1, maxBackoff: 2 } as const;
 
 function setup(options: Partial<KafkaTransportOptions> = {}) {
   const kafka = new FakeKafka();
@@ -18,6 +27,7 @@ function setup(options: Partial<KafkaTransportOptions> = {}) {
     groupId: 'billing',
     logger,
     processing: FAST,
+    restart: FAST_RESTART,
     ...options,
   });
   return { kafka, logger, transport, producer: kafka.producer_, consumer: kafka.consumer_ };
@@ -49,6 +59,15 @@ describe('options', () => {
 
   it('rejects malformed durations', () => {
     expect(() => setup({ startupTimeout: '1 minute' as '1m' })).toThrow(ConfigurationError);
+  });
+
+  it.each([
+    ['publishTimeout', { publishTimeout: '1 minute' }],
+    ['restart.initialBackoff', { restart: { initialBackoff: 'x' } }],
+    ['restart.maxBackoff', { restart: { maxBackoff: 'x' } }],
+    ['processing.heartbeatInterval', { processing: { heartbeatInterval: 'x' } }],
+  ])('rejects a malformed %s', (_label, options) => {
+    expect(() => setup(options as Partial<KafkaTransportOptions>)).toThrow(ConfigurationError);
   });
 
   it('logs to the console unless a logger is given', () => {
@@ -111,8 +130,25 @@ describe('publish', () => {
     const { transport, producer } = setup();
     await expect(
       transport.publish(createEnvelope({ payload: undefined }), 'orders'),
-    ).rejects.toThrow(RelayBusError);
+    ).rejects.toThrow(UnencodableEventError);
     expect(producer.sent).toHaveLength(0);
+  });
+
+  it('rejects with a timeout error when the broker never acks, and ignores the late outcome', async () => {
+    const { transport, producer } = setup({ publishTimeout: 10 });
+    producer.hang = true;
+    await expect(transport.publish(createEnvelope(), 'orders')).rejects.toThrow(
+      PublishTimeoutError,
+    );
+    await expect(transport.publish(createEnvelope(), 'orders')).rejects.toThrow(
+      /no broker ack for topic 'orders' within 10ms/,
+    );
+  });
+
+  it('does not time out a send that is acked in time', async () => {
+    const { transport, producer } = setup({ publishTimeout: '1m' });
+    await transport.publish(createEnvelope(), 'orders');
+    expect(producer.sent).toHaveLength(1);
   });
 
   it('refuses to publish or connect after close', async () => {
@@ -187,8 +223,32 @@ describe('subscribe', () => {
         'broker unreachable',
       );
       expect(transport.isConsuming()).toBe(false);
+      expect(consumer.disconnected).toBe(true);
     },
   );
+
+  it('stops the consumer it started when start-up fails, so a later subscribe can retry', async () => {
+    const { transport, consumer } = setup({ startupTimeout: 5 });
+    consumer.emitOnRun = undefined;
+    consumer.disconnectError = new Error('already gone');
+    await expect(transport.subscribe(['orders'], async () => undefined)).rejects.toThrow(
+      /did not join/,
+    );
+    expect(consumer.disconnected).toBe(true);
+    consumer.emitOnRun = EVENT_NAMES.GROUP_JOIN;
+    consumer.disconnectError = undefined;
+    await transport.subscribe(['orders'], async () => undefined);
+    expect(transport.isConsuming()).toBe(true);
+  });
+
+  it('does not restart a consumer that crashed before the first join; start-up fails instead', async () => {
+    const { transport, consumer } = setup();
+    consumer.emitOnRun = EVENT_NAMES.CRASH;
+    consumer.emitPayloadOnRun = { error: new Error('no auth'), restart: false };
+    await expect(transport.subscribe(['orders'], async () => undefined)).rejects.toThrow('no auth');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(consumer.runCalls).toBe(1);
+  });
 
   it('fails start-up when the consumer crashes before joining', async () => {
     const { transport, consumer, logger } = setup();
@@ -241,13 +301,13 @@ describe('health', () => {
       expect(transport.isConsuming()).toBe(true);
       consumer.emit(
         event,
-        event === EVENT_NAMES.CRASH ? { error: 'boom', restart: false } : undefined,
+        event === EVENT_NAMES.CRASH ? { error: 'boom', restart: true } : undefined,
       );
       expect(transport.isConsuming()).toBe(false);
       consumer.emit(EVENT_NAMES.GROUP_JOIN);
     }
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Rebalancing'));
-    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('restart=false'));
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('restart=true'));
   });
 
   it('reports a crash without a payload', async () => {
@@ -255,6 +315,36 @@ describe('health', () => {
     consumer.emit(EVENT_NAMES.CRASH);
     expect(transport.isConsuming()).toBe(false);
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('restart=undefined'));
+  });
+
+  it('reports readiness only when connected and, once subscribed, consuming', async () => {
+    const { transport, consumer } = setup();
+    expect(transport.isReady()).toBe(false);
+    await transport.connect();
+    expect(transport.isReady()).toBe(true);
+    await transport.subscribe(['orders'], async () => undefined);
+    expect(transport.isReady()).toBe(true);
+    consumer.emit(EVENT_NAMES.REBALANCING);
+    expect(transport.isReady()).toBe(false);
+    consumer.emit(EVENT_NAMES.GROUP_JOIN);
+    expect(transport.isReady()).toBe(true);
+    await transport.close();
+    expect(transport.isReady()).toBe(false);
+  });
+
+  it('is not ready when the producer failed to connect', async () => {
+    const { transport, producer } = setup();
+    producer.connectError = new Error('down');
+    await expect(transport.connect()).rejects.toThrow('down');
+    expect(transport.isReady()).toBe(false);
+  });
+
+  it('does not report ready for a producer that connected after close', async () => {
+    const { transport } = setup();
+    const connecting = transport.connect();
+    await transport.close();
+    await connecting.catch(() => undefined);
+    expect(transport.isReady()).toBe(false);
   });
 
   it('is not consuming before subscribe and after close', async () => {
@@ -307,8 +397,85 @@ describe('inbound processing', () => {
   it('describes non-Error rejections', async () => {
     const { consumer, onMessage, logger } = await subscribed({ processing: { maxAttempts: 1 } });
     onMessage.mockRejectedValue('plain string');
-    await expect(consumer.deliver(asIncoming(createEnvelope()))).rejects.toBe('plain string');
+    await expect(consumer.deliver(asIncoming(createEnvelope()))).rejects.toThrow(
+      HandlerFailedError,
+    );
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('error='));
+  });
+
+  it.each([
+    ['TypeError', new TypeError('x is not a function')],
+    ['RangeError', new RangeError('out of range')],
+    ['ReferenceError', new ReferenceError('y is not defined')],
+    ['SyntaxError', new SyntaxError('bad json')],
+  ])(
+    'hands a %s to the client wrapped, so it can never be treated as fatal',
+    async (name, error) => {
+      const { consumer, onMessage } = await subscribed({ processing: { maxAttempts: 1 } });
+      onMessage.mockRejectedValue(error);
+      const failure = await consumer.deliver(asIncoming(createEnvelope())).catch((e: unknown) => e);
+      expect(failure).toBeInstanceOf(HandlerFailedError);
+      expect(failure).not.toBeInstanceOf(TypeError);
+      expect((failure as Error).message).toBe(`${name}: ${error.message}`);
+      expect((failure as Error).cause).toBeUndefined();
+    },
+  );
+
+  it('heartbeats in slices during a long backoff', async () => {
+    const { consumer, onMessage } = await subscribed({
+      processing: { maxAttempts: 2, initialBackoff: 25, maxBackoff: 25, heartbeatInterval: 10 },
+    });
+    onMessage.mockRejectedValueOnce(new Error('db down'));
+    const heartbeat = vi.fn(async () => undefined);
+    await consumer.deliver(asIncoming(createEnvelope()), heartbeat);
+    expect(heartbeat).toHaveBeenCalledTimes(3);
+  });
+
+  it('stops the sliced backoff when the transport closes', async () => {
+    const { consumer, onMessage, transport, logger } = await subscribed({
+      processing: {
+        maxAttempts: 5,
+        initialBackoff: 60_000,
+        maxBackoff: 60_000,
+        heartbeatInterval: 10,
+      },
+    });
+    onMessage.mockRejectedValue(new Error('db down'));
+    const heartbeat = vi.fn(async () => undefined);
+    const delivery = consumer.deliver(asIncoming(createEnvelope()), heartbeat);
+    const assertion = expect(delivery).rejects.toThrow('db down');
+    await vi.waitFor(() => expect(logger.warn).toHaveBeenCalledTimes(1));
+    await transport.close();
+    await assertion;
+    expect(heartbeat.mock.calls.length).toBeLessThan(100);
+  });
+
+  it('tracks stalls per partition: one partition recovering does not hide another', async () => {
+    const { consumer, onMessage, transport } = await subscribed({ processing: { maxAttempts: 1 } });
+    const deliver = (partition: number) =>
+      consumer.eachMessage!({
+        topic: 'orders',
+        partition,
+        message: asIncoming(createEnvelope()),
+        heartbeat: async () => undefined,
+      });
+    onMessage.mockRejectedValue(new Error('db down'));
+    await expect(deliver(0)).rejects.toThrow();
+    await expect(deliver(1)).rejects.toThrow();
+    onMessage.mockResolvedValue(undefined);
+    await deliver(1);
+    expect(transport.isConsuming()).toBe(false);
+    await deliver(0);
+    expect(transport.isConsuming()).toBe(true);
+  });
+
+  it('forgets stalls on a rebalance, because the assignment changes', async () => {
+    const { consumer, onMessage, transport } = await subscribed({ processing: { maxAttempts: 1 } });
+    onMessage.mockRejectedValue(new Error('db down'));
+    await expect(consumer.deliver(asIncoming(createEnvelope()))).rejects.toThrow();
+    consumer.emit(EVENT_NAMES.REBALANCING);
+    consumer.emit(EVENT_NAMES.GROUP_JOIN);
+    expect(transport.isConsuming()).toBe(true);
   });
 
   it('wakes the backoff and stops retrying when the transport closes', async () => {
@@ -381,13 +548,176 @@ describe('inbound processing', () => {
     expect(onMessage).not.toHaveBeenCalled();
     expect(logger.error).not.toHaveBeenCalledWith(expect.stringContaining('Skipping'));
   });
+
+  it('wraps an unexpected decoding bug so the client never sees a raw TypeError', async () => {
+    const { consumer } = await subscribed();
+    const poisoned = {
+      key: null,
+      value: Buffer.from('1'),
+      offset: '7',
+      get headers(): never {
+        throw new TypeError('decoder bug');
+      },
+    };
+    const failure = await consumer.eachMessage!({
+      topic: 'orders',
+      partition: 0,
+      message: poisoned,
+      heartbeat: async () => undefined,
+    }).catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(HandlerFailedError);
+  });
+});
+
+describe('consumer crash recovery', () => {
+  it('restarts the run loop after an unrecoverable crash and recovers', async () => {
+    const { transport, consumer, logger } = await subscribed();
+    consumer.emit(EVENT_NAMES.CRASH, { error: new TypeError('fatal'), restart: false });
+    expect(transport.isConsuming()).toBe(false);
+    await vi.waitFor(() => expect(consumer.runCalls).toBe(2));
+    await vi.waitFor(() => expect(transport.isConsuming()).toBe(true));
+    expect(consumer.disconnected).toBe(true);
+    expect(logger.log).toHaveBeenCalledWith(
+      expect.stringContaining('[KafkaTransport](restartConsumer) Consumer restarted'),
+    );
+  });
+
+  it('keeps restarting with backoff while restarts fail', async () => {
+    const { transport, consumer, logger } = await subscribed();
+    consumer.runError = new Error('broker down');
+    consumer.emit(EVENT_NAMES.CRASH, { error: 'boom', restart: false });
+    await vi.waitFor(() => expect(consumer.runCalls).toBeGreaterThanOrEqual(4));
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('[KafkaTransport](restartConsumer) Restart failed, will retry'),
+    );
+    expect(transport.isConsuming()).toBe(false);
+    consumer.runError = undefined;
+    await vi.waitFor(() => expect(transport.isConsuming()).toBe(true));
+  });
+
+  it('ignores a second crash report while a restart is already running', async () => {
+    const { consumer } = await subscribed({ restart: { initialBackoff: 20, maxBackoff: 20 } });
+    consumer.emit(EVENT_NAMES.CRASH, { error: 'a', restart: false });
+    consumer.emit(EVENT_NAMES.CRASH, { error: 'b', restart: false });
+    await vi.waitFor(() => expect(consumer.runCalls).toBe(2));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(consumer.runCalls).toBe(2);
+  });
+
+  it('restarts even when disconnecting the dead consumer fails', async () => {
+    const { transport, consumer } = await subscribed();
+    consumer.disconnectError = new Error('already disconnected');
+    consumer.emit(EVENT_NAMES.CRASH, { error: 'a', restart: false });
+    await vi.waitFor(() => expect(consumer.runCalls).toBe(2));
+    await vi.waitFor(() => expect(transport.isConsuming()).toBe(true));
+  });
+
+  it('can restart again after a later crash', async () => {
+    const { consumer } = await subscribed();
+    consumer.emit(EVENT_NAMES.CRASH, { error: 'a', restart: false });
+    await vi.waitFor(() => expect(consumer.runCalls).toBe(2));
+    await vi.waitFor(() => expect(consumer.disconnected).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    consumer.emit(EVENT_NAMES.CRASH, { error: 'b', restart: false });
+    await vi.waitFor(() => expect(consumer.runCalls).toBe(3));
+  });
+
+  it('does not restart when the client restarts by itself', async () => {
+    const { consumer } = await subscribed();
+    consumer.emit(EVENT_NAMES.CRASH, { error: 'a', restart: true });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(consumer.runCalls).toBe(1);
+  });
+
+  it('stops restarting when the transport closes during the backoff', async () => {
+    const { transport, consumer } = await subscribed({
+      restart: { initialBackoff: 60_000, maxBackoff: 60_000 },
+    });
+    consumer.emit(EVENT_NAMES.CRASH, { error: 'a', restart: false });
+    await transport.close();
+    expect(consumer.runCalls).toBe(1);
+  });
+
+  it('stops restarting when the transport closes while the restart waits for the join', async () => {
+    const { transport, consumer } = await subscribed();
+    consumer.emitOnRun = undefined;
+    consumer.emit(EVENT_NAMES.CRASH, { error: 'a', restart: false });
+    await vi.waitFor(() => expect(consumer.runCalls).toBe(2));
+    await transport.close();
+    expect(transport.isConsuming()).toBe(false);
+  });
+
+  it('stops restarting when the transport closes between a failed attempt and the next', async () => {
+    const { transport, consumer } = await subscribed({
+      restart: { initialBackoff: 5, maxBackoff: 5 },
+    });
+    consumer.runError = new Error('down');
+    consumer.emit(EVENT_NAMES.CRASH, { error: 'a', restart: false });
+    await vi.waitFor(() => expect(consumer.runCalls).toBeGreaterThanOrEqual(2));
+    await transport.close();
+    const calls = consumer.runCalls;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(consumer.runCalls).toBe(calls);
+  });
 });
 
 describe('malformed messages', () => {
   const malformed = { key: Buffer.from('k'), value: Buffer.from('{nope'), offset: '9' };
 
-  it('skips them with a logged error by default', async () => {
-    const { consumer, onMessage, logger, producer } = await subscribed();
+  it('dead-letters them to <topic>.dead by default, with the original headers and error headers', async () => {
+    const { consumer, onMessage, producer, logger } = await subscribed();
+    await consumer.deliver({
+      ...malformed,
+      headers: { origin: 'svc' },
+      key: Buffer.from('k'),
+    });
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(producer.sent).toHaveLength(1);
+    expect(producer.sent[0]!.topic).toBe('orders.dead');
+    expect(producer.sent[0]!.messages[0]!.headers).toMatchObject({
+      origin: 'svc',
+      'relaybus-source-topic': 'orders',
+      'relaybus-source-offset': '9',
+    });
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('deadLetterTopic=orders.dead'),
+    );
+  });
+
+  it('names the dead letter topic with a function of the source topic', async () => {
+    const { consumer, producer } = await subscribed({
+      onInvalidMessage: { deadLetterTopic: (topic) => `dlq.${topic}` },
+    });
+    await consumer.deliver(malformed);
+    expect(producer.sent[0]!.topic).toBe('dlq.orders');
+  });
+
+  it.each([
+    ['the default', undefined, ['orders', 'orders.dead']],
+    ['a function', { deadLetterTopic: (t: string) => `${t}.x` }, ['orders', 'orders.x']],
+  ])(
+    'rejects a subscription that consumes its own dead letter topic (%s)',
+    async (_l, policy, topics) => {
+      const { transport } = setup(
+        policy === undefined ? {} : { onInvalidMessage: policy as InvalidMessagePolicy },
+      );
+      await expect(transport.subscribe(topics, async () => undefined)).rejects.toThrow(/loop/);
+    },
+  );
+
+  it.each([
+    ['skip', 'skip' as const],
+    ['a custom handler', async () => undefined],
+  ])('does not check dead letter loops for %s', async (_l, policy) => {
+    const { transport } = setup({ onInvalidMessage: policy });
+    await transport.subscribe(['orders', 'orders.dead'], async () => undefined);
+    expect(transport.isConsuming()).toBe(true);
+  });
+
+  it('skips them with a logged error only when asked to', async () => {
+    const { consumer, onMessage, logger, producer } = await subscribed({
+      onInvalidMessage: 'skip',
+    });
     await consumer.deliver({ ...asIncoming(createEnvelope()), value: Buffer.from('{nope') });
     expect(onMessage).not.toHaveBeenCalled();
     expect(producer.sent).toHaveLength(0);
@@ -476,6 +806,22 @@ describe('malformed messages', () => {
   });
 });
 
+describe('events the bus rejects for good', () => {
+  it.each([
+    ['an EventValidationError', new EventValidationError('schema mismatch', [])],
+    ['a plain NonRetryableError', new NonRetryableError('poison')],
+  ])('dead-letters %s instead of retrying', async (_label, error) => {
+    const { consumer, onMessage, producer } = await subscribed();
+    onMessage.mockRejectedValueOnce(error);
+    await consumer.deliver(asIncoming(createEnvelope()));
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(producer.sent[0]!.topic).toBe('orders.dead');
+    expect(producer.sent[0]!.messages[0]!.headers).toMatchObject({
+      'relaybus-invalid-reason': error.message,
+    });
+  });
+});
+
 describe('events the bus rejects as malformed', () => {
   it('routes them to the invalid path instead of retrying, then moves on', async () => {
     const handler = vi.fn(async () => undefined);
@@ -486,8 +832,8 @@ describe('events the bus rejects as malformed', () => {
     expect(handler).toHaveBeenCalledWith(expect.objectContaining({ reason: 'bad envelope' }));
   });
 
-  it('skips them with an error log by default', async () => {
-    const { consumer, onMessage, logger } = await subscribed();
+  it('skips them with an error log when the policy is skip', async () => {
+    const { consumer, onMessage, logger } = await subscribed({ onInvalidMessage: 'skip' });
     onMessage.mockRejectedValueOnce(new InvalidEnvelopeError('bad envelope'));
     await consumer.deliver(asIncoming(createEnvelope()));
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('reason=bad envelope'));
@@ -509,6 +855,16 @@ describe('close', () => {
     await transport.close();
     expect(kafka.consumer_.disconnected).toBe(false);
     expect(kafka.producer_.disconnected).toBe(false);
+  });
+
+  it('rejects a start-up that is still waiting for the join', async () => {
+    const { transport, consumer } = setup();
+    consumer.emitOnRun = undefined;
+    const pending = transport.subscribe(['orders'], async () => undefined);
+    const assertion = expect(pending).rejects.toThrow(/is closed/);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await transport.close();
+    await assertion;
   });
 
   it('closes while a producer connect is failing, and still closes the consumer', async () => {

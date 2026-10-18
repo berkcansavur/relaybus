@@ -408,7 +408,7 @@ describe('shutdown', () => {
     await stopping;
     expect(bus.isRunning).toBe(false);
     await expect(bus.start()).rejects.toThrow(
-      'A stopped relaybus cannot be restarted; create a new instance',
+      'A stopped relaybus cannot be started again; create a new instance',
     );
   });
 
@@ -435,7 +435,7 @@ describe('shutdown', () => {
     await expect(first).rejects.toThrow('pool already closed');
     await expect(second).rejects.toThrow('pool already closed');
     expect(bus.isRunning).toBe(false);
-    await expect(bus.start()).rejects.toThrow(/cannot be restarted/);
+    await expect(bus.start()).rejects.toThrow(/cannot be started again/);
   });
 
   it('logs transports that throw non-errors while closing', async () => {

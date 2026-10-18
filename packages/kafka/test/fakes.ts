@@ -63,7 +63,13 @@ export class FakeProducer implements KafkaProducerLike {
     }
   }
 
+  /** When set, `send` never settles on its own. */
+  hang = false;
+
   async send(record: KafkaProducerRecord): Promise<unknown> {
+    if (this.hang) {
+      return new Promise<never>(() => undefined);
+    }
     if (this.sendError !== undefined) {
       throw this.sendError;
     }
@@ -88,6 +94,7 @@ export class FakeConsumer implements KafkaConsumerLike {
   runError: Error | undefined;
   disconnectError: Error | undefined;
   disconnected = false;
+  runCalls = 0;
   /** Event emitted from `run`, as a real client does while it joins. */
   emitOnRun: string | undefined = EVENT_NAMES.GROUP_JOIN;
   emitPayloadOnRun: unknown = undefined;
@@ -111,6 +118,7 @@ export class FakeConsumer implements KafkaConsumerLike {
   }
 
   async run(config: KafkaRunConfig): Promise<void> {
+    this.runCalls += 1;
     if (this.runError !== undefined) {
       throw this.runError;
     }

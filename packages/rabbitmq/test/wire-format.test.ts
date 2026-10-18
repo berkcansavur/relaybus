@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { NonRetryableError } from '@relaybus/core';
 import type { AmqpMessage } from '../src/amqp-types.js';
-import { MalformedMessageError } from '../src/errors.js';
-import { decodeEnvelope, encodeEnvelope } from '../src/wire-format.js';
+import {
+  AmqpLimitExceededError,
+  MalformedMessageError,
+  UnserializablePayloadError,
+} from '../src/errors.js';
+import { assertShortString, decodeEnvelope, encodeEnvelope } from '../src/wire-format.js';
 import { createEnvelope } from './fakes.js';
 
 function asDelivery(encoded: ReturnType<typeof encodeEnvelope>): AmqpMessage {
@@ -78,13 +83,67 @@ describe('wire format', () => {
     expect(decodeEnvelope(asDelivery(encodeEnvelope(envelope)))).toEqual(envelope);
   });
 
-  it('encodes an undefined payload as JSON null', () => {
-    const envelope = createEnvelope({ payload: undefined });
-    expect(decodeEnvelope(asDelivery(encodeEnvelope(envelope))).payload).toBeNull();
+  it('round-trips a null payload and refuses an undefined one', () => {
+    expect(
+      decodeEnvelope(asDelivery(encodeEnvelope(createEnvelope({ payload: null })))).payload,
+    ).toBeNull();
+    expect(() => encodeEnvelope(createEnvelope({ payload: undefined }))).toThrow(
+      UnserializablePayloadError,
+    );
   });
 
-  it('refuses a payload that cannot be serialized', () => {
-    expect(() => encodeEnvelope(createEnvelope({ payload: 10n }))).toThrow(TypeError);
+  it('refuses a payload that cannot be serialized, with a non-retryable error', () => {
+    const error = (() => {
+      try {
+        encodeEnvelope(createEnvelope({ payload: { amount: 10n } }));
+      } catch (caught) {
+        return caught as Error;
+      }
+      return undefined;
+    })();
+    expect(error).toBeInstanceOf(UnserializablePayloadError);
+    expect(error).toBeInstanceOf(NonRetryableError);
+    expect(error!.message).toContain('$.amount is bigint');
+  });
+
+  it('keeps ids and header names that fit in 255 bytes, counting UTF-8 bytes', () => {
+    const edge = 'a'.repeat(255);
+    const encoded = encodeEnvelope(
+      createEnvelope({ id: edge, headers: { ['b'.repeat(246)]: 'v' } }),
+    );
+    expect(encoded.options.messageId).toBe(edge);
+    expect(() => encodeEnvelope(createEnvelope({ id: 'é'.repeat(128) }))).toThrow(
+      AmqpLimitExceededError,
+    );
+  });
+
+  it('refuses an id or header name beyond the AMQP short string limit, as non-retryable', () => {
+    expect(() => encodeEnvelope(createEnvelope({ id: 'x'.repeat(256) }))).toThrow(
+      /Event id is 256 bytes, above the AMQP limit of 255 bytes/,
+    );
+    expect(() => encodeEnvelope(createEnvelope({ headers: { ['h'.repeat(247)]: 'v' } }))).toThrow(
+      AmqpLimitExceededError,
+    );
+    expect(() => assertShortString('Routing key', 'k'.repeat(256))).toThrow(NonRetryableError);
+  });
+
+  it('mirrors type, source and correlation id into AMQP properties only when they fit, the headers always carry them', () => {
+    const long = 'z'.repeat(300);
+    const envelope = createEnvelope({ type: `a.${long}.v1`, source: long, correlationId: long });
+    const encoded = encodeEnvelope(envelope);
+    expect(encoded.options).not.toHaveProperty('type');
+    expect(encoded.options).not.toHaveProperty('appId');
+    expect(encoded.options).not.toHaveProperty('correlationId');
+    expect(decodeEnvelope(asDelivery(encoded))).toEqual(envelope);
+  });
+
+  it('keeps a header literally named __proto__ instead of losing it', () => {
+    const headers = JSON.parse('{"__proto__":"polluted","other":"kept"}') as Record<string, string>;
+    const envelope = createEnvelope({ headers });
+    const decoded = decodeEnvelope(asDelivery(encodeEnvelope(envelope)));
+    expect(Object.keys(decoded.headers)).toEqual(['__proto__', 'other']);
+    expect(Object.getOwnPropertyDescriptor(decoded.headers, '__proto__')?.value).toBe('polluted');
+    expect(Object.getPrototypeOf(decoded.headers)).toBe(Object.prototype);
   });
 
   it('ignores broker headers and non-string event headers when decoding', () => {
@@ -139,7 +198,11 @@ describe('wire format', () => {
     ['no id', { 'cloudEvents:id': '' }, /no id/],
     ['no type', { 'cloudEvents:type': undefined }, /no type/],
     ['no source', { 'cloudEvents:source': undefined }, /no source/],
-    ['an unparsable time', { 'cloudEvents:time': 'yesterday' }, /no valid time/],
+    ['an unparsable time', { 'cloudEvents:time': 'yesterday' }, /not an RFC 3339/],
+    ['a lenient date', { 'cloudEvents:time': 'Jan 1 2026' }, /not an RFC 3339/],
+    ['a date without time zone', { 'cloudEvents:time': '2026-01-01T00:00:00' }, /not an RFC 3339/],
+    ['an impossible date', { 'cloudEvents:time': '2026-13-45T00:00:00Z' }, /not an RFC 3339/],
+    ['a time that is not text', { 'cloudEvents:time': 1_767_225_600 }, /not an RFC 3339/],
     ['no time at all', { 'cloudEvents:time': undefined }, /no valid time/],
   ])('rejects a message with %s', (_label, overrides, pattern) => {
     const headers = {
@@ -151,6 +214,36 @@ describe('wire format', () => {
     };
     expect(() => decodeEnvelope(withHeaders(headers))).toThrow(MalformedMessageError);
     expect(() => decodeEnvelope(withHeaders(headers))).toThrow(pattern);
+  });
+
+  it('accepts RFC 3339 times with offsets, lower case and fractions', () => {
+    const decode = (time: string) =>
+      decodeEnvelope(
+        withHeaders({
+          'cloudEvents:id': 'a',
+          'cloudEvents:type': 'b.c.v1',
+          'cloudEvents:source': 's',
+          'cloudEvents:time': time,
+        }),
+      ).occurredAt.toISOString();
+    expect(decode('2026-01-01T02:00:00+02:00')).toBe('2026-01-01T00:00:00.000Z');
+    expect(decode('2026-01-01t00:00:00.5z')).toBe('2026-01-01T00:00:00.500Z');
+  });
+
+  it('uses the AMQP timestamp only when the time header is absent', () => {
+    const base = { 'cloudEvents:id': 'a', 'cloudEvents:type': 'b.c.v1', 'cloudEvents:source': 's' };
+    expect(
+      decodeEnvelope(withHeaders(base, { timestamp: 1_767_225_600 })).occurredAt.toISOString(),
+    ).toBe('2026-01-01T00:00:00.000Z');
+    expect(() =>
+      decodeEnvelope(withHeaders({ ...base, 'cloudEvents:time': 'yesterday' }, { timestamp: 1 })),
+    ).toThrow(/not an RFC 3339/);
+    expect(() => decodeEnvelope(withHeaders(base, { timestamp: Number.NaN }))).toThrow(
+      /no valid time/,
+    );
+    expect(() => decodeEnvelope(withHeaders(base, { timestamp: '1767225600' }))).toThrow(
+      /no valid time/,
+    );
   });
 
   it('rejects a body that is not JSON', () => {

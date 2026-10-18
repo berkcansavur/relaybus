@@ -80,7 +80,7 @@ describe('lifecycle', () => {
     await bus.stop();
   });
 
-  it('rolls back a failed start and closes transports', async () => {
+  it('closes transports after a failed start and refuses a second start', async () => {
     const store = new InMemoryEventStore();
     Object.assign(store, { setup: vi.fn().mockRejectedValueOnce(new Error('migrations failed')) });
     const transport = new InMemoryTransport('broker');
@@ -88,8 +88,26 @@ describe('lifecycle', () => {
     await expect(bus.start()).rejects.toThrow('migrations failed');
     expect(bus.isRunning).toBe(false);
     expect(transport.closed).toBe(true);
+    await expect(bus.start()).rejects.toThrow(
+      'A stopped relaybus cannot be started again; create a new instance',
+    );
+  });
+
+  it('is ready only while running with every transport ready', async () => {
+    const ready = new InMemoryTransport('ready');
+    let brokerUp = true;
+    const flaky: Transport = {
+      name: 'flaky',
+      publish: async () => undefined,
+      isReady: () => brokerUp,
+      close: async () => undefined,
+    };
+    const { bus } = createTestBus({ transports: [ready, flaky] });
+    expect(bus.isReady()).toBe(false);
     await bus.start();
-    expect(bus.isRunning).toBe(true);
+    expect(bus.isReady()).toBe(true);
+    brokerUp = false;
+    expect(bus.isReady()).toBe(false);
     await bus.stop();
   });
 

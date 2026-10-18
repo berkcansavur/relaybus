@@ -2,11 +2,20 @@ import { Inject, Injectable, type OnModuleInit } from '@nestjs/common';
 import { DiscoveryService, MetadataScanner } from '@nestjs/core';
 import type { InstanceWrapper } from '@nestjs/core/injector/instance-wrapper.js';
 import { ConfigurationError, RelayBus, type EventHandler } from '@relaybus/core';
-import { readSubscribeMetadata } from './subscribe.decorator.js';
+import { readSubscribeMetadata, type SubscribeMetadata } from './subscribe.decorator.js';
+
+interface SubscribedMethod {
+  readonly methodName: string;
+  readonly declarations: readonly SubscribeMetadata[];
+}
 
 /**
  * Finds every `@Subscribe` method of every singleton provider in the
- * application and registers it on the bus before the bus starts.
+ * application and registers it on the bus before the bus starts. Providers
+ * that are request-scoped or transient, directly or through a dependency, and
+ * declare `@Subscribe` methods fail the boot. A request-scoped provider whose
+ * token is neither a class nor an instance carrying the decorated prototype
+ * (for example a string-token factory) cannot be inspected and is skipped.
  */
 @Injectable()
 export class RelayBusHandlerExplorer implements OnModuleInit {
@@ -18,7 +27,12 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
 
   onModuleInit(): void {
     const registeredBy = new Map<string, string>();
+    const visited = new Map<object, Set<string>>();
     for (const wrapper of this.discovery.getProviders()) {
+      if (wrapper.isTransient || !wrapper.isDependencyTreeStatic()) {
+        this.assertNoHandlers(wrapper);
+        continue;
+      }
       const instance = wrapper.instance as unknown;
       if (typeof instance !== 'object' || instance === null) {
         continue;
@@ -28,13 +42,19 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
         continue;
       }
       const className = instance.constructor.name;
-      for (const methodName of this.metadataScanner.getAllMethodNames(prototype)) {
+      for (const { methodName, declarations } of this.subscribedMethods(prototype)) {
+        // A `useExisting` alias exposes the same instance under another token.
+        const seen = visited.get(instance) ?? new Set<string>();
+        visited.set(instance, seen);
+        if (seen.has(methodName)) {
+          continue;
+        }
+        seen.add(methodName);
         const method = (instance as Record<string, unknown>)[methodName] as (
           ...args: Parameters<EventHandler>
         ) => unknown;
-        for (const { event, options } of readSubscribeMetadata(method)) {
-          const location = `${className}.${methodName}`;
-          assertSingleton(wrapper, location);
+        const location = `${className}.${methodName}`;
+        for (const { event, options } of declarations) {
           const id = options.id ?? location;
           const previous = registeredBy.get(id);
           if (previous !== undefined) {
@@ -54,13 +74,33 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
       }
     }
   }
-}
 
-function assertSingleton(wrapper: InstanceWrapper, location: string): void {
-  if (wrapper.isTransient || !wrapper.isDependencyTreeStatic()) {
-    throw new ConfigurationError(
-      `${location} uses @Subscribe but its provider is request-scoped or transient ` +
-        `(directly or through a dependency); handlers must be singleton providers`,
-    );
+  private subscribedMethods(prototype: object): SubscribedMethod[] {
+    const methods: SubscribedMethod[] = [];
+    for (const methodName of this.metadataScanner.getAllMethodNames(prototype)) {
+      const declarations = readSubscribeMetadata(prototype, methodName);
+      if (declarations.length > 0) {
+        methods.push({ methodName, declarations });
+      }
+    }
+    return methods;
+  }
+
+  /**
+   * Request-scoped and transient wrappers have no usable instance (a factory
+   * wrapper has none at all), so the decorated prototype is taken from the
+   * provider class, or from the provider token for factories when it is a class.
+   */
+  private assertNoHandlers(wrapper: InstanceWrapper): void {
+    const type = (wrapper.isFactory ? wrapper.token : wrapper.metatype) as unknown;
+    const prototype = typeof type === 'function' ? (type.prototype as object) : null;
+    const [first] = prototype === null ? [] : this.subscribedMethods(prototype);
+    if (first !== undefined) {
+      throw new ConfigurationError(
+        `${(prototype as { constructor: { name: string } }).constructor.name}.${first.methodName} ` +
+          `uses @Subscribe but its provider is request-scoped or transient ` +
+          `(directly or through a dependency); handlers must be singleton providers`,
+      );
+    }
   }
 }

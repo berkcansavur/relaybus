@@ -1,10 +1,14 @@
-import type {
-  DeliveryRecord,
-  DeliveryStatus,
-  ErrorInfo,
-  EventEnvelope,
-  NewDelivery,
+import {
+  EventValidationError,
+  type DeliveryRecord,
+  type DeliveryStatus,
+  type ErrorInfo,
+  type EventEnvelope,
+  type NewDelivery,
 } from '@relaybus/core';
+
+/** Where a delivery sits relative to the claim index. See {@link DeliveryDocument.lane}. */
+export type DeliveryLane = 'ready' | 'parked';
 
 /** Shape of a document in the events collection. `_id` is the event id. */
 export interface EventDocument {
@@ -28,8 +32,15 @@ export interface EventDocument {
  * Shape of a document in the deliveries collection.
  *
  * `dueAt` exists exactly while the delivery is `pending` (its `availableAt`) or
- * `processing` (its `leaseExpiresAt`). The claim and ordering indexes are
- * partial on it, so they only ever contain unfinished work.
+ * `processing` (its `leaseExpiresAt`). The ordering index is partial on it, so
+ * it only ever contains unfinished work.
+ *
+ * `lane` exists on the same deliveries. A `ready` delivery is in the claim
+ * index. A `parked` delivery is a pending, keyed delivery that waited behind an
+ * unfinished earlier delivery of its handler and key; the claim index leaves it
+ * out so a long queue behind one slow delivery costs nothing per claim. Claims
+ * move the lowest parked delivery of a key back to `ready` once nothing
+ * unfinished precedes it.
  */
 export interface DeliveryDocument {
   readonly _id: string;
@@ -41,6 +52,7 @@ export interface DeliveryDocument {
   /** Sequence of the event within its key. Absent for unkeyed events. */
   readonly sequence?: number;
   readonly status: DeliveryStatus;
+  readonly lane?: DeliveryLane;
   readonly attempts: number;
   readonly availableAt: Date;
   readonly dueAt?: Date;
@@ -63,24 +75,48 @@ export interface KeySequenceDocument {
  * Builds the stored form of an event. Payload and headers go through JSON so
  * that values JSON cannot represent (Dates, `undefined`, `NaN`) end up exactly
  * as in every other store.
+ *
+ * @throws EventValidationError when payload or headers contain a lone UTF-16
+ * surrogate. BSON strings are UTF-8, so MongoDB would silently store U+FFFD
+ * instead and the consumer would read different data than was published.
  */
 export function toEventDocument(event: EventEnvelope, sequence: number | null): EventDocument {
-  const normalized = JSON.parse(
-    JSON.stringify({ payload: event.payload, headers: event.headers }),
-  ) as { payload?: unknown; headers: Record<string, string> };
+  const payloadJson = serializeWellFormed(event.payload, 'payload');
+  const headersJson = serializeWellFormed(event.headers, 'headers')!;
   return {
     _id: event.id,
     type: event.type,
     source: event.source,
     key: event.key,
     sequence,
-    ...('payload' in normalized ? { payload: normalized.payload } : {}),
-    headers: normalized.headers,
+    ...(payloadJson === undefined ? {} : { payload: JSON.parse(payloadJson) as unknown }),
+    headers: JSON.parse(headersJson) as Record<string, string>,
     correlationId: event.correlationId,
     causationId: event.causationId,
     occurredAt: event.occurredAt,
     revision: 0,
   };
+}
+
+/**
+ * JSON.stringify writes a lone surrogate as a `\udXXX` escape and a valid pair as
+ * the character itself, so an escape in that range is exactly a lone surrogate.
+ * The lookbehind and the pair group skip escaped backslashes (`\\ud800` is text).
+ */
+const LONE_SURROGATE_ESCAPE = /(?<!\\)(?:\\\\)*\\ud[89a-f][0-9a-f]{2}/i;
+
+function serializeWellFormed(value: unknown, field: string): string | undefined {
+  const json = JSON.stringify(value);
+  if (json !== undefined && LONE_SURROGATE_ESCAPE.test(json)) {
+    throw new EventValidationError(`The event ${field} contains a lone UTF-16 surrogate`, [
+      {
+        message:
+          'A lone surrogate cannot be stored as UTF-8 and would be replaced by U+FFFD. Remove it or encode the text first (for example with String.prototype.toWellFormed)',
+        path: [field],
+      },
+    ]);
+  }
+  return json;
 }
 
 export function toEnvelope(document: EventDocument): EventEnvelope {
@@ -112,6 +148,7 @@ export function toDeliveryDocument(
       ? {}
       : { key: ordering.key, sequence: ordering.sequence }),
     status: 'pending',
+    lane: 'ready',
     attempts: 0,
     availableAt: delivery.availableAt,
     dueAt: delivery.availableAt,

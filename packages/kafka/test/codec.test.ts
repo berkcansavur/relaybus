@@ -1,6 +1,8 @@
+import { NonRetryableError } from '@relaybus/core';
 import { describe, expect, it } from 'vitest';
 import {
   InvalidKafkaMessageError,
+  UnencodableEventError,
   decodeEnvelope,
   encodeEnvelope,
   type KafkaIncomingHeaders,
@@ -59,6 +61,94 @@ describe('encodeEnvelope', () => {
     expect(() => encodeEnvelope(createEnvelope({ payload: undefined }))).toThrow(
       /payload that JSON cannot represent/,
     );
+  });
+});
+
+describe('encodeEnvelope validation', () => {
+  const circular: Record<string, unknown> = {};
+  circular['self'] = circular;
+
+  it.each([
+    ['undefined', undefined],
+    ['a function', () => 1],
+    ['a symbol', Symbol('x')],
+    ['a BigInt', 10n],
+    ['a nested BigInt', { amount: 10n }],
+    ['a circular structure', circular],
+  ])('rejects %s as a payload with a non-retryable error', (_label, payload) => {
+    const attempt = (): unknown => encodeEnvelope(createEnvelope({ payload }));
+    expect(attempt).toThrow(UnencodableEventError);
+    expect(attempt).toThrow(NonRetryableError);
+    expect(attempt).toThrow(/payload that JSON cannot represent/);
+  });
+
+  it.each([
+    ['an invalid date', new Date(Number.NaN)],
+    ['a year beyond 9999', new Date('+010000-01-01T00:00:00.000Z')],
+    ['a negative year', new Date('-000001-01-01T00:00:00.000Z')],
+  ])('rejects occurredAt with %s instead of writing a non RFC 3339 ce_time', (_l, occurredAt) => {
+    expect(() => encodeEnvelope(createEnvelope({ occurredAt }))).toThrow(/not an RFC 3339 instant/);
+  });
+
+  it('accepts the first and last representable instants', () => {
+    for (const iso of ['0000-01-01T00:00:00.000Z', '9999-12-31T23:59:59.999Z']) {
+      const envelope = createEnvelope({ occurredAt: new Date(iso) });
+      expect(decodeEnvelope(asIncoming(envelope)).occurredAt.toISOString()).toBe(iso);
+    }
+  });
+
+  it('keeps a header named __proto__ as data through encode, decode and re-emit', () => {
+    const headers = Object.fromEntries([
+      ['__proto__', 'p'],
+      ['plain', 'v'],
+    ]);
+    const encoded = encodeEnvelope(createEnvelope({ headers }));
+    expect(Object.getOwnPropertyDescriptor(encoded.headers, '__proto__')?.value).toBe('p');
+    const decoded = decodeEnvelope(asIncoming(createEnvelope({ headers })));
+    expect(Object.getOwnPropertyDescriptor(decoded.headers, '__proto__')?.value).toBe('p');
+    expect(Object.getPrototypeOf(decoded.headers)).toBe(Object.prototype);
+    const outgoing = toOutgoingHeaders(headers);
+    expect(Object.getOwnPropertyDescriptor(outgoing, '__proto__')?.value).toBe('p');
+  });
+});
+
+describe('ce_time fallback', () => {
+  it('uses the Kafka record timestamp for a plain CloudEvents producer record without ce_time', () => {
+    const plain = {
+      key: Buffer.from('order-1'),
+      value: Buffer.from('{"a":1}'),
+      timestamp: '1767225600000',
+      headers: {
+        ce_specversion: Buffer.from('1.0'),
+        ce_id: Buffer.from('plain-1'),
+        ce_type: Buffer.from('order.placed.v1'),
+        ce_source: Buffer.from('//legacy'),
+        'content-type': Buffer.from('application/json'),
+      },
+    };
+    const decoded = decodeEnvelope(plain);
+    expect(decoded.occurredAt.toISOString()).toBe('2026-01-01T00:00:00.000Z');
+    expect(decoded.id).toBe('plain-1');
+  });
+
+  it('prefers ce_time over the record timestamp', () => {
+    const decoded = decodeEnvelope({ ...incoming(), timestamp: '1' });
+    expect(decoded.occurredAt.toISOString()).toBe('2026-01-01T00:00:00.000Z');
+  });
+
+  it.each([
+    ['no timestamp', undefined],
+    ['an empty timestamp', ''],
+    ['a non numeric timestamp', 'abc'],
+  ])('rejects a missing ce_time with %s', (_label, timestamp) => {
+    expect(() => decodeEnvelope({ ...incoming({ ce_time: undefined }), timestamp })).toThrow(
+      /ce_time is missing/,
+    );
+  });
+
+  it('treats an empty ce_time as absent', () => {
+    const decoded = decodeEnvelope({ ...incoming({ ce_time: '' }), timestamp: '0' });
+    expect(decoded.occurredAt.getTime()).toBe(0);
   });
 });
 
@@ -133,7 +223,6 @@ describe('decodeEnvelope strictness', () => {
     ['empty source', { ce_source: '' }, /ce_source/],
     ['missing type', { ce_type: undefined }, /ce_type/],
     ['invalid type', { ce_type: 'no spaces allowed' }, /not a valid event type/],
-    ['missing time', { ce_time: undefined }, /ce_time/],
     ['time without a zone', { ce_time: '2026-01-01T00:00:00' }, /RFC 3339/],
     ['impossible date', { ce_time: '2026-13-45T00:00:00Z' }, /RFC 3339/],
     ['missing content type', { 'content-type': undefined }, /content-type/],

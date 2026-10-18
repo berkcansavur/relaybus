@@ -16,6 +16,12 @@ describe('abortableSleep', () => {
     controller.abort();
     await sleeping;
   });
+
+  it('does not sleep at all when the signal was aborted before', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await abortableSleep(60_000, controller.signal);
+  });
 });
 
 describe('SerialQueue', () => {

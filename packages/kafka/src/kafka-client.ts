@@ -58,6 +58,8 @@ export interface KafkaIncomingMessage {
   readonly value: KafkaBytes | null;
   readonly headers?: KafkaIncomingHeaders | undefined;
   readonly offset: string;
+  /** Record timestamp as epoch milliseconds in a string (kafkajs and Confluent). */
+  readonly timestamp?: string | undefined;
 }
 
 /** Argument of the `eachMessage` callback. `pause` and others are not used. */

@@ -20,6 +20,7 @@ describe.each(POSTGRES_IMAGES)('PostgresEventStore on %s', (image) => {
   });
 
   afterAll(async () => {
+    await Promise.all([...peers].map((peer) => peer.close()));
     await database.stop();
   });
 

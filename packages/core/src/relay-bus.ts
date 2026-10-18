@@ -280,6 +280,19 @@ export class RelayBus<TTransaction = unknown> {
     return this.#state === 'running';
   }
 
+  /** True while the bus runs and every transport reports itself ready. */
+  isReady(): boolean {
+    if (this.#state !== 'running') {
+      return false;
+    }
+    for (const transport of this.#transports.values()) {
+      if (transport.isReady?.() === false) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   /**
    * Subscribes a handler to an event class or type. Register handlers in every
    * process that publishes the event: deliveries are created at publish time
@@ -382,13 +395,14 @@ export class RelayBus<TTransaction = unknown> {
 
   /**
    * Creates the store schema, connects transports, subscribes and starts
-   * dispatching. A failed start can be retried; a stopped bus cannot restart.
+   * dispatching. A bus starts once: after a failed start or a stop it is
+   * stopped for good, because its transports are closed; create a new instance.
    */
   async start(): Promise<void> {
     if (this.#state !== 'idle') {
       throw new RelayBusError(
         this.#state === 'stopped'
-          ? 'A stopped relaybus cannot be restarted; create a new instance'
+          ? 'A stopped relaybus cannot be started again; create a new instance'
           : `Cannot start a relaybus that is ${this.#state}`,
       );
     }
@@ -493,7 +507,7 @@ export class RelayBus<TTransaction = unknown> {
       }
     } catch (error) {
       await this.#closeTransports();
-      this.#state = 'idle';
+      this.#state = 'stopped';
       throw error;
     }
     if (this.#dispatcherEnabled) {

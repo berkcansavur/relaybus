@@ -1,4 +1,5 @@
 import { Inject, Injectable, Module, Scope } from '@nestjs/common';
+import { REQUEST } from '@nestjs/core';
 import type { TestingModule } from '@nestjs/testing';
 import {
   InMemoryEventStore,
@@ -277,6 +278,161 @@ describe('@Subscribe validation', () => {
     }
 
     const moduleRef = await createApplication({ imports: [relayBusRoot()], providers: [Plain] });
+
+    await expect(start(moduleRef)).resolves.toBeInstanceOf(RelayBus);
+    await moduleRef.close();
+  });
+
+  it('keeps the subscription when a later decorator replaces the method', async () => {
+    function wrapMethod(): MethodDecorator {
+      return (_target, _key, descriptor) => {
+        const original = descriptor.value as (...args: unknown[]) => unknown;
+        descriptor.value = function (this: unknown, ...args: unknown[]) {
+          return original.apply(this, args);
+        } as never;
+      };
+    }
+    @Injectable()
+    class WrappedAbove {
+      readonly seen: string[] = [];
+
+      @wrapMethod()
+      @Subscribe(OrderPlaced)
+      handle(event: EventEnvelope<{ orderId: string }>): void {
+        this.seen.push(event.payload.orderId);
+      }
+    }
+    @Injectable()
+    class WrappedBelow {
+      readonly seen: string[] = [];
+
+      @Subscribe(OrderPlaced)
+      @wrapMethod()
+      handle(event: EventEnvelope<{ orderId: string }>): void {
+        this.seen.push(event.payload.orderId);
+      }
+    }
+    const moduleRef = await createApplication({
+      imports: [relayBusRoot()],
+      providers: [OrderService, WrappedAbove, WrappedBelow],
+    });
+    const bus = await start(moduleRef);
+
+    await moduleRef.get(OrderService).place('o-1');
+    await bus.drain();
+
+    expect(moduleRef.get(WrappedAbove).seen).toEqual(['o-1']);
+    expect(moduleRef.get(WrappedBelow).seen).toEqual(['o-1']);
+    await moduleRef.close();
+  });
+
+  it('discovers handlers declared on a base class', async () => {
+    class BaseHandlers {
+      readonly seen: string[] = [];
+
+      @Subscribe(OrderPlaced, { id: 'base.handle' })
+      handle(event: EventEnvelope<{ orderId: string }>): void {
+        this.seen.push(event.payload.orderId);
+      }
+    }
+    @Injectable()
+    class DerivedHandlers extends BaseHandlers {}
+    const moduleRef = await createApplication({
+      imports: [relayBusRoot()],
+      providers: [OrderService, DerivedHandlers],
+    });
+    const bus = await start(moduleRef);
+
+    await moduleRef.get(OrderService).place('o-1');
+    await bus.drain();
+
+    expect(moduleRef.get(DerivedHandlers).seen).toEqual(['o-1']);
+    await moduleRef.close();
+  });
+
+  it('registers a handler once when a useExisting alias points at its provider', async () => {
+    @Injectable()
+    class Handlers {
+      readonly seen: string[] = [];
+
+      @Subscribe(OrderPlaced)
+      handle(event: EventEnvelope<{ orderId: string }>): void {
+        this.seen.push(event.payload.orderId);
+      }
+    }
+    const moduleRef = await createApplication({
+      imports: [relayBusRoot()],
+      providers: [OrderService, Handlers, { provide: 'HANDLERS_ALIAS', useExisting: Handlers }],
+    });
+    const bus = await start(moduleRef);
+
+    await moduleRef.get(OrderService).place('o-1');
+    await bus.drain();
+
+    expect(bus.handlers()).toHaveLength(1);
+    expect(moduleRef.get(Handlers).seen).toEqual(['o-1']);
+    await moduleRef.close();
+  });
+
+  it('rejects factory providers that inject REQUEST', async () => {
+    @Injectable()
+    class Handlers {
+      @Subscribe(OrderPlaced)
+      handle(): void {}
+    }
+    const moduleRef = await createApplication({
+      imports: [relayBusRoot()],
+      providers: [{ provide: Handlers, useFactory: () => new Handlers(), inject: [REQUEST] }],
+    });
+
+    await expect(moduleRef.init()).rejects.toThrow(
+      /Handlers\.handle uses @Subscribe but its provider is request-scoped or transient/,
+    );
+  });
+
+  it('rejects factory providers that depend on a request-scoped provider', async () => {
+    @Injectable({ scope: Scope.REQUEST })
+    class RequestContext {}
+    @Injectable()
+    class Handlers {
+      @Subscribe(OrderPlaced)
+      handle(): void {}
+    }
+    const moduleRef = await createApplication({
+      imports: [relayBusRoot()],
+      providers: [
+        RequestContext,
+        { provide: Handlers, useFactory: () => new Handlers(), inject: [RequestContext] },
+      ],
+    });
+
+    await expect(moduleRef.init()).rejects.toThrow(/request-scoped or transient/);
+  });
+
+  it('rejects request-scoped class providers registered under a different token', async () => {
+    @Injectable({ scope: Scope.REQUEST })
+    class Handlers {
+      @Subscribe(OrderPlaced)
+      handle(): void {}
+    }
+    const moduleRef = await createApplication({
+      imports: [relayBusRoot()],
+      providers: [{ provide: 'HANDLERS', useClass: Handlers }],
+    });
+
+    await expect(moduleRef.init()).rejects.toThrow(/Handlers\.handle uses @Subscribe/);
+  });
+
+  it('cannot inspect request-scoped factories with a string token and leaves them alone', async () => {
+    @Injectable({ scope: Scope.REQUEST })
+    class RequestContext {}
+    const moduleRef = await createApplication({
+      imports: [relayBusRoot()],
+      providers: [
+        RequestContext,
+        { provide: 'PLAIN', useFactory: (context: unknown) => context, inject: [RequestContext] },
+      ],
+    });
 
     await expect(start(moduleRef)).resolves.toBeInstanceOf(RelayBus);
     await moduleRef.close();

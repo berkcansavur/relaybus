@@ -8,6 +8,7 @@ import {
   type RetryPolicyOptions,
 } from '@relaybus/core';
 import type { AmqpConnection } from './amqp-types.js';
+import { buildRetryLadder } from './redelivery.js';
 
 /** Connection settings accepted by `amqplib.connect`, given as an object instead of a URL. */
 export interface BrokerConnectionSettings {
@@ -17,7 +18,7 @@ export interface BrokerConnectionSettings {
   readonly username?: string;
   readonly password?: string;
   readonly vhost?: string;
-  /** Seconds. See "Operational notes" in the README: amqplib defaults to no heartbeat. */
+  /** Seconds. See "Operational notes" in the README for the heartbeat defaults of each amqplib version. */
   readonly heartbeat?: number;
 }
 
@@ -26,6 +27,23 @@ export type ReconnectOptions = Pick<
   RetryPolicyOptions,
   'initialDelay' | 'factor' | 'maxDelay' | 'jitter'
 >;
+
+/**
+ * Delayed redelivery of messages whose handler keeps failing. Each failed
+ * delivery goes to a retry queue and returns to the main queue after a growing
+ * delay, so an outage of the handler's dependency is waited out instead of
+ * burning through delivery attempts.
+ */
+export type RedeliveryOptions = Pick<
+  RetryPolicyOptions,
+  'initialDelay' | 'factor' | 'maxDelay' | 'jitter'
+> & {
+  /**
+   * How long a message may keep failing, counted from its first delayed
+   * redelivery, before it is dead-lettered. Default `'1h'`.
+   */
+  readonly maxAge?: Duration;
+};
 
 export interface RabbitMqTransportOptions {
   /** Name referenced by routes and subscriptions. Default `'rabbitmq'`. */
@@ -42,7 +60,10 @@ export interface RabbitMqTransportOptions {
   readonly connect?: () => Promise<AmqpConnection>;
   /** Topic exchange events are published to. Durable, created when missing. Default `'relaybus'`. */
   readonly exchange?: string;
-  /** Unacknowledged messages the consumer holds, which is also its concurrency. Default 50. */
+  /**
+   * Unacknowledged messages the consumer holds, which is also its concurrency.
+   * Default 50, or 1 when `ordered`.
+   */
   readonly prefetch?: number;
   /** Prefix of derived queue names. Default `'relaybus'`. */
   readonly queuePrefix?: string;
@@ -59,15 +80,35 @@ export interface RabbitMqTransportOptions {
   /** Queue that keeps dead-lettered messages for inspection. Default `'<queue>.dead'`. */
   readonly deadLetterQueue?: string;
   /**
-   * Deliveries (quorum queue `x-delivery-limit`) after which an unprocessable
-   * message moves to the dead-letter queue. Default 10.
+   * Quorum queue `x-delivery-limit`: deliveries after which the broker itself
+   * dead-letters a message. Failing handlers do not consume it (they use
+   * `redelivery`); it only stops a message that crashes the consumer or its
+   * channel again and again. Default 10.
    */
   readonly deliveryLimit?: number;
   /**
    * Handler attempts on the same delivery, with backoff, before the message is
-   * requeued. Default: 3 attempts, 200 ms initial delay, factor 2, 5 s cap, equal jitter.
+   * scheduled for delayed redelivery. Absorbs short blips without a broker round
+   * trip. Default: 3 attempts, 200 ms initial delay, factor 2, 5 s cap, equal jitter.
    */
   readonly handlerRetry?: RetryPolicyOptions;
+  /**
+   * Delayed redelivery after `handlerRetry` is spent. Default: 2 s initial
+   * delay, factor 2, 5 min cap, equal jitter, dead-lettered after 1 h of
+   * failing (about 18 redeliveries). Delays are quantized to the retry queues,
+   * one per step of the exponential ladder (9 queues with the defaults).
+   * Ignored when `ordered`, where the same delays are waited in place.
+   */
+  readonly redelivery?: RedeliveryOptions;
+  /**
+   * Consume the queue strictly in order: a single active consumer across all
+   * replicas, one message at a time, a failing message is retried in place
+   * (blocking the queue) instead of being delayed. Needed when
+   * `EventEnvelope.key` order matters; costs throughput, because one handler
+   * runs at a time. Default false: handlers run concurrently and a delayed
+   * redelivery overtakes later messages, so order is not preserved.
+   */
+  readonly ordered?: boolean;
   /** Reconnect backoff, or `false` to never reconnect. Default: 500 ms initial, factor 2, 30 s cap, equal jitter. */
   readonly reconnect?: ReconnectOptions | false;
   /**
@@ -102,6 +143,11 @@ export interface ResolvedTransportSettings {
   readonly deadLetterQueue: string | undefined;
   readonly deliveryLimit: number;
   readonly handlerRetry: RetryPolicy;
+  readonly redelivery: RetryPolicy;
+  /** Fixed delays of the retry queues; empty when `ordered`. */
+  readonly retryLadder: readonly number[];
+  readonly redeliveryMaxAgeMs: number;
+  readonly ordered: boolean;
   readonly reconnect: RetryPolicy | undefined;
   readonly failOnConnectError: boolean;
   readonly allowUnroutable: boolean;
@@ -119,6 +165,17 @@ const DEFAULT_HANDLER_RETRY: RetryPolicy = {
   jitter: 'equal',
   retryIf: undefined,
 };
+
+const DEFAULT_REDELIVERY: RetryPolicy = {
+  attempts: Number.POSITIVE_INFINITY,
+  initialDelayMs: 2_000,
+  factor: 2,
+  maxDelayMs: 300_000,
+  jitter: 'equal',
+  retryIf: undefined,
+};
+
+const DEFAULT_REDELIVERY_MAX_AGE = '1h';
 
 const DEFAULT_RECONNECT: RetryPolicy = {
   attempts: 1,
@@ -138,11 +195,17 @@ export function resolveSettings(options: RabbitMqTransportOptions): ResolvedTran
       'failOnConnectError=false needs reconnect enabled, otherwise the transport would never connect',
     );
   }
+  const ordered = options.ordered ?? false;
+  const prefetch = positiveInteger(options.prefetch ?? (ordered ? 1 : 50), 'prefetch');
+  if (ordered && prefetch !== 1) {
+    throw new ConfigurationError(`ordered consumption needs prefetch 1, received ${prefetch}`);
+  }
+  const redelivery = createRetryPolicy(options.redelivery, DEFAULT_REDELIVERY);
   return {
     name: nonEmpty(options.name ?? 'rabbitmq', 'name'),
     connect: resolveConnect(options),
     exchange,
-    prefetch: positiveInteger(options.prefetch ?? 50, 'prefetch'),
+    prefetch,
     queuePrefix: nonEmpty(options.queuePrefix ?? 'relaybus', 'queuePrefix'),
     consumerGroup: optionalNonEmpty(options.consumerGroup, 'consumerGroup'),
     queue: optionalNonEmpty(options.queue, 'queue'),
@@ -153,6 +216,13 @@ export function resolveSettings(options: RabbitMqTransportOptions): ResolvedTran
     deadLetterQueue: optionalNonEmpty(options.deadLetterQueue, 'deadLetterQueue'),
     deliveryLimit: positiveInteger(options.deliveryLimit ?? 10, 'deliveryLimit'),
     handlerRetry: createRetryPolicy(options.handlerRetry, DEFAULT_HANDLER_RETRY),
+    redelivery,
+    retryLadder: ordered ? [] : buildRetryLadder(redelivery),
+    redeliveryMaxAgeMs: positiveDuration(
+      options.redelivery?.maxAge ?? DEFAULT_REDELIVERY_MAX_AGE,
+      'redelivery.maxAge',
+    ),
+    ordered,
     reconnect: resolveReconnect(options.reconnect),
     failOnConnectError,
     allowUnroutable: options.allowUnroutable ?? false,

@@ -24,6 +24,9 @@ export interface PostgresNames {
   readonly indexes: {
     readonly deliveryEventHandler: string;
     readonly deliveryDue: string;
+    readonly deliveryDueUnkeyed: string;
+    readonly deliveryHandlerCreated: string;
+    readonly eventCreated: string;
     readonly deliveryKeyUnfinished: string;
     readonly deliveryKeyProcessing: string;
     readonly deliveryStatusCreated: string;
@@ -68,6 +71,9 @@ export function resolvePostgresNames(options: PostgresSchemaOptions = {}): Postg
     indexes: {
       deliveryEventHandler: index('deliveries_event_handler_unique'),
       deliveryDue: index('deliveries_due_idx'),
+      deliveryDueUnkeyed: index('deliveries_due_unkeyed_idx'),
+      deliveryHandlerCreated: index('deliveries_handler_created_idx'),
+      eventCreated: index('events_created_idx'),
       deliveryKeyUnfinished: index('deliveries_key_unfinished_idx'),
       deliveryKeyProcessing: index('deliveries_key_processing_idx'),
       deliveryStatusCreated: index('deliveries_status_created_idx'),

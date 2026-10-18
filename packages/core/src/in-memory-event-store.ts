@@ -209,7 +209,7 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
       if (claimed.length >= request.limit) {
         break;
       }
-      if (this.#hasUnfinishedPredecessor(delivery)) {
+      if (this.#isKeyBlocked(delivery, request.now)) {
         continue;
       }
       delivery.status = 'processing';
@@ -426,17 +426,25 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
     return next;
   }
 
-  #hasUnfinishedPredecessor(delivery: StoredDelivery): boolean {
+  /**
+   * A keyed delivery waits while an earlier delivery of the same handler and
+   * key is unfinished, or while any other delivery of that handler and key is
+   * running under a live lease (a requeued dead letter must not run alongside
+   * its successor).
+   */
+  #isKeyBlocked(delivery: StoredDelivery, now: Date): boolean {
     if (delivery.key === null) {
       return false;
     }
     for (const other of this.#deliveries.values()) {
-      if (
-        other.handler === delivery.handler &&
-        other.key === delivery.key &&
+      if (other === delivery || other.handler !== delivery.handler || other.key !== delivery.key) {
+        continue;
+      }
+      const unfinishedPredecessor =
         other.sequence! < delivery.sequence! &&
-        (other.status === 'pending' || other.status === 'processing')
-      ) {
+        (other.status === 'pending' || other.status === 'processing');
+      const runningUnderLiveLease = other.status === 'processing' && other.leaseExpiresAt! > now;
+      if (unfinishedPredecessor || runningUnderLiveLease) {
         return true;
       }
     }

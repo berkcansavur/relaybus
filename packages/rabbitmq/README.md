@@ -8,7 +8,7 @@ dead-letter queue.
 - **Publish** resolves only after the broker confirmed the message was persisted and routed.
 - **Consume** acknowledges only after your handler (the relaybus inbox write) succeeded.
 - **Reconnects** by itself with capped, jittered backoff and restores channels, topology and the consumer.
-- **Poison messages** go to a dead-letter queue after a bounded number of deliveries instead of looping.
+- **Failing handlers** are retried with growing delays (default: up to one hour) through retry queues, so a short outage of your database never dead-letters an event; **poison messages** go to a dead-letter queue immediately.
 
 ## Install
 
@@ -47,32 +47,35 @@ await bus.start(); // connects; rejects if the broker is unreachable
 A destination is a routing key when publishing and a binding pattern when subscribing
 (`orders.*`, `orders.#`, `order.placed.v1`).
 
-Readiness probe: `rabbit.isConnected()` is true while the connection is open and publishing and
-consuming are set up.
+Readiness probes: `rabbit.isReady()` is true while the transport can publish and, once subscribed,
+is consuming (connection up, channels open, consumer registered). `rabbit.isConnected()` is the
+narrower check of the connection alone. relaybus health checks use `isReady()`.
 
 ## Options
 
-| Option               | Default                                       | Description                                                                                                                                   |
-| -------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`               | `'rabbitmq'`                                  | Name referenced by routes and subscriptions.                                                                                                  |
-| `url`                | -                                             | `amqp://` URL or `{ hostname, port, username, password, vhost, heartbeat, protocol }`. Give exactly one of `url` and `connect`.               |
-| `connect`            | -                                             | Factory returning an amqplib connection. Called again after every loss. Use for TLS options or credentials.                                   |
-| `exchange`           | `'relaybus'`                                  | Durable topic exchange, created when missing.                                                                                                 |
-| `prefetch`           | `50`                                          | Unacknowledged messages held by the consumer; also the handler concurrency.                                                                   |
-| `queuePrefix`        | `'relaybus'`                                  | Prefix of derived queue names.                                                                                                                |
-| `consumerGroup`      | -                                             | Services sharing a group share one queue `<queuePrefix>.<consumerGroup>` and split the messages. Required to subscribe unless `queue` is set. |
-| `queue`              | -                                             | Explicit queue name; overrides `queuePrefix` and `consumerGroup`.                                                                             |
-| `deadLetterExchange` | `'<exchange>.dead'`                           | Direct exchange poison messages are dead-lettered to.                                                                                         |
-| `deadLetterQueue`    | `'<queue>.dead'`                              | Quorum queue that keeps dead-lettered messages.                                                                                               |
-| `deliveryLimit`      | `10`                                          | Deliveries before a failing message is dead-lettered (also set as the queue's `x-delivery-limit`).                                            |
-| `handlerRetry`       | 3 attempts, 200 ms, x2, 5 s cap, equal jitter | Handler attempts, with backoff, on one delivery before the message is requeued (`RetryPolicyOptions`).                                        |
-| `reconnect`          | 500 ms, x2, 30 s cap, equal jitter            | Reconnect backoff (`initialDelay`, `factor`, `maxDelay`, `jitter`; attempts are unlimited), or `false`.                                       |
-| `failOnConnectError` | `true`                                        | `connect()` rejects when the broker is unreachable. When `false` it resolves and keeps trying in the background.                              |
-| `allowUnroutable`    | `false`                                       | When `true`, publishing a message no queue is bound to resolves (the broker discards it) instead of rejecting.                                |
-| `publishTimeout`     | `'30s'`                                       | How long `publish` waits for the confirm.                                                                                                     |
-| `shutdownTimeout`    | `'30s'`                                       | How long `close()` waits for running handlers.                                                                                                |
-| `logger`             | `console`                                     | `log`/`warn`/`error`.                                                                                                                         |
-| `random`             | `Math.random`                                 | Jitter source, for tests.                                                                                                                     |
+| Option               | Default                                           | Description                                                                                                                                                            |
+| -------------------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`               | `'rabbitmq'`                                      | Name referenced by routes and subscriptions.                                                                                                                           |
+| `url`                | -                                                 | `amqp://` URL or `{ hostname, port, username, password, vhost, heartbeat, protocol }`. Give exactly one of `url` and `connect`.                                        |
+| `connect`            | -                                                 | Factory returning an amqplib connection. Called again after every loss. Use for TLS options or credentials.                                                            |
+| `exchange`           | `'relaybus'`                                      | Durable topic exchange, created when missing.                                                                                                                          |
+| `prefetch`           | `50` (`1` when `ordered`)                         | Unacknowledged messages held by the consumer; also the handler concurrency.                                                                                            |
+| `queuePrefix`        | `'relaybus'`                                      | Prefix of derived queue names.                                                                                                                                         |
+| `consumerGroup`      | -                                                 | Services sharing a group share one queue `<queuePrefix>.<consumerGroup>` and split the messages. Required to subscribe unless `queue` is set.                          |
+| `queue`              | -                                                 | Explicit queue name; overrides `queuePrefix` and `consumerGroup`.                                                                                                      |
+| `deadLetterExchange` | `'<exchange>.dead'`                               | Direct exchange poison messages are dead-lettered to.                                                                                                                  |
+| `deadLetterQueue`    | `'<queue>.dead'`                                  | Quorum queue that keeps dead-lettered messages.                                                                                                                        |
+| `deliveryLimit`      | `10`                                              | Quorum queue `x-delivery-limit`: a backstop that makes the broker dead-letter a message that crashes its consumer again and again. Failing handlers do not use it.     |
+| `handlerRetry`       | 3 attempts, 200 ms, x2, 5 s cap, equal jitter     | Handler attempts, with short backoff, on one delivery before the message is scheduled for delayed redelivery (`RetryPolicyOptions`).                                   |
+| `redelivery`         | 2 s, x2, 5 min cap, equal jitter, `maxAge` `'1h'` | Delayed redelivery after `handlerRetry`: `initialDelay`, `factor`, `maxDelay`, `jitter`, and `maxAge`, how long a message may keep failing before it is dead-lettered. |
+| `ordered`            | `false`                                           | Consume strictly in order: single active consumer, one message at a time, failing messages retried in place. See Ordering.                                             |
+| `reconnect`          | 500 ms, x2, 30 s cap, equal jitter                | Reconnect backoff (`initialDelay`, `factor`, `maxDelay`, `jitter`; attempts are unlimited), or `false`.                                                                |
+| `failOnConnectError` | `true`                                            | `connect()` rejects when the broker is unreachable. When `false` it resolves and keeps trying in the background.                                                       |
+| `allowUnroutable`    | `false`                                           | When `true`, publishing a message no queue is bound to resolves (the broker discards it) instead of rejecting.                                                         |
+| `publishTimeout`     | `'30s'`                                           | How long `publish` waits for the confirm.                                                                                                                              |
+| `shutdownTimeout`    | `'30s'`                                           | How long `close()` waits for running handlers.                                                                                                                         |
+| `logger`             | `console`                                         | `log`/`warn`/`error`.                                                                                                                                                  |
+| `random`             | `Math.random`                                     | Jitter source, for tests.                                                                                                                                              |
 
 ## Wire format
 
@@ -81,7 +84,7 @@ RabbitMQ's AMQP 0-9-1:
 
 - Body: the JSON payload, `contentType: application/json`, persistent (`deliveryMode: 2`).
 - Message headers: `cloudEvents:specversion`, `cloudEvents:id`, `cloudEvents:type`,
-  `cloudEvents:source`, `cloudEvents:time` (ISO 8601, millisecond precision),
+  `cloudEvents:source`, `cloudEvents:time` (RFC 3339, millisecond precision),
   `cloudEvents:datacontenttype`, and when set `cloudEvents:subject` (the event key),
   `cloudEvents:causationid`, `cloudEvents:correlationid`.
 - AMQP properties mirror them for broker tooling: `messageId`, `type`, `appId` (source),
@@ -89,9 +92,24 @@ RabbitMQ's AMQP 0-9-1:
 - Event headers (such as `traceparent`) travel as `relaybus:<name>`, so they cannot collide with
   CloudEvents attributes or broker headers like `x-death`.
 
-The envelope round-trips exactly (`occurredAt` as `Date`, `key`, `causationId`, headers). On receive
-the `cloudEvents:` headers win and the AMQP properties are the fallback, so events from other
-CloudEvents producers work if they follow the binding.
+The envelope round-trips exactly (`occurredAt` as `Date`, `key`, `causationId`, headers, including a
+header literally named `__proto__`). On receive the `cloudEvents:` headers win and the AMQP properties
+are the fallback, so events from other CloudEvents producers work if they follow the binding. The
+time must be strict RFC 3339 (`2026-01-01T10:20:30.456Z`, offsets allowed); the AMQP `timestamp`
+is used only when the `cloudEvents:time` header is absent, never to paper over a malformed one.
+
+**Payload validation.** The payload must survive `JSON.stringify` unchanged, like on the Kafka
+transport. `publish` rejects with `UnserializablePayloadError` (a `NonRetryableError`, so the outbox
+does not retry it forever) for `undefined`, functions, symbols, BigInt, NaN and Infinity, array
+holes, symbol keys, cycles, and anything JSON would silently convert: `Date`, `Map`, `Set`,
+typed arrays and class instances. Convert such values to plain data first. Use `null` for "no payload".
+
+**AMQP limits.** AMQP 0-9-1 short strings are limited to 255 bytes (UTF-8). The event id (also the
+AMQP `messageId`, which matches broker returns), every header name (`relaybus:<name>`, so at most
+246 bytes for your own names) and the destination (routing key) must fit; otherwise `publish`
+rejects with `AmqpLimitExceededError` (a `NonRetryableError`) instead of failing on every retry.
+`type`, `appId` and `correlationId` are mirrored into AMQP properties only when they fit; the
+`cloudEvents:` headers always carry them, so long values lose only the broker-tooling mirror.
 
 ## Guarantees
 
@@ -108,43 +126,91 @@ CloudEvents producers work if they follow the binding.
   subscriber" is fine.
 - **Acknowledge after handling.** A message is acknowledged after `onMessage` resolved, which in
   relaybus means the event is in the inbox. A crash before that redelivers it; the inbox drops the duplicate.
-- **No hot loops, no infinite loops.** A failing handler is retried with backoff on the same
-  delivery (`handlerRetry`), then the message is requeued. The consumer counts deliveries from the
-  `x-delivery-count` / `x-acquired-count` headers the broker stamps on redelivered messages and
-  dead-letters the message on the `deliveryLimit`-th failed delivery (the queue's `x-delivery-limit`
-  is set too, as a backstop for consumer crashes). Total handler runs for a permanently failing
-  message are `handlerRetry.attempts x deliveryLimit`.
+- **Outages are waited out, not burned through.** A failing handler is retried on the same delivery
+  with short backoff (`handlerRetry`). If it still fails, a copy of the message is published to a
+  retry queue and the original is acknowledged **only after the broker confirmed the copy**
+  (publisher confirms, mandatory flag), so the message is always in exactly one durable place at
+  least. When the copy's delay is over, the broker moves it back to the main queue. Delays grow
+  by `redelivery.factor` up to `redelivery.maxDelay`, with jitter. With the defaults a message is
+  retried at about 2, 4, 8, 16, 32, 64, 128, 256 s, then every 5 min, and dead-lettered after 1 h
+  of failing (`redelivery.maxAge`), about 18 redeliveries of 3 handler attempts each. A multi-minute
+  database outage therefore delays events and loses nothing. If the copy cannot be confirmed, the
+  original is requeued (after the same delay), never acknowledged.
+- **Delay tiers.** Each distinct delay is its own quorum retry queue (`<queue>.retry.<ms>`, nine with
+  the defaults) with a queue-level TTL, so messages in one queue expire in arrival order; one queue
+  with per-message TTLs would let a long delay block shorter ones. The jittered delay is rounded to
+  the tier below or above with the probability that keeps its average, so a burst of failures still
+  spreads across tiers. A retry copy carries `x-relaybus-redeliveries` and
+  `x-relaybus-first-failure-at`, which makes the window independent of which replica handles it.
 - **Immediate dead-lettering** for messages that can never succeed: bodies that are not valid
   CloudEvents (logged at `error`) and handler errors that are `NonRetryableError`s, such as
-  `InvalidEnvelopeError` from `bus.receive`. They end in `<queue>.dead` with their headers intact.
+  `InvalidEnvelopeError` from `bus.receive`. The consumer publishes a confirmed copy to the
+  dead-letter exchange, then acknowledges the original; the copy keeps the message headers, drops
+  the retry state (so replaying it starts a fresh retry window) and adds
+  `x-relaybus-dead-letter-reason`. If that publish fails the consumer rejects the message without
+  requeue and the broker dead-letters it (at-least-once strategy), so it still ends in `<queue>.dead`.
+- **Broker-level backstop.** `x-delivery-limit` (`deliveryLimit`) dead-letters a message that keeps
+  coming back because the consumer or its channel dies while holding it.
 - **Reconnection.** On connection loss, a closed channel or a cancelled consumer the transport
   drops the connection, waits with capped, jittered backoff, reconnects and re-declares the
   exchange, queues, bindings and consumer. Handlers still running during the loss finish; their
   acks fail (logged) and the broker redelivers.
-- **Ordering.** With `prefetch > 1` handlers run concurrently and redeliveries reorder messages.
-  Ordering per key is not guaranteed by this transport; set `prefetch: 1` for strict queue order.
+- **Ordering.** By default order is **not** preserved: `prefetch` handlers run concurrently,
+  several replicas compete on the queue, and a delayed redelivery overtakes later messages, so
+  `EventEnvelope.key` order does not hold across the broker. Handlers must tolerate reordering
+  (versioned state, "ignore older" checks). When per-key order matters, set `ordered: true`: the queue
+  gets `x-single-active-consumer` (one replica consumes, the others wait as standby and take over
+  when it goes away), prefetch is 1, and a failing message is retried **in place** with the
+  `redelivery` delays instead of moving behind newer ones, which blocks the queue until it succeeds or
+  `redelivery.maxAge` passes and it is dead-lettered. The cost is throughput: one handler call at a
+  time for the whole consumer group, and one stuck message stalls everything behind it. Order is
+  queue-wide (a superset of per-key order) and holds for messages published by one producer on one
+  connection; the broker cannot order across publishers.
 
 ## Topology
 
 For a subscription with `queue = relaybus.billing`, `exchange = relaybus`:
 
-| Object                        | Declaration                                                                                                                            |
-| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `relaybus` exchange           | topic, durable                                                                                                                         |
-| `relaybus.dead` exchange      | direct, durable                                                                                                                        |
-| `relaybus.billing.dead` queue | quorum, durable, bound to `relaybus.dead` with key `relaybus.billing`                                                                  |
-| `relaybus.billing` queue      | quorum, durable, `x-delivery-limit`, `x-dead-letter-exchange`, `x-dead-letter-routing-key`, bound to the exchange once per destination |
+| Object                        | Declaration                                                                                                                                                                                                                                              |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `relaybus` exchange           | topic, durable                                                                                                                                                                                                                                           |
+| `relaybus.dead` exchange      | direct, durable                                                                                                                                                                                                                                          |
+| `relaybus.billing.dead` queue | quorum, durable, bound to `relaybus.dead` with key `relaybus.billing`                                                                                                                                                                                    |
+| `relaybus.billing.retry.<ms>` | one quorum queue per delay tier (not when `ordered`): `x-message-ttl`, dead-lettered through the default exchange to `relaybus.billing`, `x-dead-letter-strategy: at-least-once`, `x-overflow: reject-publish`                                           |
+| `relaybus.billing` queue      | quorum, durable, `x-delivery-limit`, `x-dead-letter-exchange`, `x-dead-letter-routing-key`, `x-dead-letter-strategy: at-least-once`, `x-overflow: reject-publish`, `x-single-active-consumer` when `ordered`; bound to the exchange once per destination |
 
-Declarations are idempotent. Redeclaring a queue with different arguments (for example a new
-`deliveryLimit`) makes the broker answer `PRECONDITION_FAILED` and startup fails; delete or
-migrate the queue (or use a new `queue` name) when changing those. Removing a destination from a
-subscription does not unbind it.
+`at-least-once` dead-lettering makes the quorum queue keep a message until the dead-letter target
+confirmed it, so expiry, rejection and the delivery limit cannot lose messages while the target is
+unavailable. RabbitMQ requires `reject-publish` overflow with it. Queues are unbounded by default,
+so this only matters if you add a `max-length` policy: then publishers are refused instead of the
+oldest message being dropped.
+
+Declarations are idempotent. Redeclaring a queue with different arguments makes the broker answer
+`PRECONDITION_FAILED` and `subscribe`/startup rejects; the transport never alters an existing queue.
+Removing a destination from a subscription does not unbind it.
+
+### Migrating an existing queue
+
+Queues created by a pre-release version of this package lack `x-dead-letter-strategy` and
+`x-overflow`, and queues created with another `ordered` setting differ in `x-single-active-consumer`.
+RabbitMQ cannot change these arguments in place, so either:
+
+1. use a new `queue` / `consumerGroup` name, let both queues receive events (the new one is bound by
+   the new deployment), and delete the old queue once it is empty; or
+2. stop the consumers, drain or shovel the old queue (`rabbitmqctl shovel` / the Shovel plugin) into
+   the exchange, delete it (`rabbitmqctl delete_queue <name>`), and start the new version.
+
+The dead-letter queue and exchange are unchanged and need no migration.
 
 ## Operational notes
 
-- **Heartbeats.** amqplib disables heartbeats unless the URL carries `?heartbeat=<seconds>`. Set
-  it (30 is typical) so a silently dead TCP connection is noticed; otherwise only `publishTimeout`
-  catches it for publishers and consumers can hang.
+- **Heartbeats.** When the URL carries no `heartbeat`, amqplib adopts the interval the broker
+  proposes (RabbitMQ defaults to 60 s), in both the 0.10 and the 2.x range, so a dead TCP connection
+  is noticed after roughly two intervals. Set `?heartbeat=30` (or `heartbeat` in the settings object)
+  to pick a shorter interval; the lower of the two values is negotiated. Beware `heartbeat=0`: from
+  amqplib 2.0 it explicitly **disables** heartbeats (before 2.0 it meant "use the server's value"), and
+  without heartbeats only `publishTimeout` catches a silently dead connection for publishers while
+  consumers can hang. Do not set it to 0.
 - **Dead-letter queue.** Monitor `<queue>.dead`. To replay, move messages back to the exchange
   with the Shovel plugin or a script; the headers (`cloudEvents:*`) are intact and the inbox deduplicates by id.
 - **One subscription per transport.** A transport owns one consumer group's queue. To consume
@@ -158,11 +224,14 @@ subscription does not unbind it.
 
 ## Troubleshooting
 
-| Symptom                                         | Cause and fix                                                                                                             |
-| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `UnroutableMessageError`                        | No queue is bound to the routing key. Start the consuming service first, check the destination, or set `allowUnroutable`. |
-| `PRECONDITION_FAILED` on start                  | A queue or exchange exists with different arguments or type. Align the options or delete the old object.                  |
-| `Not connected to the broker`                   | Broker unreachable or reconnecting; the outbox retries. Check `isConnected()` and the `[ConnectionSupervisor]` log lines. |
-| Messages pile up in `<queue>.dead`              | Handler errors or malformed messages; the `error` log lines name the event id and reason.                                 |
-| Publishes hang until `publishTimeout`           | Broker is blocked (memory or disk alarm) or the connection died without heartbeats.                                       |
-| `Needs 'consumerGroup' or 'queue' to subscribe` | Set `consumerGroup` (or `queue`) on the transport that subscribes.                                                        |
+| Symptom                                                 | Cause and fix                                                                                                                                                                      |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `UnroutableMessageError`                                | No queue is bound to the routing key. Start the consuming service first, check the destination, or set `allowUnroutable`.                                                          |
+| `PRECONDITION_FAILED` on start                          | A queue or exchange exists with different arguments or type. Align the options or delete the old object.                                                                           |
+| `Not connected to the broker`                           | Broker unreachable or reconnecting; the outbox retries. Check `isConnected()` and the `[ConnectionSupervisor]` log lines.                                                          |
+| Messages pile up in `<queue>.dead`                      | Handler errors, malformed messages or a dependency that stayed down past `redelivery.maxAge`; the `error` log lines and the `x-relaybus-dead-letter-reason` header name the cause. |
+| `UnserializablePayloadError` / `AmqpLimitExceededError` | The event can never be published as is: fix the payload (plain JSON data only) or shorten the id, header name or routing key.                                                      |
+| Events arrive out of order                              | Expected without `ordered: true`; see Ordering.                                                                                                                                    |
+| `isReady()` is false but `isConnected()` is true        | The consumer was cancelled (queue deleted, node failover) and is being restored, or the publisher channel closed.                                                                  |
+| Publishes hang until `publishTimeout`                   | Broker is blocked (memory or disk alarm) or the connection died without heartbeats.                                                                                                |
+| `Needs 'consumerGroup' or 'queue' to subscribe`         | Set `consumerGroup` (or `queue`) on the transport that subscribes.                                                                                                                 |

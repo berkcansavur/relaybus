@@ -1,4 +1,5 @@
-import { InMemoryEventStore, RelayBus } from '@relaybus/core';
+import { InMemoryEventStore, RelayBus, type Transport } from '@relaybus/core';
+import { FakeClock } from '@relaybus/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RelayBusHealth } from '../src/index.js';
 import { OrderPlaced, createApplication, manualOptions, relayBusRoot } from './helpers.js';
@@ -17,6 +18,7 @@ describe('RelayBusHealth', () => {
     expect(report).toEqual({
       status: 'up',
       running: true,
+      ready: true,
       handlers: 0,
       statistics: { pending: 0, processing: 0, completed: 0, dead: 0, oldestDueAt: null },
       lagMilliseconds: 0,
@@ -46,7 +48,12 @@ describe('RelayBusHealth', () => {
     const moduleRef = await createApplication({ imports: [relayBusRoot()] });
     const health = moduleRef.get(RelayBusHealth);
 
-    expect(await health.check()).toEqual({ status: 'down', running: false, handlers: 0 });
+    expect(await health.check()).toEqual({
+      status: 'down',
+      running: false,
+      ready: false,
+      handlers: 0,
+    });
 
     await moduleRef.init();
     await moduleRef.close();
@@ -65,11 +72,59 @@ describe('RelayBusHealth', () => {
     expect(report).toEqual({
       status: 'down',
       running: true,
+      ready: true,
       handlers: 0,
       error: 'connection lost',
     });
     vi.spyOn(store, 'statistics').mockRejectedValueOnce('plain failure');
     expect((await moduleRef.get(RelayBusHealth).check()).error).toBe('plain failure');
+    await moduleRef.close();
+  });
+
+  it('reports down while a transport is not ready and up again once it is', async () => {
+    let ready = true;
+    const transport: Transport = {
+      name: 'broker',
+      publish: () => Promise.resolve(),
+      isReady: () => ready,
+      close: () => Promise.resolve(),
+    };
+    const moduleRef = await createApplication({
+      imports: [relayBusRoot({ ...manualOptions(), transports: [transport] })],
+    });
+    await moduleRef.init();
+    const health = moduleRef.get(RelayBusHealth);
+
+    expect(await health.check()).toMatchObject({ status: 'up', running: true, ready: true });
+
+    ready = false;
+    expect(await health.check()).toMatchObject({
+      status: 'down',
+      running: true,
+      ready: false,
+      lagMilliseconds: 0,
+    });
+
+    ready = true;
+    expect((await health.check()).status).toBe('up');
+    await moduleRef.close();
+  });
+
+  it('measures the lag with the clock of the module options', async () => {
+    const clock = new FakeClock();
+    const moduleRef = await createApplication({
+      imports: [relayBusRoot({ ...manualOptions(), clock })],
+    });
+    await moduleRef.init();
+    const bus = moduleRef.get(RelayBus);
+    bus.subscribe(OrderPlaced, () => undefined, { id: 'late' });
+    await bus.transaction((transaction) =>
+      bus.publish(new OrderPlaced({ orderId: 'o' }), { transaction }),
+    );
+
+    clock.advance(7_000);
+
+    expect((await moduleRef.get(RelayBusHealth).check()).lagMilliseconds).toBe(7_000);
     await moduleRef.close();
   });
 });

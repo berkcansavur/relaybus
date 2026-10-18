@@ -1,7 +1,8 @@
-import type { ClientSession, Document, MongoClient } from 'mongodb';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { Collection, type ClientSession, type Document, type MongoClient } from 'mongodb';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   ConfigurationError,
+  EventValidationError,
   RelayBus,
   defineEvent,
   type ClaimedDelivery,
@@ -33,6 +34,10 @@ afterAll(async () => {
   await replicaSet.stop();
 });
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 async function createStore(
   options: Partial<ConstructorParameters<typeof MongoEventStore>[0]> = {},
 ): Promise<{ store: MongoEventStore; database: string }> {
@@ -58,7 +63,10 @@ describe('setup', () => {
         'event_handler',
         'handler_created',
         'ordering',
+        'parked',
+        'running',
         'status_created',
+        'status_updated',
         'type_created',
       ].sort(),
     );
@@ -287,6 +295,44 @@ describe('purge', () => {
     });
   });
 
+  it('deletes deliveries and their events in one transaction', async () => {
+    const { store } = await createStore();
+    await store.transaction((session) =>
+      store.append(
+        session,
+        [{ event: createEnvelope(), deliveries: [createDelivery('h')] }],
+        at(0),
+      ),
+    );
+    const [delivery] = await store.claim({
+      handlers: ['h'],
+      limit: 1,
+      leaseOwner: 'w',
+      leaseExpiresAt: at(1_000),
+      now: at(0),
+    });
+    await store.complete(delivery!, at(1));
+
+    const original = Collection.prototype.deleteMany;
+    vi.spyOn(Collection.prototype, 'deleteMany').mockImplementation(async function (
+      this: Collection,
+      ...args: Parameters<Collection['deleteMany']>
+    ) {
+      if (this.collectionName.endsWith('_events')) {
+        throw new Error('crash before the events are deleted');
+      }
+      return original.apply(this, args);
+    } as never);
+    await expect(store.purge({ completedBefore: at(10) })).rejects.toThrow(/crash before/);
+    vi.restoreAllMocks();
+
+    expect(await store.listDeliveries({})).toHaveLength(1);
+    expect(await store.purge({ completedBefore: at(10) })).toEqual({
+      deletedDeliveries: 1,
+      deletedEvents: 1,
+    });
+  });
+
   it('keeps an event whose deliveries are extended while it is being purged', async () => {
     const { store } = await createStore();
     const event = createEnvelope();
@@ -329,6 +375,165 @@ describe('purge', () => {
     const records = await store.listDeliveries({});
     expect(records.map((record) => record.handler)).toEqual(['b']);
     expect(records[0]!.event.id).toBe(event.id);
+  });
+});
+
+describe('sessions without a transaction', () => {
+  it('refuses to append through a session that is not in a transaction', async () => {
+    const { store, database } = await createStore();
+    const session = client.startSession();
+    try {
+      const failure = await store
+        .append(session, [{ event: createEnvelope(), deliveries: [createDelivery('h')] }], at(0))
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ConfigurationError);
+      expect((failure as ConfigurationError).message).toMatch(/inside a started transaction/);
+      expect(await client.db(database).collection('relaybus_events').countDocuments()).toBe(0);
+
+      session.startTransaction();
+      await store.append(
+        session,
+        [{ event: createEnvelope(), deliveries: [createDelivery('h')] }],
+        at(0),
+      );
+      await session.commitTransaction();
+      expect(await client.db(database).collection('relaybus_events').countDocuments()).toBe(1);
+    } finally {
+      await session.endSession();
+    }
+  });
+
+  it('refuses to complete through a session that is not in a transaction', async () => {
+    const { store } = await createStore();
+    await store.transaction((session) =>
+      store.append(
+        session,
+        [{ event: createEnvelope(), deliveries: [createDelivery('h')] }],
+        at(0),
+      ),
+    );
+    const [delivery] = await store.claim({
+      handlers: ['h'],
+      limit: 1,
+      leaseOwner: 'w',
+      leaseExpiresAt: at(1_000),
+      now: at(0),
+    });
+    const session = client.startSession();
+    try {
+      await expect(store.complete(delivery!, at(1), session)).rejects.toBeInstanceOf(
+        ConfigurationError,
+      );
+      expect((await store.listDeliveries({}))[0]).toMatchObject({ status: 'processing' });
+    } finally {
+      await session.endSession();
+    }
+  });
+});
+
+describe('fenced updates', () => {
+  it('confirms a renewal that repeats the stored values and still rejects a stale lease', async () => {
+    const { store } = await createStore();
+    await store.transaction((session) =>
+      store.append(
+        session,
+        [{ event: createEnvelope(), deliveries: [createDelivery('h')] }],
+        at(0),
+      ),
+    );
+    const [delivery] = await store.claim({
+      handlers: ['h'],
+      limit: 1,
+      leaseOwner: 'w',
+      leaseExpiresAt: at(1_000),
+      now: at(0),
+    });
+    expect(await store.extendLease(delivery!, at(5_000), at(10))).toBe(true);
+    expect(await store.extendLease(delivery!, at(5_000), at(10))).toBe(true);
+    expect(await store.extendLease({ ...delivery!, leaseToken: 'stale' }, at(5_000), at(10))).toBe(
+      false,
+    );
+  });
+});
+
+describe('text that BSON cannot store', () => {
+  const lone = '\ud800';
+
+  async function appendPayload(
+    store: MongoEventStore,
+    overrides: Parameters<typeof createEnvelope>[0],
+  ): Promise<unknown> {
+    return store
+      .transaction((session) =>
+        store.append(
+          session,
+          [{ event: createEnvelope(overrides), deliveries: [createDelivery('h')] }],
+          at(0),
+        ),
+      )
+      .catch((error: unknown) => error);
+  }
+
+  it.each([
+    ['a payload value', { payload: { text: `a${lone}b` } }, 'payload'],
+    ['a payload key', { payload: { [`k${lone}`]: 1 } }, 'payload'],
+    ['a nested payload value', { payload: { list: [{ text: lone }] } }, 'payload'],
+    ['a header value', { headers: { name: `x${lone}` } }, 'headers'],
+  ])('rejects %s containing a lone surrogate', async (_name, overrides, field) => {
+    const { store, database } = await createStore();
+    const failure = await appendPayload(store, overrides);
+    expect(failure).toBeInstanceOf(EventValidationError);
+    expect((failure as EventValidationError).issues[0]!.path).toEqual([field]);
+    expect(await client.db(database).collection('relaybus_events').countDocuments()).toBe(0);
+  });
+
+  it('stores well-formed pairs and text that merely looks like an escape', async () => {
+    const { store } = await createStore();
+    const payload = {
+      emoji: 'launch \u{1F680}',
+      escaped: '\\ud800',
+      doubleEscaped: '\\\\ud800',
+      other: '\u0000 ',
+    };
+    const outcome = await appendPayload(store, { payload });
+    expect(outcome).toMatchObject({ appendedEventIds: [expect.any(String)] });
+    const [claimed] = await store.claim({
+      handlers: ['h'],
+      limit: 1,
+      leaseOwner: 'w',
+      leaseExpiresAt: at(1_000),
+      now: at(0),
+    });
+    expect(claimed!.event.payload).toEqual(payload);
+  });
+});
+
+describe('queries built from untrusted input', () => {
+  it('treats operator objects as plain strings in delivery filters and requeue ids', async () => {
+    const { store } = await createStore();
+    await store.transaction((session) =>
+      store.append(
+        session,
+        [{ event: createEnvelope(), deliveries: [createDelivery('h')] }],
+        at(0),
+      ),
+    );
+    const [delivery] = await store.claim({
+      handlers: ['h'],
+      limit: 1,
+      leaseOwner: 'w',
+      leaseExpiresAt: at(1_000),
+      now: at(0),
+    });
+    await store.bury(delivery!, { name: 'Error', message: 'x' }, at(1));
+    const operator = { $ne: 'nothing' } as never;
+
+    expect(await store.listDeliveries({ status: operator })).toEqual([]);
+    expect(await store.listDeliveries({ handler: operator })).toEqual([]);
+    expect(await store.listDeliveries({ eventType: operator })).toEqual([]);
+    expect(await store.listDeliveries({ eventId: operator })).toEqual([]);
+    expect(await store.requeue([operator], at(2))).toBe(0);
+    expect(await store.listDeliveries({ status: 'dead', handler: 'h' })).toHaveLength(1);
   });
 });
 

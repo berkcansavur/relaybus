@@ -63,16 +63,32 @@ export function Subscribe(
   event: EventClass<unknown> | string,
   options: SubscribeDecoratorOptions = {},
 ): (target: object, propertyKey: string | symbol, descriptor: PropertyDescriptor) => void {
-  return (_target, _propertyKey, descriptor) => {
-    const method = descriptor.value as object;
-    const existing = readSubscribeMetadata(method);
-    Reflect.defineMetadata(SUBSCRIBE_METADATA_KEY, [...existing, { event, options }], method);
+  return (target, propertyKey) => {
+    // Keyed by (prototype, property) rather than stored on the method function, so a
+    // decorator that later replaces the method does not drop the subscription.
+    const existing =
+      (Reflect.getOwnMetadata(SUBSCRIBE_METADATA_KEY, target, propertyKey) as
+        SubscribeMetadata[] | undefined) ?? [];
+    Reflect.defineMetadata(
+      SUBSCRIBE_METADATA_KEY,
+      [...existing, { event, options }],
+      target,
+      propertyKey,
+    );
   };
 }
 
-/** Reads the `@Subscribe` declarations of a method, in declaration order. */
-export function readSubscribeMetadata(method: object): readonly SubscribeMetadata[] {
+/**
+ * Reads the `@Subscribe` declarations of a method, in declaration order. The
+ * prototype chain is searched, so a subclass inherits the declarations of the
+ * nearest ancestor that declares them.
+ */
+export function readSubscribeMetadata(
+  prototype: object,
+  propertyKey: string | symbol,
+): readonly SubscribeMetadata[] {
   return (
-    (Reflect.getMetadata(SUBSCRIBE_METADATA_KEY, method) as SubscribeMetadata[] | undefined) ?? []
+    (Reflect.getMetadata(SUBSCRIBE_METADATA_KEY, prototype, propertyKey) as
+      SubscribeMetadata[] | undefined) ?? []
   );
 }

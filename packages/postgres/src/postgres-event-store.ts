@@ -14,6 +14,7 @@ import {
   type LeaseReference,
   type PurgeRequest,
   type PurgeResult,
+  type RelayBusLogger,
 } from '@relaybus/core';
 import { Pool, type PoolClient, type PoolConfig } from 'pg';
 import type { PostgresExecutor, PostgresParameter, PostgresRow } from './executor.js';
@@ -31,6 +32,13 @@ export interface PostgresEventStoreSettings extends PostgresSchemaOptions {
    * Default 1000.
    */
   readonly purgeBatchSize?: number;
+  /**
+   * Receives errors of idle connections in a pool the store creates itself
+   * (database failover, `pg_terminate_backend`, network resets). Default
+   * `console`. A pool you pass in is yours: attach `pool.on('error', ...)` to
+   * it, otherwise `pg` raises an unhandled `error` event and the process exits.
+   */
+  readonly logger?: RelayBusLogger;
 }
 
 /** Use an existing `pg` pool. The store never closes it. */
@@ -141,6 +149,12 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
         options.pool ??
         new Pool({ ...options.poolConfig, connectionString: options.connectionString });
       if (options.pool === undefined) {
+        const logger = options.logger ?? console;
+        pool.on('error', (error) => {
+          logger.error(
+            `[PostgresEventStore](constructor) Idle connection failed, the pool replaces it | error=${error.message}`,
+          );
+        });
         this.#ownedPool = pool;
       }
       // Without an executor the transaction type is PoolClient, as the default type argument states.
@@ -170,9 +184,11 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
 
   /**
    * Writes the entries in `transaction`. Keyed events reserve their sequence
-   * numbers first (locking the key rows in sorted order, which rules out
-   * deadlocks between publishers), then events, then deliveries, each in a
-   * single multi-row statement ordered by primary key for the same reason.
+   * numbers first (locking the key rows in sorted order, so publishers cannot
+   * deadlock inside one call), then events, then deliveries, each in a single
+   * multi-row statement ordered by primary key. Two transactions that append
+   * keys in opposite order across several calls can still deadlock (40P01);
+   * the database rolls one back and the caller retries.
    * A duplicate event id still consumes a sequence number; gaps are harmless
    * because only the order of sequences matters.
    */
@@ -218,22 +234,36 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   }
 
   /**
-   * Leases up to `limit` due deliveries with one `FOR UPDATE SKIP LOCKED`
-   * statement. See {@link PostgresStatements.claim} for why that is enough to
-   * keep a (handler, key) strictly one-at-a-time and in order.
+   * Leases up to `limit` due deliveries with `FOR UPDATE SKIP LOCKED`. The fast
+   * statement examines the first due deliveries; only when they are mostly
+   * blocked followers of busy keys does a second statement look at the heads of
+   * all keys. See {@link PostgresStatements.claim} for why that keeps a
+   * (handler, key) strictly one-at-a-time and in order.
    */
   async claim(request: ClaimRequest): Promise<ClaimedDelivery[]> {
-    if (request.handlers.length === 0) {
+    if (request.handlers.length === 0 || !(request.limit > 0)) {
       return [];
     }
-    const rows = await this.#executor.query(this.#statements.claim, [
+    const parameters = (limit: number): PostgresParameter[] => [
       request.now.toISOString(),
       JSON.stringify(request.handlers),
-      request.limit,
+      limit,
       request.leaseOwner,
       request.leaseExpiresAt.toISOString(),
-    ]);
-    return rows.map((row) => mapClaimedDelivery(row, request.leaseExpiresAt));
+    ];
+    const fastRows = await this.#executor.query(this.#statements.claim, parameters(request.limit));
+    const leased = fastRows.filter((row) => row['delivery_id'] !== null);
+    if (leased.length < request.limit && fastRows[0]!['window_saturated'] === true) {
+      leased.push(
+        ...(
+          await this.#executor.query(
+            this.#statements.claimBehindBlockedKeys,
+            parameters(request.limit - leased.length),
+          )
+        ).filter((row) => row['delivery_id'] !== null),
+      );
+    }
+    return leased.map((row) => mapClaimedDelivery(row, request.leaseExpiresAt));
   }
 
   extendLease(lease: LeaseReference, leaseExpiresAt: Date, now: Date): Promise<boolean> {
@@ -303,8 +333,11 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   /**
    * Deletes purgeable deliveries in batches of `purgeBatchSize`, one short
    * transaction per batch, then the events those batches left without any
-   * delivery. Events that a concurrent publish is attaching a delivery to are
-   * skipped and kept.
+   * delivery. Finally, events created before the earliest given cutoff that
+   * have no delivery at all are removed: they are what a publish leaves behind
+   * when its last delivery was purged in the same instant, or when no handler
+   * was subscribed. Events that a concurrent publish is attaching a delivery
+   * to are skipped and kept.
    */
   async purge(request: PurgeRequest): Promise<PurgeResult> {
     const total = { deletedDeliveries: 0, deletedEvents: 0 };
@@ -323,6 +356,12 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
         total.deletedDeliveries += batch.deletedDeliveries;
         total.deletedEvents += batch.deletedEvents;
       }
+    }
+    const orphanCutoff = [request.completedBefore, request.deadBefore]
+      .filter((cutoff) => cutoff !== undefined)
+      .sort((first, second) => first.getTime() - second.getTime())[0];
+    if (orphanCutoff !== undefined) {
+      total.deletedEvents += await this.#purgeOrphanEvents(orphanCutoff);
     }
     return total;
   }
@@ -383,6 +422,28 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       firstSequences.set(key, BigInt(row['sequence'] as string) - BigInt(counts.get(key)!) + 1n);
     }
     return firstSequences;
+  }
+
+  async #purgeOrphanEvents(cutoff: Date): Promise<number> {
+    let deletedEvents = 0;
+    let removedInBatch = this.#purgeBatchSize;
+    while (removedInBatch === this.#purgeBatchSize) {
+      removedInBatch = await this.#executor.transaction(async (transaction) => {
+        const locked = await this.#executor.query(
+          this.#statements.lockOrphanEventsBatch,
+          [cutoff.toISOString(), this.#purgeBatchSize],
+          transaction,
+        );
+        const removed = await this.#executor.query(
+          this.#statements.deleteOrphanEvents,
+          [JSON.stringify(locked.map((row: PostgresRow) => row['id'] as string))],
+          transaction,
+        );
+        return readCount(removed[0]!, 'count');
+      });
+      deletedEvents += removedInBatch;
+    }
+    return deletedEvents;
   }
 
   async #purgeBatch(

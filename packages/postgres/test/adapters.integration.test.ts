@@ -3,7 +3,6 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { sql as drizzleSql } from 'drizzle-orm';
 import knexFactory, { type Knex } from 'knex';
 import { DataSource, type EntityManager } from 'typeorm';
-import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { RelayBus, defineEvent, type EventStore } from '@relaybus/core';
 import { eventStoreContract } from '@relaybus/testing';
@@ -14,6 +13,7 @@ import { createKyselyExecutor } from '../src/kysely/index.js';
 import { createTypeOrmExecutor } from '../src/typeorm/index.js';
 import {
   dropSchema,
+  createTestPool,
   startDatabase,
   uniqueSchema,
   type TestDatabase,
@@ -43,7 +43,7 @@ const kyselyAdapter: Adapter<Transaction<unknown>> = {
   name: 'Kysely',
   async create(connectionString, schema) {
     const db = new Kysely<unknown>({
-      dialect: new PostgresDialect({ pool: new Pool({ connectionString, max: 10 }) }),
+      dialect: new PostgresDialect({ pool: createTestPool(connectionString, 10) }),
     });
     return {
       executor: createKyselyExecutor(db) as unknown as PostgresExecutor<Transaction<unknown>>,
@@ -96,7 +96,7 @@ type DrizzleTransaction = Parameters<Parameters<DrizzleDatabase['transaction']>[
 const drizzleAdapter: Adapter<DrizzleTransaction> = {
   name: 'Drizzle',
   async create(connectionString, schema) {
-    const pool = new Pool({ connectionString, max: 10 });
+    const pool = createTestPool(connectionString, 10);
     const db = drizzle(pool);
     return {
       executor: createDrizzleExecutor(db) as unknown as PostgresExecutor<DrizzleTransaction>,

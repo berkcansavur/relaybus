@@ -18,7 +18,7 @@ export interface TestDatabase {
 export async function startDatabase(image: string = SUPPORTED_IMAGES[0]!): Promise<TestDatabase> {
   const container = await new PostgreSqlContainer(image).start();
   const connectionString = container.getConnectionUri();
-  const pool = new Pool({ connectionString, max: 20 });
+  const pool = createTestPool(connectionString, 20);
   return {
     connectionString,
     container,
@@ -28,6 +28,17 @@ export async function startDatabase(image: string = SUPPORTED_IMAGES[0]!): Promi
       await container.stop();
     },
   };
+}
+
+/**
+ * A pool whose idle-client errors are swallowed: when a test container stops,
+ * Postgres terminates idle connections (57P01) and `pg` would otherwise raise
+ * them as unhandled errors. Tests still end their pools before stopping the container.
+ */
+export function createTestPool(connectionString: string, max: number): Pool {
+  const pool = new Pool({ connectionString, max });
+  pool.on('error', () => undefined);
+  return pool;
 }
 
 let schemaCounter = 0;

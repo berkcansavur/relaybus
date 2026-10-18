@@ -1,8 +1,23 @@
-import { RelayBusError, assertEventType, type EventEnvelope } from '@relaybus/core';
+import {
+  NonRetryableError,
+  RelayBusError,
+  assertEventType,
+  type EventEnvelope,
+} from '@relaybus/core';
 import type { KafkaBytes, KafkaIncomingHeaders, KafkaOutgoingHeaders } from './kafka-client.js';
 
 /** A Kafka record that cannot be turned into an {@link EventEnvelope}. Never retried. */
 export class InvalidKafkaMessageError extends RelayBusError {}
+
+/**
+ * An event that cannot be written to Kafka: its payload is not representable as
+ * JSON (`undefined`, a function, a symbol, a `BigInt`, a circular structure) or
+ * its `occurredAt` is not an RFC 3339 instant (invalid date, year outside 0..9999).
+ * Retrying cannot help, so it is a {@link NonRetryableError}.
+ */
+export class UnencodableEventError extends NonRetryableError {
+  override name = 'UnencodableEventError';
+}
 
 /** The wire form of one event: a Kafka record in CloudEvents binary content mode. */
 export interface EncodedMessage {
@@ -16,6 +31,8 @@ export interface DecodableMessage {
   readonly key: KafkaBytes | null;
   readonly value: KafkaBytes | null;
   readonly headers?: KafkaIncomingHeaders | undefined;
+  /** Record timestamp in epoch milliseconds, used when `ce_time` is absent. */
+  readonly timestamp?: string | undefined;
 }
 
 const SPEC_VERSION = '1.0';
@@ -52,36 +69,63 @@ const lenientUtf8 = new TextDecoder('utf-8');
  * decode, so every header survives a round trip unchanged.
  */
 export function encodeEnvelope(envelope: EventEnvelope): EncodedMessage {
-  const value = JSON.stringify(envelope.payload);
-  if (value === undefined) {
-    throw new RelayBusError(`Event ${envelope.id} has a payload that JSON cannot represent`);
-  }
-  const headers: Record<string, string> = {};
-  for (const [name, headerValue] of Object.entries(envelope.headers)) {
-    headers[escapeUserHeaderName(name)] = headerValue;
-  }
-  headers[HEADER.specVersion] = SPEC_VERSION;
-  headers[HEADER.id] = envelope.id;
-  headers[HEADER.type] = envelope.type;
-  headers[HEADER.source] = envelope.source;
-  headers[HEADER.time] = envelope.occurredAt.toISOString();
-  headers[CONTENT_TYPE] = JSON_MEDIA_TYPE;
+  const value = serializePayload(envelope);
+  const entries: [string, string][] = Object.entries(envelope.headers).map(
+    ([name, headerValue]) => [escapeUserHeaderName(name), headerValue],
+  );
+  entries.push(
+    [HEADER.specVersion, SPEC_VERSION],
+    [HEADER.id, envelope.id],
+    [HEADER.type, envelope.type],
+    [HEADER.source, envelope.source],
+    [HEADER.time, formatTime(envelope)],
+    [CONTENT_TYPE, JSON_MEDIA_TYPE],
+  );
   if (envelope.key !== null) {
-    headers[HEADER.subject] = envelope.key;
+    entries.push([HEADER.subject, envelope.key]);
   }
   if (envelope.correlationId !== null) {
-    headers[HEADER.correlationId] = envelope.correlationId;
+    entries.push([HEADER.correlationId, envelope.correlationId]);
   }
   if (envelope.causationId !== null) {
-    headers[HEADER.causationId] = envelope.causationId;
+    entries.push([HEADER.causationId, envelope.causationId]);
   }
-  return { key: envelope.key, value, headers };
+  // fromEntries defines own properties, so a header named `__proto__` is kept as data.
+  return { key: envelope.key, value, headers: Object.fromEntries(entries) };
+}
+
+function serializePayload(envelope: EventEnvelope): string {
+  let value: string | undefined;
+  try {
+    value = JSON.stringify(envelope.payload);
+  } catch (error) {
+    throw new UnencodableEventError(
+      `Event ${envelope.id} has a payload that JSON cannot represent: ${(error as Error).message}`,
+    );
+  }
+  if (value === undefined) {
+    throw new UnencodableEventError(
+      `Event ${envelope.id} has a payload that JSON cannot represent (undefined, a function or a symbol)`,
+    );
+  }
+  return value;
+}
+
+function formatTime(envelope: EventEnvelope): string {
+  const year = envelope.occurredAt.getUTCFullYear();
+  if (Number.isNaN(year) || year < 0 || year > 9999) {
+    throw new UnencodableEventError(
+      `Event ${envelope.id} has an occurredAt that is not an RFC 3339 instant (invalid date or year outside 0..9999)`,
+    );
+  }
+  return envelope.occurredAt.toISOString();
 }
 
 /**
  * Decodes a Kafka record strictly: the CloudEvents attributes `ce_specversion`
- * (`1.0`), `ce_id`, `ce_type`, `ce_source` and an RFC 3339 `ce_time`, a JSON
- * `content-type` and a JSON value are all required.
+ * (`1.0`), `ce_id`, `ce_type`, `ce_source`, a JSON `content-type` and a JSON
+ * value are required. `ce_time` is optional in CloudEvents: when absent, the
+ * Kafka record timestamp is used; when present it must be RFC 3339.
  *
  * @throws InvalidKafkaMessageError for anything else. It is the only error
  * thrown for malformed input, so callers can tell poison messages from bugs.
@@ -107,7 +151,7 @@ export function decodeEnvelope(message: DecodableMessage): EventEnvelope {
     headers: collectUserHeaders(headers),
     correlationId: headers.get(HEADER.correlationId) ?? null,
     causationId: headers.get(HEADER.causationId) ?? null,
-    occurredAt: parseTime(requireHeader(headers, HEADER.time)),
+    occurredAt: resolveTime(headers.get(HEADER.time), message.timestamp),
   };
 }
 
@@ -161,6 +205,18 @@ function assertJsonContentType(contentType: string | undefined): void {
   }
 }
 
+function resolveTime(text: string | undefined, recordTimestamp: string | undefined): Date {
+  if (text !== undefined && text.length > 0) {
+    return parseTime(text);
+  }
+  const milliseconds = Number(recordTimestamp);
+  const time = new Date(milliseconds);
+  if (recordTimestamp === undefined || recordTimestamp === '' || Number.isNaN(time.getTime())) {
+    throw invalid(`${HEADER.time} is missing and the record has no usable timestamp`);
+  }
+  return time;
+}
+
 function parseTime(text: string): Date {
   const time = new Date(text);
   if (!RFC3339_PATTERN.test(text) || Number.isNaN(time.getTime())) {
@@ -190,30 +246,34 @@ function resolveKey(subject: string | undefined, recordKey: KafkaBytes | null): 
 }
 
 function collectUserHeaders(headers: Map<string, string>): Record<string, string> {
-  const user: Record<string, string> = {};
+  const entries: [string, string][] = [];
   for (const [name, value] of headers) {
-    if (PROTOCOL_HEADERS.has(name)) {
-      continue;
+    if (!PROTOCOL_HEADERS.has(name)) {
+      entries.push([
+        name.startsWith(ESCAPE_PREFIX) ? name.slice(ESCAPE_PREFIX.length) : name,
+        value,
+      ]);
     }
-    user[name.startsWith(ESCAPE_PREFIX) ? name.slice(ESCAPE_PREFIX.length) : name] = value;
   }
-  return user;
+  return Object.fromEntries(entries);
 }
 
 /** Converts incoming headers to what a producer accepts, keeping every value byte-for-byte. */
 export function toOutgoingHeaders(
   incoming: KafkaIncomingHeaders | undefined,
 ): KafkaOutgoingHeaders {
-  const outgoing: Record<string, Buffer | string | (Buffer | string)[]> = {};
+  const entries: [string, Buffer | string | (Buffer | string)[]][] = [];
   for (const [name, raw] of Object.entries(incoming ?? {})) {
-    if (raw === undefined) {
-      continue;
+    if (raw !== undefined) {
+      entries.push([
+        name,
+        Array.isArray(raw)
+          ? (raw as (KafkaBytes | string)[]).map(toBufferOrString)
+          : toBufferOrString(raw as KafkaBytes | string),
+      ]);
     }
-    outgoing[name] = Array.isArray(raw)
-      ? (raw as (KafkaBytes | string)[]).map(toBufferOrString)
-      : toBufferOrString(raw as KafkaBytes | string);
   }
-  return outgoing;
+  return Object.fromEntries(entries);
 }
 
 function toBufferOrString(value: KafkaBytes | string): Buffer | string {

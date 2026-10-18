@@ -2,9 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { ConfigurationError } from '@relaybus/core';
 import type { AmqpMessage } from '../src/amqp-types.js';
 import {
+  AmqpLimitExceededError,
   RabbitMqPublishRejectedError,
   RabbitMqUnavailableError,
   UnroutableMessageError,
+  UnserializablePayloadError,
 } from '../src/errors.js';
 import type { RabbitMqTransportOptions } from '../src/options.js';
 import { RabbitMqTransport } from '../src/rabbitmq-transport.js';
@@ -176,11 +178,27 @@ describe('RabbitMqTransport publish', () => {
     await transport.close();
   });
 
-  it('rejects an event whose payload cannot be serialized', async () => {
-    const { transport } = await connected();
+  it('rejects, without retrying, an event whose payload cannot be serialized', async () => {
+    const { transport, publisher } = await connected();
     await expect(transport.publish(createEnvelope({ payload: 1n }), 'orders')).rejects.toThrow(
-      TypeError,
+      UnserializablePayloadError,
     );
+    await expect(
+      transport.publish(createEnvelope({ payload: undefined }), 'orders'),
+    ).rejects.toThrow(UnserializablePayloadError);
+    expect(publisher.published).toHaveLength(0);
+    await transport.close();
+  });
+
+  it('rejects, without retrying, a destination or id beyond the AMQP short string limit', async () => {
+    const { transport, publisher } = await connected();
+    await expect(transport.publish(createEnvelope(), 'k'.repeat(256))).rejects.toThrow(
+      AmqpLimitExceededError,
+    );
+    await expect(
+      transport.publish(createEnvelope({ id: 'i'.repeat(256) }), 'orders'),
+    ).rejects.toThrow(AmqpLimitExceededError);
+    expect(publisher.published).toHaveLength(0);
     await transport.close();
   });
 
@@ -241,30 +259,49 @@ describe('RabbitMqTransport publish', () => {
 });
 
 describe('RabbitMqTransport subscribe', () => {
-  it('declares a quorum queue with a delivery limit and dead letter queue, bound per destination', async () => {
+  it('declares quorum queues: main with at-least-once dead-lettering, one retry queue per delay tier, dead-letter queue', async () => {
     const { transport, connections } = createTransport({
       exchange: 'events',
       deliveryLimit: 4,
       prefetch: 9,
+      redelivery: { initialDelay: '1s', maxDelay: '4s', jitter: 'none' },
     });
     await transport.connect();
     await transport.subscribe(['order.*', 'invoice.paid.v1'], async () => undefined);
     const channel = connections[0]!.consumerChannel;
     expect(channel.assertExchange).toHaveBeenCalledWith('events', 'topic', { durable: true });
     expect(channel.assertExchange).toHaveBeenCalledWith('events.dead', 'direct', { durable: true });
-    expect(channel.assertQueue).toHaveBeenCalledWith('relaybus.billing.dead', {
-      durable: true,
-      arguments: { 'x-queue-type': 'quorum' },
-    });
-    expect(channel.assertQueue).toHaveBeenCalledWith('relaybus.billing', {
-      durable: true,
-      arguments: {
-        'x-queue-type': 'quorum',
-        'x-delivery-limit': 4,
-        'x-dead-letter-exchange': 'events.dead',
-        'x-dead-letter-routing-key': 'relaybus.billing',
-      },
-    });
+    expect(channel.assertQueue.mock.calls).toEqual([
+      ['relaybus.billing.dead', { durable: true, arguments: { 'x-queue-type': 'quorum' } }],
+      ...[1_000, 2_000, 4_000].map((delay) => [
+        `relaybus.billing.retry.${delay}`,
+        {
+          durable: true,
+          arguments: {
+            'x-queue-type': 'quorum',
+            'x-message-ttl': delay,
+            'x-dead-letter-exchange': '',
+            'x-dead-letter-routing-key': 'relaybus.billing',
+            'x-dead-letter-strategy': 'at-least-once',
+            'x-overflow': 'reject-publish',
+          },
+        },
+      ]),
+      [
+        'relaybus.billing',
+        {
+          durable: true,
+          arguments: {
+            'x-queue-type': 'quorum',
+            'x-delivery-limit': 4,
+            'x-dead-letter-exchange': 'events.dead',
+            'x-dead-letter-routing-key': 'relaybus.billing',
+            'x-dead-letter-strategy': 'at-least-once',
+            'x-overflow': 'reject-publish',
+          },
+        },
+      ],
+    ]);
     expect(channel.bindQueue.mock.calls).toEqual([
       ['relaybus.billing.dead', 'events.dead', 'relaybus.billing'],
       ['relaybus.billing', 'events', 'order.*'],
@@ -274,16 +311,73 @@ describe('RabbitMqTransport subscribe', () => {
     await transport.close();
   });
 
+  it('ordered consumption uses one single-active consumer queue, prefetch 1 and no retry queues', async () => {
+    const { transport, connections } = createTransport({ ordered: true });
+    await transport.connect();
+    await transport.subscribe(['orders'], async () => undefined);
+    const channel = connections[0]!.consumerChannel;
+    const declared = Object.fromEntries(
+      channel.assertQueue.mock.calls.map(([name, options]) => [name, options]),
+    );
+    expect(Object.keys(declared)).toEqual(['relaybus.billing.dead', 'relaybus.billing']);
+    expect(declared['relaybus.billing']).toMatchObject({
+      arguments: { 'x-single-active-consumer': true, 'x-overflow': 'reject-publish' },
+    });
+    expect(channel.prefetch).toHaveBeenCalledWith(1);
+    await transport.close();
+  });
+
   it('honours explicit queue and dead-letter names', async () => {
     const { transport, connections } = createTransport({
       queue: 'billing-events',
       deadLetterExchange: 'dlx',
       deadLetterQueue: 'billing-graveyard',
+      redelivery: { initialDelay: '5s', maxDelay: '5s' },
     });
     await transport.connect();
     await transport.subscribe(['orders'], async () => undefined);
     const names = connections[0]!.consumerChannel.assertQueue.mock.calls.map((call) => call[0]);
-    expect(names).toEqual(['billing-graveyard', 'billing-events']);
+    expect(names).toEqual(['billing-graveyard', 'billing-events.retry.5000', 'billing-events']);
+    await transport.close();
+  });
+
+  it('parks failing messages in a retry queue through the publisher channel, mandatory even when unroutable publishes are allowed', async () => {
+    const { transport, connections } = createTransport({
+      allowUnroutable: true,
+      handlerRetry: { attempts: 1 },
+      redelivery: { initialDelay: '1s', maxDelay: '1s' },
+    });
+    await transport.connect();
+    await transport.subscribe(['orders'], async () => {
+      throw new Error('database down');
+    });
+    const { consumerChannel, publisher } = connections[0]!;
+    consumerChannel.deliver!(createDelivery());
+    await waitFor(() => consumerChannel.ack.mock.calls.length === 1);
+    expect(publisher.published).toHaveLength(1);
+    expect(publisher.published[0]!.routingKey).toBe('relaybus.billing.retry.1000');
+    expect(publisher.published[0]!.options.mandatory).toBe(true);
+    await transport.close();
+  });
+
+  it('never acknowledges a message whose retry copy came back unroutable', async () => {
+    const { transport, connections } = createTransport({
+      handlerRetry: { attempts: 1 },
+      redelivery: { initialDelay: 5, maxDelay: 5, jitter: 'none' },
+    });
+    await transport.connect();
+    await transport.subscribe(['orders'], async () => {
+      throw new Error('database down');
+    });
+    const { consumerChannel, publisher } = connections[0]!;
+    publisher.publishBehaviour = (callback, routingKey) => {
+      publisher.emit('return', returned(createEnvelope().id, routingKey));
+      callback(null);
+    };
+    consumerChannel.deliver!(createDelivery());
+    await waitFor(() => consumerChannel.nack.mock.calls.length === 1);
+    expect(consumerChannel.nack).toHaveBeenCalledWith(expect.anything(), false, true);
+    expect(consumerChannel.ack).not.toHaveBeenCalled();
     await transport.close();
   });
 
@@ -399,6 +493,98 @@ describe('RabbitMqTransport recovery', () => {
     connections[0]!.emit('close');
     await waitFor(() => connections.length === 3 && transport.isConnected());
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Attempt failed | attempt=1'));
+    await transport.close();
+  });
+});
+
+describe('RabbitMqTransport readiness', () => {
+  it('is ready only while connected, with an open publisher channel and an active consumer', async () => {
+    const { transport, connections } = createTransport();
+    expect(transport.isReady()).toBe(false);
+    await transport.connect();
+    expect(transport.isReady()).toBe(true);
+    await transport.subscribe(['orders'], async () => undefined);
+    expect(transport.isReady()).toBe(true);
+
+    connections[0]!.consumerChannel.deliver!(null);
+    expect(transport.isReady()).toBe(false);
+    await waitFor(() => connections.length === 2 && transport.isReady());
+
+    connections[1]!.emit('close');
+    expect(transport.isReady()).toBe(false);
+    await waitFor(() => connections.length === 3 && transport.isReady());
+    await transport.close();
+    expect(transport.isReady()).toBe(false);
+  });
+
+  it('is not ready as soon as the publisher channel closes', async () => {
+    const { transport, connections } = createTransport();
+    await transport.connect();
+    connections[0]!.publisher.emit('close');
+    expect(transport.isReady()).toBe(false);
+    await waitFor(() => transport.isReady());
+    await transport.close();
+  });
+
+  it('does not report a connection whose publisher channel closed while it was being set up', async () => {
+    const connections: FakeConnection[] = [];
+    const logger = createLogger();
+    const transport = new RabbitMqTransport({
+      logger,
+      reconnect: { initialDelay: 5, maxDelay: 5, jitter: 'none' },
+      connect: async () => {
+        const connection = new FakeConnection();
+        connections.push(connection);
+        if (connections.length === 1) {
+          const createConfirmChannel = connection.createConfirmChannel.getMockImplementation()!;
+          connection.createConfirmChannel.mockImplementation(async () => {
+            const channel = (await createConfirmChannel()) as FakeChannel;
+            channel.assertExchange.mockImplementation(async () => {
+              // The broker closes the channel after the declare, before the transport is live.
+              channel.emit('close');
+              return {};
+            });
+            return channel;
+          });
+        }
+        return connection;
+      },
+    });
+    await expect(transport.connect()).rejects.toThrow(
+      /Publisher channel closed while the transport was being set up/,
+    );
+    expect(transport.isConnected()).toBe(false);
+    expect(transport.isReady()).toBe(false);
+    expect(connections[0]!.close).toHaveBeenCalled();
+    await transport.close();
+  });
+
+  it('reconnects when the publisher channel closed during a background reconnect', async () => {
+    const connections: FakeConnection[] = [];
+    const transport = new RabbitMqTransport({
+      logger: createLogger(),
+      failOnConnectError: false,
+      reconnect: { initialDelay: 5, maxDelay: 5, jitter: 'none' },
+      connect: async () => {
+        const connection = new FakeConnection();
+        connections.push(connection);
+        if (connections.length === 1) {
+          const createConfirmChannel = connection.createConfirmChannel.getMockImplementation()!;
+          connection.createConfirmChannel.mockImplementation(async () => {
+            const channel = (await createConfirmChannel()) as FakeChannel;
+            channel.assertExchange.mockImplementation(async () => {
+              channel.emit('close');
+              return {};
+            });
+            return channel;
+          });
+        }
+        return connection;
+      },
+    });
+    await transport.connect();
+    await waitFor(() => transport.isReady());
+    expect(connections).toHaveLength(2);
     await transport.close();
   });
 });

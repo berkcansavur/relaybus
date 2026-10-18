@@ -29,6 +29,7 @@ export function createPostgresSchemaStatements(options: PostgresSchemaOptions = 
   occurred_at timestamptz NOT NULL,
   created_at timestamptz NOT NULL
 )`,
+    `CREATE INDEX IF NOT EXISTS ${names.indexes.eventCreated} ON ${names.events} (created_at, id)`,
     `CREATE TABLE IF NOT EXISTS ${names.keySequences} (
   key text PRIMARY KEY,
   sequence bigint NOT NULL
@@ -52,9 +53,11 @@ export function createPostgresSchemaStatements(options: PostgresSchemaOptions = 
   CONSTRAINT ${names.indexes.deliveryEventHandler} UNIQUE (event_id, handler)
 )`,
     `CREATE INDEX IF NOT EXISTS ${names.indexes.deliveryDue} ON ${names.deliveries} ((${dueAtExpression()}), id) WHERE ${unfinished}`,
+    `CREATE INDEX IF NOT EXISTS ${names.indexes.deliveryDueUnkeyed} ON ${names.deliveries} ((${dueAtExpression()}), id) WHERE key IS NULL AND ${unfinished}`,
     `CREATE INDEX IF NOT EXISTS ${names.indexes.deliveryKeyUnfinished} ON ${names.deliveries} (handler, key, sequence) WHERE key IS NOT NULL AND ${unfinished}`,
     `CREATE INDEX IF NOT EXISTS ${names.indexes.deliveryKeyProcessing} ON ${names.deliveries} (handler, key) WHERE key IS NOT NULL AND status = 'processing'`,
     `CREATE INDEX IF NOT EXISTS ${names.indexes.deliveryStatusCreated} ON ${names.deliveries} (status, created_at, id)`,
+    `CREATE INDEX IF NOT EXISTS ${names.indexes.deliveryHandlerCreated} ON ${names.deliveries} (handler, created_at, id)`,
     `CREATE INDEX IF NOT EXISTS ${names.indexes.deliveryCompleted} ON ${names.deliveries} (completed_at, id) WHERE status = 'completed'`,
     `CREATE INDEX IF NOT EXISTS ${names.indexes.deliveryDead} ON ${names.deliveries} (updated_at, id) WHERE status = 'dead'`,
   ];

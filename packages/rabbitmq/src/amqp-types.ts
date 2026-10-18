@@ -13,6 +13,7 @@ export interface AmqpMessageProperties {
   readonly appId?: unknown;
   readonly correlationId?: unknown;
   readonly timestamp?: unknown;
+  readonly contentType?: unknown;
   readonly headers?: Readonly<Record<string, unknown>> | undefined;
 }
 
@@ -28,12 +29,12 @@ export interface AmqpPublishOptions {
   readonly contentType: string;
   readonly persistent: boolean;
   readonly mandatory?: boolean;
-  readonly messageId: string;
-  readonly type: string;
-  readonly appId: string;
-  readonly timestamp: number;
+  readonly messageId?: string;
+  readonly type?: string;
+  readonly appId?: string;
+  readonly timestamp?: number;
   readonly correlationId?: string;
-  readonly headers: Readonly<Record<string, string>>;
+  readonly headers: Readonly<Record<string, unknown>>;
 }
 
 /** Channel used for consuming. */
