@@ -1,6 +1,6 @@
 {
   "name": "@relaybus/kafka",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Apache Kafka transport for relaybus: publish committed events to topics and consume them with idempotent inbox semantics.",
   "license": "MIT",
   "author": "Berkcan \u015eavur <berkcansavur@gmail.com>",

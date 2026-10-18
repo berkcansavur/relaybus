@@ -1,6 +1,6 @@
 {
   "name": "@relaybus/mongodb",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "MongoDB event store for relaybus: transactional outbox on multi-document transactions with atomic leasing.",
   "license": "MIT",
   "author": "Berkcan \u015eavur <berkcansavur@gmail.com>",

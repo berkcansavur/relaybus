@@ -1,6 +1,6 @@
 {
   "name": "@relaybus/rabbitmq",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "RabbitMQ transport for relaybus: confirmed publishing and acknowledged consumption with idempotent inbox semantics.",
   "license": "MIT",
   "author": "Berkcan \u015eavur <berkcansavur@gmail.com>",
