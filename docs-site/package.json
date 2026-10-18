@@ -1,0 +1,16 @@
+{
+  "name": "relaybus-docs",
+  "private": true,
+  "type": "module",
+  "description": "Documentation site for relaybus, built with VitePress.",
+  "scripts": {
+    "docs:assets": "node ../scripts/build-docs-assets.mjs",
+    "docs:check": "node ../scripts/build-docs-assets.mjs --check",
+    "docs:dev": "node ../scripts/build-docs-assets.mjs && vitepress dev",
+    "docs:build": "node ../scripts/build-docs-assets.mjs && vitepress build",
+    "docs:preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "vitepress": "1.6.4"
+  }
+}
