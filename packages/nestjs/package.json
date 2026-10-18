@@ -1,6 +1,6 @@
 {
   "name": "@relaybus/nestjs",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "NestJS module for relaybus: decorator-based event handlers, forRoot/forRootAsync configuration and lifecycle integration.",
   "license": "MIT",
   "author": "Berkcan \u015eavur <berkcansavur@gmail.com>",

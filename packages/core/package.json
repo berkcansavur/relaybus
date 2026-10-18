@@ -1,6 +1,6 @@
 {
   "name": "@relaybus/core",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Reliable, storage-agnostic event bus: transactional outbox, per-handler deliveries, retries with jitter, dead letters and ordering keys.",
   "license": "MIT",
   "author": "Berkcan Şavur <berkcansavur@gmail.com>",

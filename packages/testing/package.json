@@ -1,6 +1,6 @@
 {
   "name": "@relaybus/testing",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Test utilities for relaybus: the EventStore contract suite, a fake clock and an in-memory transport.",
   "license": "MIT",
   "author": "Berkcan Şavur <berkcansavur@gmail.com>",
