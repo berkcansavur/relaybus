@@ -124,6 +124,57 @@ The handler receives the envelope and a context with `attempt`, `maxAttempts`,
 - After a timeout or lease loss the handler's `signal` is aborted; the retry waits
   for the abandoned run to settle so runs never overlap.
 
+## Event catalogs
+
+A catalog groups the events of one domain so the compiler checks that every event
+has a handler and that only those events are published through it.
+
+```ts
+class OrderPlaced extends defineEvent<{ orderId: string }>('order.placed.v1') {}
+class OrderShipped extends defineEvent<{ orderId: string; carrier: string }>('order.shipped.v1') {}
+
+export const OrderEvents = defineCatalog({ OrderPlaced, OrderShipped }, { name: 'OrderEvents' });
+
+// A class that misses a handler does not compile:
+class ShippingHandlers implements HandlersOf<typeof OrderEvents> {
+  onOrderPlaced(event: EventOf<typeof OrderPlaced>, context: HandlerContext) {}
+  onOrderShipped(event: EventOf<typeof OrderShipped>) {}
+}
+bus.subscribeCatalog(OrderEvents, new ShippingHandlers()); // ids: OrderEvents.onOrderPlaced, ...
+
+// Or declare the handlers as an object; missing or extra keys do not compile:
+bus.subscribeCatalog(
+  OrderEvents,
+  defineHandlers(OrderEvents, {
+    onOrderPlaced: (event) => reserveStock(event.payload.orderId),
+    onOrderShipped: (event) => notify(event.payload.carrier),
+  }),
+  { idPrefix: 'fulfilment' },
+);
+
+// Publish through a view that only accepts the catalog's events:
+const orders = bus.forCatalog(OrderEvents);
+await orders.publish(new OrderPlaced({ orderId }), { transaction });
+await orders.publish(new UserRegistered({ userId })); // compile error
+```
+
+- `defineCatalog(events, { name? })` returns a frozen catalog. It rejects empty
+  catalogs, entries that are not event classes, names that are not identifiers and
+  two entries with one event type.
+- `HandlersOf<C>` requires an `on${Key}` method per event; `PartialHandlersOf<C, 'A' | 'B'>`
+  names a subset for consumers that handle only some events. `EventOf<typeof OrderPlaced>`
+  is the envelope type of one event; `CatalogEvents<C>` is the union of the catalog's events.
+- `bus.subscribeCatalog(catalog, handlers, { idPrefix?, ...subscribeOptions })` registers every
+  `on${Key}` method with the stable id `${idPrefix ?? catalog name ?? class name}.on${Key}` and
+  `this` bound to `handlers`. A missing method throws a `ConfigurationError` naming it.
+- **Boot check:** `new RelayBus({ catalogs: [OrderEvents] })` (or `bus.registerCatalog`) makes
+  `start()` throw a `ConfigurationError` listing every catalog event that has no handler or route
+  and the method it expects. A failed check leaves the bus idle, before any I/O, so it can be fixed
+  and started again.
+- `forCatalog(...).publish` also checks the event type at runtime. TypeScript compares event
+  classes by shape, so two events with identical payload types are interchangeable to the compiler;
+  the runtime check still rejects the one that is not in the catalog, before anything is stored.
+
 ## Transports
 
 ```ts

@@ -81,6 +81,12 @@ export const sections = [
           'Per-key ordering in commit order: how the sequence is assigned and what it does and does not promise.',
       },
       {
+        title: 'Compile-time safety with event catalogs',
+        path: 'concepts/event-catalogs',
+        description:
+          'Group events in a catalog so the TypeScript compiler rejects a missing handler, a wrong payload or an event published to the wrong catalog, and a boot check catches the rest.',
+      },
+      {
         title: 'Dead letters',
         path: 'concepts/dead-letters',
         description:
