@@ -128,7 +128,11 @@ describe('retries and dead letters', () => {
   });
 
   it('times out slow handlers, aborts their signal and retries', async () => {
-    const { bus } = createTestBus({ transactionMode: 'optional', handlerTimeout: 20 });
+    const { bus } = createTestBus({
+      transactionMode: 'optional',
+      handlerTimeout: 20,
+      dispatcher: { leaseDuration: 60 },
+    });
     let signal: AbortSignal | undefined;
     bus.subscribe(
       OrderPlaced,

@@ -37,6 +37,11 @@ export interface AppendResult {
   readonly appendedDeliveryCount: number;
 }
 
+/**
+ * Lease expiry is compared with the `now` the caller passes, taken from the
+ * bus clock. Keep worker clocks synchronized (NTP): a skew larger than a third
+ * of the lease duration lets another worker reclaim a delivery that is still running.
+ */
 export interface ClaimRequest {
   /** Only deliveries of these handlers are claimed. */
   readonly handlers: readonly string[];
@@ -46,7 +51,11 @@ export interface ClaimRequest {
   readonly now: Date;
 }
 
-/** Proof of ownership. Every state change after a claim must present it (fencing). */
+/**
+ * Proof of ownership. Every state change after a claim must present it
+ * (fencing). A lease stays valid until another claim replaces it, even after
+ * its expiry time; expiry only makes the delivery claimable again.
+ */
 export interface LeaseReference {
   readonly deliveryId: string;
   readonly leaseToken: string;
@@ -148,6 +157,11 @@ export interface EventStore<TTransaction = unknown> {
     error: ErrorInfo,
     now: Date,
   ): Promise<boolean>;
+  /**
+   * Gives a leased delivery back without counting the attempt: pending, due
+   * now, attempts decremented. Used when a handler is aborted at shutdown.
+   */
+  release(lease: LeaseReference, now: Date): Promise<boolean>;
   /** Moves a leased delivery to dead. */
   bury(lease: LeaseReference, error: ErrorInfo, now: Date): Promise<boolean>;
   listDeliveries(query: DeliveryQuery): Promise<DeliveryRecord[]>;

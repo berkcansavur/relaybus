@@ -2,30 +2,36 @@
  * Base class of every error thrown by relaybus.
  */
 export class RelayBusError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
-    this.name = new.target.name;
-  }
+  // Explicit names survive minification, unlike `new.target.name`.
+  override name = 'RelayBusError';
 }
 
 /** Invalid options passed to a relaybus component. */
-export class ConfigurationError extends RelayBusError {}
+export class ConfigurationError extends RelayBusError {
+  override name = 'ConfigurationError';
+}
 
 /**
  * Thrown by `publish` when no transaction can be found and the bus runs with
  * `transactionMode: 'required'` (the default). Publishing outside a transaction
  * would reintroduce the dual-write problem the outbox exists to prevent.
  */
-export class TransactionRequiredError extends RelayBusError {}
+export class TransactionRequiredError extends RelayBusError {
+  override name = 'TransactionRequiredError';
+}
 
 /**
  * Throw from a handler to dead-letter the delivery immediately, skipping the
  * remaining retry attempts.
  */
-export class NonRetryableError extends RelayBusError {}
+export class NonRetryableError extends RelayBusError {
+  override name = 'NonRetryableError';
+}
 
 /** A payload failed its event schema. Never retried: the payload will not change. */
 export class EventValidationError extends NonRetryableError {
+  override name = 'EventValidationError';
+
   constructor(
     message: string,
     readonly issues: readonly ValidationIssue[],
@@ -34,11 +40,31 @@ export class EventValidationError extends NonRetryableError {
   }
 }
 
+/**
+ * A message received from a broker is not a valid event. Never retried:
+ * transports should dead-letter it instead of redelivering it forever.
+ */
+export class InvalidEnvelopeError extends NonRetryableError {
+  override name = 'InvalidEnvelopeError';
+}
+
 /** The worker no longer owns the delivery it was processing. */
-export class LeaseLostError extends RelayBusError {}
+export class LeaseLostError extends RelayBusError {
+  override name = 'LeaseLostError';
+}
 
 /** A handler did not settle within its configured timeout. Retried like any failure. */
-export class HandlerTimeoutError extends RelayBusError {}
+export class HandlerTimeoutError extends RelayBusError {
+  override name = 'HandlerTimeoutError';
+}
+
+/**
+ * Reason of a handler's abort signal when the bus stops before the handler
+ * finished. The delivery is released and runs again without losing an attempt.
+ */
+export class DispatcherStoppedError extends RelayBusError {
+  override name = 'DispatcherStoppedError';
+}
 
 export interface ValidationIssue {
   readonly message: string;

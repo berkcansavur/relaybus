@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/berkcansavur/relaybus/discussions
+    about: Ask usage questions and share ideas in Discussions.
+  - name: Report a security vulnerability
+    url: https://github.com/berkcansavur/relaybus/security/advisories/new
+    about: Do not open a public issue. Use private vulnerability reporting.

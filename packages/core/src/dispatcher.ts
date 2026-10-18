@@ -1,8 +1,14 @@
 import type { Clock } from './clock.js';
-import { HandlerTimeoutError, LeaseLostError, RelayBusError, toErrorInfo } from './errors.js';
+import {
+  DispatcherStoppedError,
+  HandlerTimeoutError,
+  LeaseLostError,
+  RelayBusError,
+  toErrorInfo,
+} from './errors.js';
 import { validatePayload, type EventEnvelope } from './event.js';
 import type { ClaimedDelivery, EventStore } from './event-store.js';
-import { runInScope } from './execution-scope.js';
+import { runInIsolatedScope } from './execution-scope.js';
 import type { HandlerContext, HandlerRegistration, HandlerRegistry } from './handler-registry.js';
 import type { Notifier } from './notifier.js';
 import { computeRetryDelay, isRetryableError } from './retry-policy.js';
@@ -23,10 +29,9 @@ export interface DispatcherDependencies {
   readonly random: () => number;
   readonly notifier: Notifier;
   readonly settings: DispatcherSettings;
+  /** Waits between attempts to confirm a completion. Replaceable in tests. */
+  readonly sleep?: (milliseconds: number) => Promise<void>;
 }
-
-/** Raised into a handler's signal when the dispatcher stops before the handler finished. */
-class DispatcherStoppedError extends RelayBusError {}
 
 interface InFlightDelivery {
   readonly handler: string;
@@ -34,12 +39,22 @@ interface InFlightDelivery {
   readonly settled: Promise<void>;
 }
 
+type HandlerOutcome = 'completed' | 'unconfirmed';
+
+/** Delays between attempts to record a completion before leaving it to lease expiry. */
+const COMPLETION_RETRY_DELAYS_MS = [50, 250, 1_000] as const;
+
+const defaultSleep = (milliseconds: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, milliseconds));
+
 /**
  * Claims due deliveries and runs their handlers: bounded concurrency, lease
- * heartbeats, fenced completion, retries with backoff and dead-lettering.
+ * heartbeats with self-fencing, fenced completion, retries with backoff and
+ * dead-lettering.
  */
 export class Dispatcher {
   readonly #dependencies: DispatcherDependencies;
+  readonly #sleep: (milliseconds: number) => Promise<void>;
   readonly #inFlight = new Set<InFlightDelivery>();
   #running = false;
   #loop: Promise<void> | undefined;
@@ -48,6 +63,7 @@ export class Dispatcher {
 
   constructor(dependencies: DispatcherDependencies) {
     this.#dependencies = dependencies;
+    this.#sleep = dependencies.sleep ?? defaultSleep;
   }
 
   get isRunning(): boolean {
@@ -74,7 +90,7 @@ export class Dispatcher {
 
   /**
    * Stops claiming, waits up to the shutdown timeout for running handlers,
-   * then aborts the rest. Their leases expire and another process retries them.
+   * then aborts the rest and releases their deliveries for another process.
    */
   async stop(): Promise<void> {
     if (!this.#running) {
@@ -82,15 +98,10 @@ export class Dispatcher {
     }
     this.#running = false;
     this.wake();
-    await this.#loop;
+    const deadline = Date.now() + this.#dependencies.settings.shutdownTimeoutMs;
+    await this.#waitUntil(this.#loop!, deadline);
     const settled = Promise.allSettled([...this.#inFlight].map((delivery) => delivery.settled));
-    let timer: NodeJS.Timeout | undefined;
-    const timedOut = new Promise<'timeout'>((resolve) => {
-      timer = setTimeout(() => resolve('timeout'), this.#dependencies.settings.shutdownTimeoutMs);
-    });
-    const outcome = await Promise.race([settled, timedOut]);
-    clearTimeout(timer);
-    if (outcome === 'timeout') {
+    if ((await this.#waitUntil(settled, deadline)) === 'timeout') {
       for (const delivery of this.#inFlight) {
         delivery.controller.abort(new DispatcherStoppedError('relaybus dispatcher stopped'));
       }
@@ -103,6 +114,16 @@ export class Dispatcher {
     const started = await this.#claimAndStart();
     await Promise.allSettled(started.map((delivery) => delivery.settled));
     return started.length;
+  }
+
+  async #waitUntil(work: Promise<unknown>, deadline: number): Promise<'done' | 'timeout'> {
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), Math.max(0, deadline - Date.now()));
+    });
+    const outcome = await Promise.race([work.then(() => 'done' as const), timedOut]);
+    clearTimeout(timer);
+    return outcome;
   }
 
   async #runLoop(): Promise<void> {
@@ -226,7 +247,7 @@ export class Dispatcher {
       );
       return;
     }
-    const heartbeat = this.#startHeartbeat(delivery, controller);
+    const stopHeartbeat = this.#startHeartbeat(delivery, controller);
     try {
       const outcome = await this.#runHandler(registration, delivery, controller);
       if (outcome === 'completed') {
@@ -238,11 +259,13 @@ export class Dispatcher {
     } catch (error) {
       if (error instanceof LeaseLostError) {
         notifier.notify('onLeaseLost', { delivery });
-      } else if (!(error instanceof DispatcherStoppedError)) {
+      } else if (error instanceof DispatcherStoppedError) {
+        await this.#release(delivery);
+      } else {
         await this.#fail(registration, delivery, error);
       }
     } finally {
-      clearInterval(heartbeat);
+      stopHeartbeat();
     }
   }
 
@@ -250,8 +273,8 @@ export class Dispatcher {
     registration: HandlerRegistration,
     delivery: ClaimedDelivery,
     controller: AbortController,
-  ): Promise<'completed' | 'unconfirmed'> {
-    const { store, clock, notifier } = this.#dependencies;
+  ): Promise<HandlerOutcome> {
+    const { store, clock } = this.#dependencies;
     const payload = await validatePayload(
       delivery.event.type,
       registration.schema,
@@ -268,17 +291,33 @@ export class Dispatcher {
       return 'completed';
     }
     await this.#invoke(registration, event, delivery, controller, undefined);
-    let completed: boolean;
-    try {
-      completed = await store.complete(delivery, clock.now());
-    } catch (error) {
-      notifier.failure('complete', error);
-      return 'unconfirmed';
+    return this.#confirmCompletion(delivery);
+  }
+
+  /**
+   * Records a completion, retrying transient store errors while the lease is
+   * still held. Gives up to lease expiry, which reruns the handler: at-least-once.
+   */
+  async #confirmCompletion(delivery: ClaimedDelivery): Promise<HandlerOutcome> {
+    const { store, clock, notifier } = this.#dependencies;
+    for (let attempt = 0; ; attempt += 1) {
+      let completed: boolean;
+      try {
+        completed = await store.complete(delivery, clock.now());
+      } catch (error) {
+        const delay = COMPLETION_RETRY_DELAYS_MS[attempt];
+        if (delay === undefined) {
+          notifier.failure('complete', error);
+          return 'unconfirmed';
+        }
+        await this.#sleep(delay);
+        continue;
+      }
+      if (!completed) {
+        throw new LeaseLostError(`Lease on delivery ${delivery.deliveryId} was lost`);
+      }
+      return 'completed';
     }
-    if (!completed) {
-      throw new LeaseLostError(`Lease on delivery ${delivery.deliveryId} was lost`);
-    }
-    return 'completed';
   }
 
   async #invoke(
@@ -296,9 +335,15 @@ export class Dispatcher {
       signal: controller.signal,
       transaction,
     };
+    // An isolated scope keeps a caller's transaction (for example a test calling
+    // runOnce inside bus.transaction) from leaking into the handler.
     const scope = transaction === undefined ? { event } : { event, transaction };
+    if (controller.signal.aborted) {
+      // The lease was lost (or the bus stopped) while the payload was validated.
+      throw controller.signal.reason;
+    }
     const work = Promise.resolve().then(() =>
-      runInScope(scope, () => registration.handle(event, context)),
+      runInIsolatedScope(scope, () => registration.handle(event, context)),
     );
     work.catch(() => undefined);
     let timer: NodeJS.Timeout | undefined;
@@ -314,31 +359,83 @@ export class Dispatcher {
     }
     try {
       await Promise.race([work, rejectOnAbort(controller.signal)]);
+    } catch (error) {
+      await this.#awaitAbandonedHandler(work, error, transaction !== undefined);
+      throw error;
     } finally {
       clearTimeout(timer);
     }
   }
 
-  #startHeartbeat(delivery: ClaimedDelivery, controller: AbortController): NodeJS.Timeout {
+  /**
+   * After an abort the handler may still be running. Waiting for it keeps a
+   * retry from overlapping the abandoned run, and keeps a transactional
+   * handler from writing through a transaction that was already released.
+   * Transactional handlers are always awaited; others for one lease duration,
+   * except at shutdown, which already waited.
+   */
+  async #awaitAbandonedHandler(
+    work: Promise<unknown>,
+    reason: unknown,
+    transactional: boolean,
+  ): Promise<void> {
+    const settledWork = work.then(
+      () => undefined,
+      () => undefined,
+    );
+    if (transactional) {
+      await settledWork;
+      return;
+    }
+    if (reason instanceof DispatcherStoppedError) {
+      return;
+    }
+    const deadline = Date.now() + this.#dependencies.settings.leaseDurationMs;
+    await this.#waitUntil(settledWork, deadline);
+  }
+
+  /**
+   * Renews the lease every third of its duration. A worker that cannot renew
+   * aborts its handler once the last confirmed expiry passes, because another
+   * worker may then claim the delivery (self-fencing).
+   */
+  #startHeartbeat(delivery: ClaimedDelivery, controller: AbortController): () => void {
     const { store, clock, notifier, settings } = this.#dependencies;
+    let confirmedExpiry = delivery.leaseExpiresAt.getTime();
+    let renewing = false;
+    const abortLeaseLost = (): void => {
+      controller.abort(new LeaseLostError(`Lease on delivery ${delivery.deliveryId} was lost`));
+    };
     const timer = setInterval(
       () => {
         const now = clock.now();
+        if (now.getTime() >= confirmedExpiry) {
+          abortLeaseLost();
+          return;
+        }
+        if (renewing) {
+          return;
+        }
+        renewing = true;
+        const expiry = now.getTime() + settings.leaseDurationMs;
         store
-          .extendLease(delivery, new Date(now.getTime() + settings.leaseDurationMs), now)
+          .extendLease(delivery, new Date(expiry), now)
           .then((extended) => {
-            if (!extended) {
-              controller.abort(
-                new LeaseLostError(`Lease on delivery ${delivery.deliveryId} was lost`),
-              );
+            if (extended) {
+              confirmedExpiry = expiry;
+            } else {
+              abortLeaseLost();
             }
           })
-          .catch((error: unknown) => notifier.failure('extend-lease', error));
+          .catch((error: unknown) => notifier.failure('extend-lease', error))
+          .finally(() => {
+            renewing = false;
+          });
       },
       Math.max(1, Math.floor(settings.leaseDurationMs / 3)),
     );
     timer.unref();
-    return timer;
+    return () => clearInterval(timer);
   }
 
   async #fail(
@@ -387,11 +484,28 @@ export class Dispatcher {
       notifier.notify('onLeaseLost', { delivery });
     }
   }
+
+  async #release(delivery: ClaimedDelivery): Promise<void> {
+    const { store, clock, notifier } = this.#dependencies;
+    let released: boolean;
+    try {
+      released = await store.release(delivery, clock.now());
+    } catch (storeError) {
+      notifier.failure('release', storeError);
+      return;
+    }
+    if (released) {
+      notifier.notify('onDeliveryReleased', { delivery });
+    } else {
+      notifier.notify('onLeaseLost', { delivery });
+    }
+  }
 }
 
 function rejectOnAbort(signal: AbortSignal): Promise<never> {
   return new Promise<never>((_, reject) => {
-    // The reason is always an Error: dispatcher code aborts with LeaseLostError, HandlerTimeoutError or DispatcherStoppedError.
+    // The reason is always an Error: the dispatcher aborts with LeaseLostError,
+    // HandlerTimeoutError or DispatcherStoppedError.
     // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
     signal.addEventListener('abort', () => reject(signal.reason), { once: true });
   });

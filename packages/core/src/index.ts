@@ -1,9 +1,11 @@
 export { systemClock, type Clock } from './clock.js';
-export { toMilliseconds, type Duration } from './duration.js';
+export { MAX_TIMER_DELAY_MS, toMilliseconds, type Duration } from './duration.js';
 export {
   ConfigurationError,
+  DispatcherStoppedError,
   EventValidationError,
   HandlerTimeoutError,
+  InvalidEnvelopeError,
   LeaseLostError,
   NonRetryableError,
   RelayBusError,
@@ -40,11 +42,10 @@ export {
   type PurgeRequest,
   type PurgeResult,
 } from './event-store.js';
-export { getCurrentScope, runInScope, type ExecutionScope } from './execution-scope.js';
 export type {
   EventHandler,
   HandlerContext,
-  HandlerRegistration,
+  HandlerDescriptor,
   SubscribeOptions,
 } from './handler-registry.js';
 export { createUuidV7, type IdentifierGenerator } from './identifier.js';
@@ -65,9 +66,11 @@ export {
   type RetentionOptions,
   type RouteOptions,
   type TransactionMode,
+  type UnroutedEventPolicy,
 } from './relay-bus.js';
 export {
   DEFAULT_RETRY_POLICY,
+  DEFAULT_ROUTE_RETRY_POLICY,
   computeRetryDelay,
   createRetryPolicy,
   isRetryableError,

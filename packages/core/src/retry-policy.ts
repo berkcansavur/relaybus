@@ -10,7 +10,11 @@ import { ConfigurationError, NonRetryableError } from './errors.js';
 export type JitterStrategy = 'full' | 'equal' | 'none';
 
 export interface RetryPolicyOptions {
-  /** Total attempts including the first one. Default 10. */
+  /**
+   * Total attempts including the first one. Default 10 for handlers, which
+   * gives up after roughly 17 minutes of failures with the default delays.
+   * `Infinity` retries until the delivery succeeds.
+   */
   readonly attempts?: number;
   /** Delay before the second attempt. Default `'1s'`. */
   readonly initialDelay?: Duration;
@@ -33,11 +37,25 @@ export interface RetryPolicy {
   readonly retryIf: ((error: unknown) => boolean) | undefined;
 }
 
+/** Default policy of handlers. */
 export const DEFAULT_RETRY_POLICY: RetryPolicy = {
   attempts: 10,
   initialDelayMs: 1_000,
   factor: 2,
   maxDelayMs: 600_000,
+  jitter: 'full',
+  retryIf: undefined,
+};
+
+/**
+ * Default policy of routes to transports: a broker outage must only delay
+ * events, so routes retry until the broker accepts them, at most every 5 minutes.
+ */
+export const DEFAULT_ROUTE_RETRY_POLICY: RetryPolicy = {
+  attempts: Number.POSITIVE_INFINITY,
+  initialDelayMs: 1_000,
+  factor: 2,
+  maxDelayMs: 300_000,
   jitter: 'full',
   retryIf: undefined,
 };
@@ -48,23 +66,28 @@ export function createRetryPolicy(
   options: RetryPolicyOptions | undefined,
   base: RetryPolicy = DEFAULT_RETRY_POLICY,
 ): RetryPolicy {
+  const initialDelayMs =
+    options?.initialDelay === undefined
+      ? base.initialDelayMs
+      : toMilliseconds(options.initialDelay, 'retry.initialDelay');
   const policy: RetryPolicy = {
     attempts: options?.attempts ?? base.attempts,
-    initialDelayMs:
-      options?.initialDelay === undefined
-        ? base.initialDelayMs
-        : toMilliseconds(options.initialDelay, 'retry.initialDelay'),
+    initialDelayMs,
     factor: options?.factor ?? base.factor,
     maxDelayMs:
       options?.maxDelay === undefined
-        ? base.maxDelayMs
+        ? // Raising only the initial delay must not trip the inherited cap.
+          Math.max(base.maxDelayMs, initialDelayMs)
         : toMilliseconds(options.maxDelay, 'retry.maxDelay'),
     jitter: options?.jitter ?? base.jitter,
     retryIf: options?.retryIf ?? base.retryIf,
   };
-  if (!Number.isInteger(policy.attempts) || policy.attempts < 1) {
+  if (
+    policy.attempts !== Number.POSITIVE_INFINITY &&
+    (!Number.isInteger(policy.attempts) || policy.attempts < 1)
+  ) {
     throw new ConfigurationError(
-      `retry.attempts must be a positive integer, received ${policy.attempts}`,
+      `retry.attempts must be a positive integer or Infinity, received ${policy.attempts}`,
     );
   }
   if (!Number.isFinite(policy.factor) || policy.factor < 1) {

@@ -35,6 +35,7 @@ export function createObserver(): Required<RelayBusObserver> {
     onDeliverySucceeded: vi.fn(),
     onDeliveryRetryScheduled: vi.fn(),
     onDeliveryDead: vi.fn(),
+    onDeliveryReleased: vi.fn(),
     onLeaseLost: vi.fn(),
     onPurged: vi.fn(),
     onFailure: vi.fn(),

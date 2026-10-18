@@ -1,0 +1,37 @@
+import { Logger, Module } from '@nestjs/common';
+import { DiscoveryModule } from '@nestjs/core';
+import { RelayBus } from '@relaybus/core';
+import { RelayBusHandlerExplorer } from './handler-explorer.js';
+import {
+  RELAYBUS_MODULE_OPTIONS,
+  RelayBusConfigurableModule,
+  type RelayBusModuleOptions,
+} from './module-options.js';
+import { RelayBusHealth } from './relay-bus-health.js';
+import { RelayBusLifecycle } from './relay-bus-lifecycle.js';
+
+/**
+ * Registers one {@link RelayBus} for the application, discovers `@Subscribe`
+ * handlers in every module, starts the bus after bootstrap and stops it on
+ * shutdown. Global unless `isGlobal: false`.
+ *
+ * ```ts
+ * RelayBusModule.forRoot({ store: new PostgresEventStore({ pool }), source: 'orders' })
+ * ```
+ */
+@Module({
+  imports: [DiscoveryModule],
+  providers: [
+    {
+      provide: RelayBus,
+      inject: [RELAYBUS_MODULE_OPTIONS],
+      useFactory: (options: RelayBusModuleOptions) =>
+        new RelayBus({ ...options, logger: new Logger('RelayBus') }),
+    },
+    RelayBusHandlerExplorer,
+    RelayBusLifecycle,
+    RelayBusHealth,
+  ],
+  exports: [RelayBus, RelayBusHealth],
+})
+export class RelayBusModule extends RelayBusConfigurableModule {}

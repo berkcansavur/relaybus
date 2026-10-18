@@ -3,7 +3,15 @@ import type { EventEnvelope } from './event.js';
 import type { ClaimedDelivery, PurgeResult } from './event-store.js';
 
 export type FailureStage =
-  'claim' | 'dispatch' | 'complete' | 'reschedule' | 'bury' | 'extend-lease' | 'purge' | 'observer';
+  | 'claim'
+  | 'dispatch'
+  | 'complete'
+  | 'reschedule'
+  | 'bury'
+  | 'release'
+  | 'extend-lease'
+  | 'purge'
+  | 'observer';
 
 /**
  * Hooks for logging, metrics and tracing. Every method is optional, runs
@@ -11,11 +19,20 @@ export type FailureStage =
  * reported to `onFailure` with stage `observer` and otherwise ignored.
  */
 export interface RelayBusObserver {
+  /**
+   * Events were written into the publishing transaction. Called before that
+   * transaction commits, so it can still roll back. Duplicates are not reported.
+   */
   onPublished?(event: {
     readonly envelopes: readonly EventEnvelope[];
     readonly deliveries: number;
   }): void;
-  onReceived?(event: { readonly envelope: EventEnvelope; readonly duplicate: boolean }): void;
+  onReceived?(event: {
+    readonly envelope: EventEnvelope;
+    readonly status: 'accepted' | 'duplicate' | 'ignored';
+  }): void;
+  /** A delivery was given back without using an attempt, for example at shutdown. */
+  onDeliveryReleased?(event: { readonly delivery: ClaimedDelivery }): void;
   onDeliveryStarted?(event: { readonly delivery: ClaimedDelivery }): void;
   onDeliverySucceeded?(event: {
     readonly delivery: ClaimedDelivery;

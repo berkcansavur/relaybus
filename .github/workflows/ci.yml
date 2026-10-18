@@ -1,0 +1,181 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Reused by release.yml as the pre-publish gate.
+  workflow_call:
+    inputs:
+      skip-coverage-upload:
+        description: Skip the Codecov upload (used by the release gate).
+        type: boolean
+        default: false
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup workspace
+        uses: ./.github/actions/setup
+
+      - name: Prettier
+        run: pnpm format:check
+
+      - name: ESLint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # id-token is needed for Codecov OIDC (no CODECOV_TOKEN secret required).
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.x', '24.x']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup workspace
+        uses: ./.github/actions/setup
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Verify Docker (Testcontainers)
+        run: docker version --format '{{.Server.Version}}'
+
+      # Runs the unit and integration projects together and fails when any
+      # 100% threshold from vitest.config.ts is not met.
+      - name: Test with coverage
+        run: pnpm coverage
+
+      - name: Upload coverage artifact
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-node-${{ matrix.node }}
+          path: |
+            coverage/lcov.info
+            coverage/coverage-summary.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload coverage to Codecov
+        if: ${{ !cancelled() && !inputs.skip-coverage-upload }}
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          use_oidc: true
+          files: ./coverage/lcov.info
+          disable_search: true
+          flags: node-${{ matrix.node }}
+          fail_ci_if_error: false
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup workspace
+        uses: ./.github/actions/setup
+
+      - name: Build all packages
+        run: pnpm build
+
+      - name: Typecheck each package build
+        run: pnpm -r run typecheck
+
+      - name: Lint package manifests (publint)
+        run: pnpm -r exec publint .
+
+      - name: Check type resolution (attw)
+        run: pnpm -r exec attw --pack .
+
+  nestjs-compat:
+    name: nestjs compat (@nestjs/* ${{ matrix.nest }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        nest: ['11', '12']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup workspace
+        uses: ./.github/actions/setup
+        with:
+          node-version: 24.x
+
+      # CI-only: re-resolve the dev dependencies of the nestjs package to the
+      # matrix major. The modified package.json and lockfile are never committed.
+      - name: Pin @nestjs/* to ${{ matrix.nest }}
+        run: >
+          pnpm --filter @relaybus/nestjs add --save-dev
+          @nestjs/common@${{ matrix.nest }}
+          @nestjs/core@${{ matrix.nest }}
+          @nestjs/testing@${{ matrix.nest }}
+
+      - name: Show resolved versions
+        run: pnpm --filter @relaybus/nestjs list @nestjs/common @nestjs/core @nestjs/testing
+
+      - name: Assert resolved major
+        run: |
+          actual="$(node -p "require('./packages/nestjs/node_modules/@nestjs/common/package.json').version")"
+          echo "@nestjs/common resolved to ${actual}"
+          case "${actual}" in
+            "${{ matrix.nest }}".*) ;;
+            *) echo "Expected @nestjs/common ${{ matrix.nest }}.x" >&2; exit 1 ;;
+          esac
+
+      - name: Typecheck against @nestjs/* ${{ matrix.nest }}
+        run: pnpm typecheck
+
+      - name: Test packages/nestjs
+        run: pnpm exec vitest run packages/nestjs
+
+  # Single required check for branch protection / rulesets.
+  ci-pass:
+    name: CI pass
+    if: ${{ always() }}
+    needs: [quality, test, build, nestjs-compat]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail when any required job did not succeed
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" = "true" ]; then
+            echo "One or more required jobs did not succeed." >&2
+            exit 1
+          fi

@@ -8,3 +8,4 @@ reports/
 .env
 .env.*
 !.env.example
+.agent-briefs/

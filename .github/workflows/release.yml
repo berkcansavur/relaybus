@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+# Releases must never run concurrently and a started release is never cancelled.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Full test gate (quality, tests with 100% coverage, build, Nest compat).
+  gate:
+    name: gate
+    permissions:
+      contents: read
+      id-token: write # the called workflow's test job uploads to Codecov via OIDC
+    uses: ./.github/workflows/ci.yml
+    with:
+      skip-coverage-upload: true
+
+  release:
+    name: release
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Environment protection is optional. If you add `environment: npm-publish`
+    # here, set the same environment name in the npm Trusted Publisher config.
+    permissions:
+      contents: write # push the version branch, tags and GitHub releases
+      pull-requests: write # open / update the "Version Packages" PR
+      id-token: write # npm Trusted Publishing (OIDC) and provenance
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # changesets/action pushes through the GitHub API, so the checkout
+          # token does not need to be persisted.
+          persist-credentials: false
+
+      - name: Setup workspace
+        uses: ./.github/actions/setup
+        with:
+          node-version: 24.x
+
+      # npm Trusted Publishing needs npm >= 11.5.1.
+      - name: Upgrade npm for Trusted Publishing
+        run: |
+          npm install --global npm@^11.5.1
+          npm --version
+          node -e "const [a,b,c]=process.argv[1].split('.').map(Number); if (a<11||(a===11&&(b<5||(b===5&&c<1)))) { console.error('npm >= 11.5.1 is required'); process.exit(1); }" "$(npm --version)"
+
+      - name: Create Version Packages PR or publish
+        uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+        with:
+          version-script: pnpm version-packages
+          publish-script: pnpm release
+          commit-message: 'chore: version packages'
+          pr-title: 'chore: version packages'
+          create-github-releases: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Trusted Publishing (OIDC) is used: no long-lived npm token is stored.
+          # Provenance is also enabled per package via publishConfig.provenance.
+          NPM_CONFIG_PROVENANCE: 'true'
+          # Fallback when Trusted Publishing is not configured yet: create an
+          # npm automation token, store it as the NPM_TOKEN repository secret,
+          # and uncomment the next line. Remove it again afterwards.
+          # NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

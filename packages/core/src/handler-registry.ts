@@ -1,4 +1,4 @@
-import { toMilliseconds, type Duration } from './duration.js';
+import { toTimerMilliseconds, type Duration } from './duration.js';
 import { ConfigurationError } from './errors.js';
 import type { EventEnvelope } from './event.js';
 import { createRetryPolicy, type RetryPolicy, type RetryPolicyOptions } from './retry-policy.js';
@@ -47,17 +47,21 @@ export interface SubscribeOptions {
   readonly transactional?: boolean;
 }
 
-export interface HandlerRegistration {
+/** Public description of a registered handler or route. */
+export interface HandlerDescriptor {
   readonly id: string;
   readonly eventType: string;
-  readonly schema: StandardSchemaV1 | undefined;
-  readonly handle: EventHandler;
   readonly retry: RetryPolicy;
   readonly timeoutMs: number | null;
   readonly concurrency: number | null;
   readonly transactional: boolean;
-  /** Route handlers forward events to a transport. Received events never fan out to them. */
+  /** True for routes that forward events to a transport. */
   readonly forwardsToTransport: boolean;
+}
+
+export interface HandlerRegistration extends HandlerDescriptor {
+  readonly schema: StandardSchemaV1 | undefined;
+  readonly handle: EventHandler;
 }
 
 export interface RegistrationDefaults {
@@ -139,9 +143,5 @@ function resolveTimeout(
   if (timeout === false) {
     return null;
   }
-  const milliseconds = toMilliseconds(timeout, `timeout of handler '${handlerId}'`);
-  if (milliseconds === 0) {
-    throw new ConfigurationError(`Timeout of handler '${handlerId}' must be greater than zero`);
-  }
-  return milliseconds;
+  return toTimerMilliseconds(timeout, `Timeout of handler '${handlerId}'`);
 }

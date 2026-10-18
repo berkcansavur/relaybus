@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
-  ConfigurationError,
   InMemoryEventStore,
+  InvalidEnvelopeError,
   RelayBusError,
   type EventEnvelope,
   type Transport,
@@ -152,7 +152,8 @@ describe('lifecycle', () => {
     expect(signal!.aborted).toBe(true);
     expect((signal!.reason as Error).name).toBe('DispatcherStoppedError');
     expect((await bus.listDeliveries())[0]).toMatchObject({
-      status: 'processing',
+      status: 'pending',
+      attempts: 0,
       lastError: null,
     });
   });
@@ -217,15 +218,14 @@ describe('transports', () => {
       transactionMode: 'optional',
       transports: [transport],
       routes: [
-        { event: OrderPlaced, transport: 'broker' },
+        { event: OrderPlaced, transport: 'broker', retry: { initialDelay: 100, jitter: 'none' } },
         {
           event: 'order.placed.v1',
           transport: 'broker',
           destination: 'audit',
-          retry: { attempts: 2 },
+          retry: { attempts: 2, initialDelay: 100, jitter: 'none' },
         },
       ],
-      retry: { initialDelay: 100, jitter: 'none' },
     });
     transport.failNextPublishes(1);
     const envelope = await bus.publish(new OrderPlaced({ orderId: '1' }));
@@ -239,8 +239,8 @@ describe('transports', () => {
       ]),
     );
     expect(bus.handlers().map((registration) => registration.id)).toEqual([
-      'relaybus.transport:broker:order.placed.v1',
-      'relaybus.transport:broker:audit',
+      'relaybus.transport:broker:order.placed.v1:order.placed.v1',
+      'relaybus.transport:broker:audit:order.placed.v1',
     ]);
   });
 
@@ -260,7 +260,11 @@ describe('transports', () => {
     expect(handled).toHaveBeenCalledTimes(1);
     expect(handled.mock.calls[0]![0]).toEqual(envelope);
     expect(transport.published).toEqual([]);
-    expect(observer.onReceived).toHaveBeenCalledWith({ envelope, duplicate: true });
+    expect(observer.onReceived).toHaveBeenCalledWith({ envelope, status: 'duplicate' });
+    expect(observer.onReceived).toHaveBeenCalledWith({
+      envelope: expect.objectContaining({ type: 'unknown.v1' }),
+      status: 'ignored',
+    });
   });
 
   it('redelivers to the broker when storing fails', async () => {
@@ -288,9 +292,10 @@ describe('transports', () => {
 
   it.each([
     [{ id: '' }, /Received event has no id/],
-    [{ type: 'bad type' }, ConfigurationError],
+    [{ type: 'bad type' }, InvalidEnvelopeError],
     [{ occurredAt: new Date('invalid') }, /invalid occurredAt/],
-    [{ occurredAt: '2026-01-01' as never }, /invalid occurredAt/],
+    [{ occurredAt: 'not a date' as never }, /invalid occurredAt/],
+    [{ type: 42 as never }, /has no type/],
   ])('rejects malformed received events %#', async (overrides, error) => {
     const { bus } = createTestBus();
     await expect(bus.receive(remoteEnvelope(overrides))).rejects.toThrow(error);

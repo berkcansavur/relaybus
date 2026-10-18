@@ -10,8 +10,14 @@ export interface ExecutionScope {
 
 const storage = new AsyncLocalStorage<ExecutionScope>();
 
+/** Runs `work` in `scope`, layered over the caller's scope. */
 export function runInScope<T>(scope: ExecutionScope, work: () => T): T {
   return storage.run({ ...storage.getStore(), ...scope }, work);
+}
+
+/** Runs `work` in exactly `scope`, ignoring the caller's scope. */
+export function runInIsolatedScope<T>(scope: ExecutionScope, work: () => T): T {
+  return storage.run(scope, work);
 }
 
 export function getCurrentScope(): ExecutionScope | undefined {

@@ -25,6 +25,7 @@ export interface InMemoryEventStoreOptions {
 /** Transaction handle of {@link InMemoryEventStore}. Writes apply on commit only. */
 export class InMemoryTransaction {
   readonly #operations: Array<() => void> = [];
+  readonly #finishers: Array<() => void> = [];
   #state: 'open' | 'committed' | 'rolled-back' = 'open';
 
   get state(): 'open' | 'committed' | 'rolled-back' {
@@ -38,16 +39,34 @@ export class InMemoryTransaction {
     this.#operations.push(operation);
   }
 
+  /** Runs `finisher` once the transaction commits or rolls back, like a lock release. */
+  onFinish(finisher: () => void): void {
+    this.#finishers.push(finisher);
+  }
+
   commit(): void {
     this.#state = 'committed';
     for (const operation of this.#operations) {
       operation();
     }
+    this.#finish();
   }
 
   rollback(): void {
     this.#state = 'rolled-back';
+    this.#finish();
   }
+
+  #finish(): void {
+    for (const finisher of this.#finishers.splice(0)) {
+      finisher();
+    }
+  }
+}
+
+interface HeldLock {
+  readonly owner: InMemoryTransaction;
+  readonly released: Promise<void>;
 }
 
 interface StoredEvent {
@@ -87,6 +106,8 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
   readonly #events = new Map<string, StoredEvent>();
   readonly #deliveries = new Map<string, StoredDelivery>();
   readonly #keySequences = new Map<string, number>();
+  /** Row-lock emulation: event ids and ordering keys written by open transactions. */
+  readonly #locks = new Map<string, HeldLock>();
   readonly #generateIdentifier: IdentifierGenerator;
 
   constructor(options: InMemoryEventStoreOptions = {}) {
@@ -115,6 +136,13 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
     entries: readonly AppendEntry[],
     now: Date,
   ): Promise<AppendResult> {
+    await this.#lock(
+      transaction,
+      entries.flatMap((entry) => [
+        `event:${entry.event.id}`,
+        ...(entry.event.key === null ? [] : [`key:${entry.event.key}`]),
+      ]),
+    );
     const pendingEventIds = new Set<string>();
     const pendingDeliveryKeys = new Set<string>();
     const appendedEventIds: string[] = [];
@@ -140,7 +168,7 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
       appendedDeliveryCount += newDeliveries.length;
       const serialized = serializeEnvelope(entry.event);
       transaction.enqueue(() => {
-        if (!this.#events.has(eventId)) {
+        if (!isDuplicate) {
           this.#events.set(eventId, {
             envelope: serialized,
             sequence: this.#nextSequence(serialized.key),
@@ -148,9 +176,6 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
         }
         const stored = this.#events.get(eventId)!;
         for (const delivery of newDeliveries) {
-          if (this.#hasDelivery(eventId, delivery.handler)) {
-            continue;
-          }
           this.#deliveries.set(delivery.id, {
             id: delivery.id,
             eventId,
@@ -253,6 +278,16 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
     });
   }
 
+  async release(lease: LeaseReference, now: Date): Promise<boolean> {
+    return this.#updateLeased(lease, (delivery) => {
+      delivery.status = 'pending';
+      delivery.attempts -= 1;
+      delivery.availableAt = now;
+      delivery.updatedAt = now;
+      clearLease(delivery);
+    });
+  }
+
   async bury(lease: LeaseReference, error: ErrorInfo, now: Date): Promise<boolean> {
     return this.#updateLeased(lease, (delivery) => {
       delivery.status = 'dead';
@@ -344,6 +379,33 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
       }
     }
     return { ...counts, oldestDueAt };
+  }
+
+  /**
+   * Waits for other open transactions holding any of `names`, then holds them
+   * until `transaction` finishes, the way a database holds row locks. Sorted
+   * acquisition keeps two transactions from waiting on each other.
+   */
+  async #lock(transaction: InMemoryTransaction, names: readonly string[]): Promise<void> {
+    for (const name of [...new Set(names)].sort()) {
+      let held = this.#locks.get(name);
+      while (held !== undefined && held.owner !== transaction) {
+        await held.released;
+        held = this.#locks.get(name);
+      }
+      if (held !== undefined) {
+        continue;
+      }
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      this.#locks.set(name, { owner: transaction, released });
+      transaction.onFinish(() => {
+        this.#locks.delete(name);
+        release();
+      });
+    }
   }
 
   #hasDelivery(eventId: string, handler: string): boolean {

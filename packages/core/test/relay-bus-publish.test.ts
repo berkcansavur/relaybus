@@ -93,11 +93,7 @@ describe('RelayBus configuration', () => {
     expect(byDefault!.retry.attempts).toBe(4);
     expect(custom).toMatchObject({ timeoutMs: null, concurrency: 3, transactional: true });
     expect(custom!.retry.attempts).toBe(2);
-    expect(byType).toMatchObject({
-      eventType: 'order.placed.v1',
-      timeoutMs: 1_000,
-      schema: undefined,
-    });
+    expect(byType).toMatchObject({ eventType: 'order.placed.v1', timeoutMs: 1_000 });
   });
 });
 
@@ -204,9 +200,7 @@ describe('RelayBus.publish', () => {
     await bus.publish(new OrderPlaced({ orderId: '1' }), { id: 'order-1-placed' });
     await bus.publish(new OrderPlaced({ orderId: '1' }), { id: 'order-1-placed' });
     expect(await bus.listDeliveries()).toHaveLength(1);
-    expect(observer.onPublished).toHaveBeenLastCalledWith(
-      expect.objectContaining({ deliveries: 0 }),
-    );
+    expect(observer.onPublished).toHaveBeenCalledTimes(1);
   });
 
   it('stores several events atomically and in order', async () => {

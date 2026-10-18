@@ -10,15 +10,14 @@ import {
   createRetryPolicy,
   createUuidV7,
   defineEvent,
-  getCurrentScope,
   isRetryableError,
-  runInScope,
   systemClock,
   toErrorInfo,
   toMilliseconds,
   validatePayload,
   type StandardSchemaV1,
 } from '@relaybus/core';
+import { getCurrentScope, runInIsolatedScope, runInScope } from '../src/execution-scope.js';
 
 function schemaOf<T>(
   validate: (value: unknown) => StandardSchemaV1.Result<T> | Promise<StandardSchemaV1.Result<T>>,
@@ -244,6 +243,9 @@ describe('execution scope', () => {
         expect(getCurrentScope()).toEqual({ transaction: 'outer', event: { id: 'e' } });
       });
       expect(getCurrentScope()).toEqual({ transaction: 'outer' });
+      runInIsolatedScope({ event: { id: 'e' } as never }, () => {
+        expect(getCurrentScope()).toEqual({ event: { id: 'e' } });
+      });
     });
   });
 });

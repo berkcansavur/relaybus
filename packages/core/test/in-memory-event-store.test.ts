@@ -4,6 +4,8 @@ import { at, createDelivery, createEnvelope, eventStoreContract } from '@relaybu
 
 eventStoreContract('InMemoryEventStore', {
   createStore: async () => new InMemoryEventStore(),
+  // One process holds the only copy of the data, so the "peer" is the same instance.
+  createPeerStore: async (primary) => primary,
 });
 
 describe('InMemoryEventStore', () => {
@@ -59,17 +61,39 @@ describe('InMemoryEventStore', () => {
     });
     expect((await store.listDeliveries({}))[0]!.status).toBe('processing');
   });
+});
 
-  it('skips writes that became duplicates before commit', async () => {
+describe('InMemoryEventStore locks', () => {
+  it('lets one transaction write the same key twice', async () => {
     const store = new InMemoryEventStore();
-    const event = createEnvelope();
-    await store.transaction(async (first) => {
-      await store.append(first, [{ event, deliveries: [createDelivery('a')] }], at(0));
-      await store.transaction((second) =>
-        store.append(second, [{ event, deliveries: [createDelivery('a')] }], at(0)),
+    await store.transaction(async (transaction) => {
+      await store.append(
+        transaction,
+        [{ event: createEnvelope({ key: 'k' }), deliveries: [createDelivery('a')] }],
+        at(0),
+      );
+      await store.append(
+        transaction,
+        [{ event: createEnvelope({ key: 'k' }), deliveries: [createDelivery('a')] }],
+        at(0),
       );
     });
-    expect(await store.listDeliveries({})).toHaveLength(1);
+    expect(await store.listDeliveries({})).toHaveLength(2);
+  });
+
+  it('releases locks when a transaction rolls back', async () => {
+    const store = new InMemoryEventStore();
+    const event = createEnvelope({ key: 'k' });
+    await expect(
+      store.transaction(async (transaction) => {
+        await store.append(transaction, [{ event, deliveries: [createDelivery('a')] }], at(0));
+        throw new Error('rollback');
+      }),
+    ).rejects.toThrow('rollback');
+    const result = await store.transaction((transaction) =>
+      store.append(transaction, [{ event, deliveries: [createDelivery('a')] }], at(0)),
+    );
+    expect(result.appendedEventIds).toEqual([event.id]);
   });
 });
 
