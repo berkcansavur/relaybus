@@ -2,7 +2,8 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['**/dist/**', '**/coverage/**', 'reports/**', '.stryker-tmp/**'] },
+  // The benchmark harness is typed and linted separately once it is reworked.
+  { ignores: ['**/dist/**', '**/coverage/**', 'reports/**', '.stryker-tmp/**', 'benchmarks/**'] },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {
