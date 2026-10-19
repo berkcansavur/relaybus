@@ -1,5 +1,6 @@
 export {
   EventConsumer,
+  type EventConsumerClass,
   type EventConsumerMetadata,
   type EventConsumerOptions,
 } from './event-consumer.decorator.js';

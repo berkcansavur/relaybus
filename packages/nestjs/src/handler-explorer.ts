@@ -1,7 +1,13 @@
 import { Inject, Injectable, type OnModuleInit } from '@nestjs/common';
 import { DiscoveryService, MetadataScanner } from '@nestjs/core';
 import type { InstanceWrapper } from '@nestjs/core/injector/instance-wrapper.js';
-import { ConfigurationError, RelayBus, describeCatalog, type EventHandler } from '@relaybus/core';
+import {
+  ConfigurationError,
+  RelayBus,
+  describeCatalog,
+  type CatalogEntry,
+  type EventHandler,
+} from '@relaybus/core';
 import { readEventConsumerMetadata } from './event-consumer.decorator.js';
 import { readSubscribeMetadata, type SubscribeMetadata } from './subscribe.decorator.js';
 
@@ -86,12 +92,20 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
     className: string,
     registeredBy: Map<string, string>,
   ): void {
-    for (const { catalog, options } of readEventConsumerMetadata(instance.constructor)) {
+    const lookup = instance as Record<string, unknown>;
+    for (const { catalog, options, selectedEntries } of readEventConsumerMetadata(
+      instance.constructor,
+    )) {
       const { name, entries } = describeCatalog(catalog);
       const label = name ?? 'catalog';
-      const handlers = entries.filter(
-        (entry) => typeof (instance as Record<string, unknown>)[entry.handlerName] === 'function',
-      );
+      const handlers = selectedEntries ?? entries.filter((entry) => isMethod(lookup, entry));
+      const missing = handlers.filter((entry) => !isMethod(lookup, entry));
+      if (missing.length > 0) {
+        throw new ConfigurationError(
+          `${className} uses @EventConsumer(${label}) but lacks the handler methods of events ` +
+            `it consumes: ${missing.map((entry) => entry.handlerName).join(', ')}`,
+        );
+      }
       if (handlers.length === 0) {
         throw new ConfigurationError(
           `${className} uses @EventConsumer(${label}) but defines none of its handler ` +
@@ -108,9 +122,7 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
           );
         }
         registeredBy.set(id, `${className}.${entry.handlerName}`);
-        const method = (instance as Record<string, unknown>)[entry.handlerName] as (
-          ...args: Parameters<EventHandler>
-        ) => unknown;
+        const method = lookup[entry.handlerName] as (...args: Parameters<EventHandler>) => unknown;
         this.bus.subscribe(
           entry.eventClass as never,
           (envelope, context) => method.call(instance, envelope, context),
@@ -154,4 +166,8 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
       );
     }
   }
+}
+
+function isMethod(instance: Record<string, unknown>, entry: CatalogEntry): boolean {
+  return typeof instance[entry.handlerName] === 'function';
 }

@@ -4,8 +4,10 @@ import {
   ConfigurationError,
   InMemoryEventStore,
   RelayBus,
+  consume,
   defineCatalog,
   defineEvent,
+  produce,
   type EventEnvelope,
   type EventOf,
   type HandlerContext,
@@ -364,5 +366,188 @@ describe('catalogs module option', () => {
 
     await expect(start(moduleRef)).resolves.toBeInstanceOf(RelayBus);
     await moduleRef.close();
+  });
+});
+
+describe('@EventConsumer with selected events', () => {
+  it('registers exactly the selected methods and ignores the others', async () => {
+    @Injectable()
+    @EventConsumer(OrderEvents, { events: ['OrderShipped'], concurrency: 3 })
+    class ShippingOnly {
+      readonly seen: string[] = [];
+      onOrderPlaced(): void {
+        this.seen.push('placed');
+      }
+      onOrderShipped(event: EventOf<typeof OrderShipped>): void {
+        this.seen.push(`shipped:${event.payload.orderId}`);
+      }
+    }
+    const moduleRef = await createApplication({
+      imports: [relayBusRoot()],
+      providers: [ShippingOnly],
+    });
+    const bus = await start(moduleRef);
+
+    await bus.transaction((transaction) =>
+      bus.publishAll([new OrderPlaced({ orderId: '1' }), new OrderShipped({ orderId: '1' })], {
+        transaction,
+      }),
+    );
+    await bus.drain();
+
+    expect(bus.handlers().map((handler) => [handler.id, handler.concurrency])).toEqual([
+      ['ShippingOnly.onOrderShipped', 3],
+    ]);
+    expect(moduleRef.get(ShippingOnly).seen).toEqual(['shipped:1']);
+    await moduleRef.close();
+  });
+
+  it('fails the boot listing the methods a selected event lacks', async () => {
+    @Injectable()
+    @(EventConsumer(OrderEvents, { events: ['OrderPlaced', 'OrderShipped'] }) as ClassDecorator)
+    class Incomplete {
+      onOrderPlaced(): void {}
+    }
+    const moduleRef = await createApplication({
+      imports: [relayBusRoot()],
+      providers: [Incomplete],
+    });
+
+    await expect(moduleRef.init()).rejects.toThrow(
+      new ConfigurationError(
+        'Incomplete uses @EventConsumer(OrderEvents) but lacks the handler methods of events ' +
+          'it consumes: onOrderShipped',
+      ),
+    );
+  });
+
+  it('rejects an invalid selection when the class is declared', () => {
+    expect(() => EventConsumer(OrderEvents, { events: ['OrderRefunded' as never] })).toThrow(
+      "Catalog 'OrderEvents' has no event named 'OrderRefunded'",
+    );
+    expect(() => EventConsumer(OrderEvents, { events: [] })).toThrow(
+      /must name at least one event/,
+    );
+  });
+});
+
+describe('@EventConsumer inheritance', () => {
+  it('registers the catalogs of the base class and of the subclass', async () => {
+    @EventConsumer(OrderEvents)
+    class OrderBase {
+      onOrderPlaced(): void {}
+    }
+    @Injectable()
+    @EventConsumer(PaymentEvents)
+    class Derived extends OrderBase {
+      onPaymentTaken(): void {}
+    }
+    const moduleRef = await createApplication({ imports: [relayBusRoot()], providers: [Derived] });
+    const bus = await start(moduleRef);
+
+    expect(bus.handlers().map((handler) => handler.id)).toEqual([
+      'Derived.onOrderPlaced',
+      'Derived.onPaymentTaken',
+    ]);
+    await moduleRef.close();
+  });
+
+  it('lets a subclass replace the inherited declaration of the same catalog', async () => {
+    @EventConsumer(OrderEvents, { transactional: true })
+    class OrderBase {
+      onOrderPlaced(): void {}
+      onOrderShipped(): void {}
+    }
+    @Injectable()
+    @EventConsumer(OrderEvents, { events: ['OrderShipped'] })
+    class ShippingOnly extends OrderBase {}
+    const moduleRef = await createApplication({
+      imports: [relayBusRoot()],
+      providers: [ShippingOnly],
+    });
+    const bus = await start(moduleRef);
+
+    expect(bus.handlers().map((handler) => [handler.id, handler.transactional])).toEqual([
+      ['ShippingOnly.onOrderShipped', false],
+    ]);
+    await moduleRef.close();
+  });
+
+  it('rejects the same catalog declared twice on one class', () => {
+    expect(() => {
+      @EventConsumer(OrderEvents)
+      @EventConsumer(OrderEvents, { events: ['OrderPlaced'] })
+      class Twice {
+        onOrderPlaced(): void {}
+      }
+      return Twice;
+    }).toThrow(
+      new ConfigurationError(
+        '@EventConsumer(OrderEvents) is declared twice on Twice; merge the declarations into one',
+      ),
+    );
+    expect(() => {
+      @EventConsumer(PaymentEvents)
+      @EventConsumer(PaymentEvents)
+      class Unnamed {
+        onPaymentTaken(): void {}
+      }
+      return Unnamed;
+    }).toThrow('@EventConsumer(catalog) is declared twice on Unnamed');
+  });
+});
+
+describe('catalogs module option with consume and produce', () => {
+  it('boots a consumer that handles its part of a shared catalog', async () => {
+    @Injectable()
+    @EventConsumer(OrderEvents, { events: ['OrderShipped'] })
+    class ShippingHandlers {
+      onOrderShipped(): void {}
+    }
+    const moduleRef = await createApplication({
+      imports: [
+        relayBusRoot({
+          ...manualOptions(),
+          catalogs: [consume(OrderEvents, { events: ['OrderShipped'] })],
+        }),
+      ],
+      providers: [ShippingHandlers],
+    });
+
+    await expect(start(moduleRef)).resolves.toBeInstanceOf(RelayBus);
+    await moduleRef.close();
+  });
+
+  it('fails the boot when a consumed event has no handler or a produced event no route', async () => {
+    @Injectable()
+    @EventConsumer(OrderEvents, { events: ['OrderPlaced'] })
+    class PlacedHandlers {
+      onOrderPlaced(): void {}
+    }
+    const moduleRef = await createApplication({
+      imports: [
+        relayBusRoot({
+          ...manualOptions(),
+          catalogs: [
+            consume(OrderEvents),
+            produce(PaymentEvents),
+            produce(OrderEvents, { events: ['OrderPlaced'] }),
+          ],
+        }),
+      ],
+      providers: [PlacedHandlers],
+    });
+
+    await expect(moduleRef.init()).rejects.toThrow(
+      new ConfigurationError(
+        [
+          'Catalog events this service does not cover:',
+          '  - OrderEvents.OrderShipped (order.shipped.v1): consumed here, needs handler method onOrderShipped',
+          '  - PaymentTaken (payment.taken.v1): produced here, needs a route to a transport',
+          '  - OrderEvents.OrderPlaced (order.placed.v1): produced here, needs a route to a transport; ' +
+            'a local handler does not deliver it to other services',
+        ].join('\n'),
+      ),
+    );
   });
 });
