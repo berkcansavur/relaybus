@@ -151,8 +151,27 @@ describe('claiming does not write delivery documents', () => {
     expect(await lanes.find().sort({ _id: 1 }).toArray()).toEqual(lanesAfterClaim);
   });
 
-  it('completes a batch of leases from many lanes in one transaction with a fixed number of commands', async () => {
+  it('completes a batch of leases from many lanes with three commands and no transaction', async () => {
     const { store } = await createStore();
+    await append(
+      store,
+      Array.from({ length: 60 }, () => ({ event: createEnvelope(), handlers: ['h'] })),
+    );
+    const claimed = await claim(store, ['h'], 'worker-1', at(0), 60);
+    expect(
+      new Set(claimed.map((delivery) => delivery.leaseToken.split(':')[0])).size,
+    ).toBeGreaterThan(10);
+    let outcome: boolean[] = [];
+    const commands = await recordCommands(async () => {
+      outcome = await store.completeMany(claimed, at(1));
+    });
+    expect(outcome).toEqual(claimed.map(() => true));
+    // Read the deliveries, read the lanes, delete: whatever the batch size.
+    expect(commands.map((command) => command.commandName)).toEqual(['find', 'find', 'delete']);
+  });
+
+  it('completes a batch with its history records in one transaction with a fixed number of commands', async () => {
+    const { store } = await createStore({ completionHistory: true });
     await append(
       store,
       Array.from({ length: 60 }, () => ({ event: createEnvelope(), handlers: ['h'] })),
@@ -169,8 +188,9 @@ describe('claiming does not write delivery documents', () => {
     const names = commands.map((command) => command.commandName);
     expect(names.filter((name) => name === 'commitTransaction')).toHaveLength(1);
     expect(names.filter((name) => name === 'delete')).toHaveLength(1);
+    expect(names.filter((name) => name === 'insert')).toHaveLength(1);
     expect(names.filter((name) => name === 'update')).toHaveLength(0);
-    expect(names.length).toBeLessThanOrEqual(5);
+    expect(names.length).toBeLessThanOrEqual(6);
   });
 });
 
@@ -490,16 +510,8 @@ describe('failures during a claim', () => {
       { event: createEnvelope({ key: 'k' }), handlers: ['h'] },
       { event: createEnvelope(), handlers: ['h'] },
     ]);
-    let lookups = 0;
-    failOnce('findOne', '_deliveries', (args) => {
-      const filter = args[0] as Document;
-      if (filter['sequence'] === undefined) {
-        return false;
-      }
-      lookups += 1;
-      // The first lookup is the claim's own check; the second runs after recording.
-      return lookups === 2;
-    });
+    // The predecessor check that runs after recording reads all picks with one `$or` query.
+    failOnce('find', '_deliveries', (args) => (args[0] as Document)['$or'] !== undefined);
     await expect(claim(store, ['h'], 'worker-1')).rejects.toBe(failure);
     vi.restoreAllMocks();
     expect(await store.statistics(at(1))).toMatchObject({ processing: 0, pending: 2 });
@@ -603,14 +615,28 @@ describe('free lanes with nothing to run', () => {
     return created;
   }
 
-  it('leaves a lane alone whose due deliveries all wait behind a delayed head', async () => {
-    const { store, lanes } = await delayedHead(5);
+  it('takes a lane whose due deliveries all wait behind a delayed head once, then leaves it alone', async () => {
+    const { store, lanes, deliveries } = await delayedHead(5);
     const lane = laneOf('k', 'unused');
     const before = await lanes.findOne({ _id: lane });
-    for (const owner of ['worker-2', 'worker-3']) {
-      expect(await claim(store, ['h'], owner, at(LEASE_MS * 2))).toEqual([]);
+    expect(await claim(store, ['h'], 'worker-2', at(LEASE_MS * 2))).toEqual([]);
+    // The claim that handed the lane back parked its waiting deliveries.
+    expect(await deliveries.countDocuments({ lane: 'parked' })).toBe(5);
+    const handedBack = await lanes.findOne({ _id: lane });
+    expect(handedBack).toMatchObject({ epoch: before!['epoch'] + 1, owner: null });
+    for (const owner of ['worker-3', 'worker-4']) {
+      expect(await claim(store, ['h'], owner, at(LEASE_MS * 3))).toEqual([]);
     }
-    expect(await lanes.findOne({ _id: lane })).toEqual(before);
+    expect(await lanes.findOne({ _id: lane })).toEqual(handedBack);
+    // Nothing is lost: once the head is due and done, the followers run in order.
+    const [head] = await claim(store, ['h'], 'worker-3', at(10 ** 9));
+    expect(await store.complete(head!, at(10 ** 9))).toBe(true);
+    for (let index = 0; index < 5; index += 1) {
+      const [follower] = await claim(store, ['h'], 'worker-3', at(10 ** 9 + 1 + index));
+      expect(follower).toBeDefined();
+      expect(await store.complete(follower!, at(10 ** 9 + 1 + index))).toBe(true);
+    }
+    expect(await store.statistics(at(10 ** 9 + 10))).toMatchObject({ pending: 0, processing: 0 });
   });
 
   it('takes such a lane once when its backlog is long enough to park, and then leaves it alone', async () => {
@@ -658,6 +684,84 @@ describe('derived counts and untrusted lease input', () => {
     expect(await store.bury(lease, error, at(1))).toBe(false);
     expect(await store.complete(lease, at(1))).toBe(false);
     expect(await store.complete(real!, at(1))).toBe(true);
+  });
+});
+
+describe('completion without a transaction', () => {
+  /** Two deliveries in different lanes, claimed by worker-1 at different times so only the first lease expires at LEASE_MS. */
+  async function twoLeases(): Promise<
+    TestStore & { early: ClaimedDelivery; late: ClaimedDelivery }
+  > {
+    const created = await createStore();
+    const [first, second] = eventsInLanes([20, 21]) as [EventEnvelope, EventEnvelope];
+    await append(created.store, [{ event: first, handlers: ['h'] }]);
+    const [early] = await claim(created.store, ['h'], 'worker-1', at(0));
+    await append(created.store, [{ event: second, handlers: ['h'] }], at(1_000));
+    const [late] = await claim(created.store, ['h'], 'worker-1', at(1_000));
+    expect([early!.event.id, late!.event.id]).toEqual([first.id, second.id]);
+    return { ...created, early: early!, late: late! };
+  }
+
+  /** Runs `takeover` right before the first `method` call on the `suffix` collection. */
+  function before(
+    method: 'find' | 'deleteMany',
+    suffix: string,
+    takeover: () => Promise<unknown>,
+  ): void {
+    const original = Collection.prototype[method] as (...args: unknown[]) => unknown;
+    let done = false;
+    vi.spyOn(Collection.prototype, method).mockImplementation(function (
+      this: Collection,
+      ...args: unknown[]
+    ) {
+      if (done || !this.collectionName.endsWith(suffix)) {
+        return original.apply(this, args);
+      }
+      done = true;
+      if (method === 'find') {
+        // find returns a cursor synchronously: run the takeover before the cursor is read.
+        const cursor = original.apply(this, args) as { toArray(): Promise<unknown[]> };
+        const toArray = cursor.toArray.bind(cursor);
+        cursor.toArray = async () => {
+          await takeover();
+          return toArray();
+        };
+        return cursor;
+      }
+      return takeover().then(() => original.apply(this, args));
+    } as never);
+  }
+
+  it('reports a lease lost when the lane is taken over between reading the deliveries and the lanes', async () => {
+    const { store, database, early, late } = await twoLeases();
+    const peer = new MongoEventStore({ client, database });
+    let taken: ClaimedDelivery[] = [];
+    before('find', '_lanes', async () => {
+      taken = await claim(peer, ['h'], 'worker-2', at(LEASE_MS));
+    });
+    expect(await store.completeMany([early, late], at(LEASE_MS + 1))).toEqual([false, true]);
+    vi.restoreAllMocks();
+    expect(taken.map((delivery) => [delivery.deliveryId, delivery.attempt])).toEqual([
+      [early.deliveryId, 2],
+    ]);
+    expect(await peer.complete(taken[0]!, at(LEASE_MS + 2))).toBe(true);
+  });
+
+  it('deletes nothing of a lane taken over after it was read, and still completes the other leases', async () => {
+    const { store, database, deliveries, early, late } = await twoLeases();
+    const peer = new MongoEventStore({ client, database });
+    let taken: ClaimedDelivery[] = [];
+    before('deleteMany', '_deliveries', async () => {
+      taken = await claim(peer, ['h'], 'worker-2', at(LEASE_MS));
+    });
+    expect(await store.completeMany([early, late], at(LEASE_MS + 1))).toEqual([false, true]);
+    vi.restoreAllMocks();
+    expect(taken.map((delivery) => [delivery.deliveryId, delivery.attempt])).toEqual([
+      [early.deliveryId, 2],
+    ]);
+    expect(await deliveries.findOne({ _id: early.deliveryId })).toMatchObject({ attempts: 1 });
+    expect(await deliveries.findOne({ _id: late.deliveryId })).toBeNull();
+    expect(await peer.complete(taken[0]!, at(LEASE_MS + 2))).toBe(true);
   });
 });
 

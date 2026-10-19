@@ -178,13 +178,17 @@ cannot starve unrelated work.
 **Parked backlogs.** A key whose head is slow can accumulate thousands of deliveries that are all
 due and all blocked. Scanning them on every claim would cost time proportional to the backlog.
 When one claim finds 32 or more deliveries of a key waiting behind an unfinished predecessor,
-it moves them to the `parked` claim lane (the `lane` field), which the claim index leaves out. At the start of every
+it moves them to the `parked` claim lane (the `lane` field), which the claim index leaves out. A
+claim that hands a lane back also parks the waiting deliveries it found there, however few: they
+are all the due work of that lane (typically followers of a head whose retry is not due yet), and
+leaving them ready would make every later claim take the lane for nothing. At the start of every
 claim, the lowest parked delivery of each key with no unfinished predecessor is moved back to
-`ready`. This is deliberately level-triggered: it looks at the current state, never at an event,
+`ready` (one aggregation per handler, a distinct scan of the small parked index, then one
+predecessor lookup per parked key, in parallel, and one update). This is deliberately level-triggered: it looks at the current state, never at an event,
 so a crash while parking, or a predecessor finishing while its followers were being parked, can
 delay a key until the next claim but never strand it. Parked deliveries keep their `dueAt`, so
-`statistics().oldestDueAt` still counts them. The per-claim cost of the move-back step is two
-indexed lookups per key that currently has parked deliveries, so keep the number of such
+`statistics().oldestDueAt` still counts them. The per-claim cost of the move-back step is one
+index probe and one parallel lookup per key that currently has parked deliveries, so keep the number of such
 simultaneously backlogged keys in the hundreds, not millions. Parking and unparking write delivery
 documents; they are the slow path for blocked keys only.
 
@@ -197,15 +201,25 @@ while a later delivery of its key is running.
 delivery; a worker that lost its lane changes nothing. A token this store cannot have issued is
 refused without a database call. An expired lease nobody took over is still honoured.
 
-**Completion and takeover.** `complete` and `completeMany` delete the delivery documents in one
-transaction (the caller's for `complete(lease, now, session)`) after reading the lanes; a batch of
-any size from any number of lanes is one transaction. A worker that takes a lane over first writes
-every delivery the previous owner still had in flight (it charges the lost attempt, see below) and
-only then reads what to claim. A completion and a takeover thus write the same delivery document:
-whichever commits second either hits a write conflict and is retried against the new state (seeing
-the new epoch, or the delivery gone), or waits for the first to finish. They can never both succeed,
-which is what makes a transactional handler's writes effectively-once. Since completions only read
-lane documents, concurrent completions of one lane never conflict with each other.
+**Completion and takeover.** A worker that takes a lane over first writes every delivery the
+previous owner still had in flight (it charges the lost attempt, see below) and only then reads
+what to claim. A completion never writes a lane document, so concurrent completions of one lane
+never conflict with each other; it relies on that charge instead:
+
+- `complete(lease, now, session)` (transactional handlers) and every completion when
+  `completionHistory` is on run in a transaction that reads the lanes and deletes the deliveries
+  (and inserts the history records). The completion and a takeover write the same delivery
+  document, so whichever commits second either hits a write conflict and is retried against the
+  new state (seeing the new epoch, or the delivery gone), or waits for the first to finish.
+- Otherwise `complete` and `completeMany` need no transaction: they read the deliveries' attempt
+  counts, then the lanes, and delete only the deliveries whose attempt count is still the one they
+  read. A takeover before the lane read shows up in it as a new epoch; a takeover after it changed
+  the attempt count, so the delete matches nothing. A batch of any size from any number of lanes
+  costs three commands.
+
+A completion and a takeover can never both succeed, which is what makes a transactional handler's
+writes effectively-once. Two concurrent completions of the same lease without a transaction may both
+report success; the dispatcher never issues them.
 
 **Attempts.** `attempts` in a delivery document counts attempts that **ended**: `reschedule` and
 `bury` add the failed one, `release` (graceful shutdown) adds nothing, and the claim result reports
@@ -307,7 +321,7 @@ with the upgraded documents.
 - **Lease duration.** A lane whose owner died is unavailable for at most the lease duration. Keep it
   well above the handler run time (the dispatcher renews it while handlers run).
 - **Completion batching.** The dispatcher completes deliveries that finish close together with one
-  `completeMany`, one transaction per batch.
+  `completeMany`: three commands per batch (one transaction with `completionHistory`).
 - **Transactional handlers** commit their writes with the deletion of the delivery. They conflict
   only with a takeover of their own delivery, not with each other.
 

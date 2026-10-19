@@ -168,12 +168,16 @@ interface IssuedLease extends LaneLease {
  * - **Effectively-once for transactional handlers.** A worker that takes a lane
  *   over first writes every delivery the previous owner had in flight (it
  *   charges the lost attempt) and only then reads what to claim. A completion
- *   deletes the delivery in a transaction that first checks the lane. Both write
- *   the same delivery document, so a completion and a takeover cannot both
- *   succeed: the later one either conflicts and retries (and then sees the new
- *   epoch or the missing delivery), or waits for the earlier to commit.
- *   Completions never write the lane document, so concurrent completions of one
- *   lane never conflict with each other.
+ *   inside a transaction (a transactional handler's, or any completion when a
+ *   completion history is kept) deletes the delivery after checking the lane:
+ *   both write the same delivery document, so the later of the two either
+ *   conflicts and retries (and then sees the new epoch or the missing
+ *   delivery), or waits for the earlier to commit. Other completions run
+ *   without a transaction: they read the deliveries' attempt counts, then the
+ *   lanes, and delete only deliveries whose attempt count did not change,
+ *   which a takeover always changes. Either way a completion and a takeover
+ *   cannot both succeed. Completions never write the lane document, so
+ *   concurrent completions of one lane never conflict with each other.
  * - **Attempts survive crashes.** `attempts` counts attempts that ended. The
  *   claim result reports `attempts + 1`; a failure records it; a lane taken over
  *   charges one attempt to every delivery the previous owner still had in flight,
@@ -618,14 +622,17 @@ export class MongoEventStore implements EventStore<ClientSession> {
     if (request.handlers.length === 0 || request.limit <= 0) {
       return [];
     }
-    await this.#unparkNextDeliveries(request.handlers);
-    const held = await this.#lanes
-      .find({
-        owner: request.leaseOwner,
-        holder: this.#instanceId,
-        leaseExpiresAt: { $gt: request.now },
-      })
-      .toArray();
+    // Independent reads, so they share one round trip: unparking only has to finish before candidates are read.
+    const [held] = await Promise.all([
+      this.#lanes
+        .find({
+          owner: request.leaseOwner,
+          holder: this.#instanceId,
+          leaseExpiresAt: { $gt: request.now },
+        })
+        .toArray(),
+      this.#unparkNextDeliveries(request.handlers),
+    ]);
     await this.#chargeLost(held);
     const scope = new Map<number, ScopeLane>(
       held.map((lane) => [
@@ -633,13 +640,15 @@ export class MongoEventStore implements EventStore<ClientSession> {
         { laneId: lane._id, epoch: lane.epoch, listed: lane.inFlight },
       ]),
     );
-    const running = await this.#findRunning(held.flatMap((lane) => lane.inFlight));
-    const runningIds = new Set(running.map((document) => document._id));
-    const runningKeys = new Set(
-      running.flatMap((document) =>
-        document.key === undefined ? [] : [orderingIdentity(document.handler, document.key)],
+    // Loaded while the first candidates are read; only keyed candidates and the record need it.
+    const running = this.#findRunning(held.flatMap((lane) => lane.inFlight)).then((documents) => ({
+      ids: new Set(documents.map((document) => document._id)),
+      keys: new Set(
+        documents.flatMap((document) =>
+          document.key === undefined ? [] : [orderingIdentity(document.handler, document.key)],
+        ),
       ),
-    );
+    }));
     const scan = new ClaimScan();
     const picked: DeliveryDocument[] = [];
     const pickFrom = async (lanes: readonly ScopeLane[]): Promise<void> => {
@@ -649,7 +658,7 @@ export class MongoEventStore implements EventStore<ClientSession> {
             lanes.slice(offset, offset + LANES_PER_CANDIDATE_QUERY),
             request,
             scan,
-            runningKeys,
+            running,
             picked,
           );
         }
@@ -673,7 +682,12 @@ export class MongoEventStore implements EventStore<ClientSession> {
     }
     // Read before recording: a failure from here on must not leave picks listed as running.
     const events = await this.#readEnvelopes(picked.map((document) => document.eventId));
-    const recorded = await this.#recordClaim(scope, picked, runningIds, request);
+    const { recorded, handedBack } = await this.#recordClaim(
+      scope,
+      picked,
+      (await running).ids,
+      request,
+    );
     let claimed = picked.filter((document) => recorded.has(document.laneId));
     try {
       claimed = await this.#releaseOvertaken(claimed, scope);
@@ -682,7 +696,7 @@ export class MongoEventStore implements EventStore<ClientSession> {
       await Promise.allSettled([this.#releasePicks(claimed, scope)]);
       throw error;
     }
-    await this.#parkWaiting(scan.waitingBacklogs(PARK_BACKLOG_THRESHOLD));
+    await this.#parkWaiting(scan.waitingBacklogs(PARK_BACKLOG_THRESHOLD, handedBack));
     return claimed.map((document) => ({
       deliveryId: document._id,
       leaseToken: formatLeaseToken(document.laneId, scope.get(document.laneId)!.epoch),
@@ -727,7 +741,9 @@ export class MongoEventStore implements EventStore<ClientSession> {
   }
 
   /**
-   * Completes many leases in one transaction, whatever lanes they belong to.
+   * Completes many leases with a fixed number of round trips, whatever lanes
+   * they belong to: three commands without a completion history, one
+   * transaction with it (see {@link MongoEventStore.#deleteFenced}).
    * Returns one flag per lease in input order; a lease listed twice completes
    * once, and a token this store cannot have issued is refused.
    */
@@ -984,14 +1000,12 @@ export class MongoEventStore implements EventStore<ClientSession> {
   }
 
   /**
-   * Up to `laneCount` lanes nobody holds under a live lease that have work for
-   * the requested handlers, leaving out `passed`, the lane with the oldest due
-   * delivery first. One round trip: the server probes each lane's first
-   * {@link PARK_BACKLOG_THRESHOLD} due, ready deliveries in due order. A lane
-   * whose probed deliveries are all keyed followers waiting behind an
-   * unfinished predecessor has nothing to run and is left alone, so it is not
-   * taken and handed back by every claim; when all of the probed ones wait, the
-   * lane is taken anyway, because its backlog is long enough to be parked.
+   * Up to `laneCount` lanes nobody holds under a live lease that have a due,
+   * ready delivery of the requested handlers, the lane with the oldest such
+   * delivery first, leaving out `passed`. One round trip: the oldest delivery
+   * of each lane is one index probe on the server. A lane whose due deliveries
+   * all wait behind an unfinished predecessor is taken at most once: the claim
+   * that hands it back parks them (see {@link ClaimScan.waitingBacklogs}).
    */
   async #findFreeLanes(
     request: ClaimRequest,
@@ -1020,60 +1034,14 @@ export class MongoEventStore implements EventStore<ClientSession> {
                 },
               },
               { $sort: { dueAt: 1, _id: 1 } },
-              { $limit: PARK_BACKLOG_THRESHOLD },
-              {
-                $lookup: {
-                  from: this.#deliveries.collectionName,
-                  let: { handler: '$handler', key: '$key', sequence: '$sequence' },
-                  pipeline: [
-                    {
-                      $match: {
-                        dueAt: { $exists: true },
-                        sequence: { $exists: true },
-                        $expr: {
-                          $and: [
-                            { $eq: ['$handler', '$$handler'] },
-                            { $eq: ['$key', '$$key'] },
-                            { $lt: ['$sequence', '$$sequence'] },
-                          ],
-                        },
-                      },
-                    },
-                    { $limit: 1 },
-                    { $project: { _id: 1 } },
-                  ],
-                  as: 'blockers',
-                },
-              },
-              { $project: { dueAt: 1, waits: { $gt: [{ $size: '$blockers' }, 0] } } },
+              { $limit: 1 },
+              { $project: { dueAt: 1 } },
             ],
-            as: 'due',
+            as: 'oldest',
           },
         },
-        {
-          $set: {
-            first: {
-              $let: {
-                vars: { open: { $filter: { input: '$due', cond: { $not: ['$$this.waits'] } } } },
-                in: {
-                  $cond: [
-                    { $gt: [{ $size: '$$open' }, 0] },
-                    { $first: '$$open' },
-                    {
-                      $cond: [
-                        { $eq: [{ $size: '$due' }, PARK_BACKLOG_THRESHOLD] },
-                        { $first: '$due' },
-                        null,
-                      ],
-                    },
-                  ],
-                },
-              },
-            },
-          },
-        },
-        { $match: { first: { $ne: null } } },
-        { $sort: { 'first.dueAt': 1, 'first._id': 1 } },
+        { $unwind: '$oldest' },
+        { $sort: { 'oldest.dueAt': 1, 'oldest._id': 1 } },
         { $limit: laneCount },
         { $project: { _id: 1 } },
       ])
@@ -1148,74 +1116,101 @@ export class MongoEventStore implements EventStore<ClientSession> {
    * and not in flight in its lane. A keyed candidate is claimable only when
    * (a) no earlier delivery of its handler and key is pending (a running one is
    * still a pending document) and (b) no other delivery of them runs. Running
-   * deliveries of a key live in the key's lane, which this owner holds, so
-   * `runningKeys` (loaded once from the held lanes) and this claim's own picks
+   * deliveries of a key live in the key's lane, which this owner holds, so the
+   * running keys (loaded once from the held lanes) and this claim's own picks
    * are all of them.
+   *
+   * Candidates are read in pages with a limit, so no cursor is left open, and
+   * the predecessors of the keys of a page are looked up in parallel, one
+   * lookup per key.
    */
   async #pickCandidates(
     lanes: readonly ScopeLane[],
     request: ClaimRequest,
     scan: ClaimScan,
-    runningKeys: ReadonlySet<string>,
+    running: Promise<{ readonly keys: Set<string> }>,
     picked: DeliveryDocument[],
   ): Promise<void> {
-    const candidates = this.#deliveries.find(
-      {
-        laneId: { $in: lanes.map((lane) => lane.laneId) },
-        handler: { $in: [...request.handlers] },
-        lane: 'ready',
-        dueAt: { $lte: request.now },
-        _id: { $nin: lanes.flatMap((lane) => lane.listed) },
-      },
-      {
-        sort: { dueAt: 1, _id: 1 },
-        batchSize: Math.max(request.limit * 2, MINIMUM_CANDIDATE_BATCH_SIZE),
-      },
-    );
-    try {
-      for await (const candidate of candidates) {
-        if (await this.#isClaimable(candidate, scan, runningKeys)) {
-          picked.push(candidate);
-          if (picked.length >= request.limit) {
-            break;
+    const pageSize = Math.max((request.limit - picked.length) * 2, MINIMUM_CANDIDATE_BATCH_SIZE);
+    const filter: Filter<DeliveryDocument> = {
+      laneId: { $in: lanes.map((lane) => lane.laneId) },
+      handler: { $in: [...request.handlers] },
+      lane: 'ready',
+      dueAt: { $lte: request.now },
+      _id: { $nin: lanes.flatMap((lane) => lane.listed) },
+    };
+    let after: DeliveryDocument | undefined;
+    for (;;) {
+      const [page, { keys }] = await Promise.all([
+        this.#deliveries
+          .find(
+            after === undefined
+              ? filter
+              : {
+                  $and: [
+                    filter,
+                    {
+                      $or: [
+                        { dueAt: { $gt: after.dueAt! } },
+                        { dueAt: after.dueAt!, _id: { $gt: after._id } },
+                      ],
+                    },
+                  ],
+                },
+            { sort: { dueAt: 1, _id: 1 }, limit: pageSize },
+          )
+          .toArray(),
+        running,
+      ]);
+      // Look up predecessors only for as many candidates as the claim still needs, then more.
+      for (let offset = 0; offset < page.length;) {
+        const slice = page.slice(offset, offset + request.limit - picked.length);
+        offset += slice.length;
+        await this.#notePredecessors(slice, scan);
+        for (const candidate of slice) {
+          if (isClaimable(candidate, scan, keys)) {
+            picked.push(candidate);
           }
         }
+        if (picked.length >= request.limit) {
+          return;
+        }
       }
-    } finally {
-      await candidates.close();
+      if (page.length < pageSize) {
+        return;
+      }
+      after = page.at(-1);
     }
   }
 
-  async #isClaimable(
-    candidate: DeliveryDocument,
-    scan: ClaimScan,
-    runningKeys: ReadonlySet<string>,
-  ): Promise<boolean> {
-    const { key, sequence } = candidate;
-    if (key === undefined) {
-      return true;
+  /**
+   * Looks up, in parallel and once per key, whether an unfinished delivery
+   * precedes the earliest candidate of each keyed (handler, key) of `page` that
+   * this claim knows nothing about yet, and tells `scan`. The earliest candidate
+   * is itself unfinished, so every later candidate of its key waits at least for it.
+   */
+  async #notePredecessors(page: readonly DeliveryDocument[], scan: ClaimScan): Promise<void> {
+    const earliest = new Map<string, DeliveryDocument>();
+    for (const candidate of page) {
+      if (candidate.key !== undefined) {
+        const orderingId = orderingIdentity(candidate.handler, candidate.key);
+        // Pages come in due order, not in sequence order, so keep the lowest sequence.
+        const known = earliest.get(orderingId);
+        if (!scan.knows(orderingId) && (known?.sequence ?? Infinity) > candidate.sequence!) {
+          earliest.set(orderingId, candidate);
+        }
+      }
     }
-    const orderingId = orderingIdentity(candidate.handler, key);
-    const known = scan.verdict(orderingId, sequence!);
-    if (known === 'open-predecessor') {
-      scan.noteWaiting(orderingId, candidate._id);
-      return false;
-    }
-    if (known === 'running') {
-      return false;
-    }
-    const predecessor = await this.#findUnfinishedPredecessor(candidate.handler, key, sequence!);
-    if (predecessor !== undefined) {
-      scan.noteOpen(orderingId, predecessor);
-      scan.noteWaiting(orderingId, candidate._id);
-      return false;
-    }
-    if (runningKeys.has(orderingId)) {
-      scan.noteRunning(orderingId);
-      return false;
-    }
-    scan.noteClaimed(orderingId, sequence!);
-    return true;
+    await Promise.all(
+      [...earliest].map(async ([orderingId, candidate]) => {
+        const predecessor = await this.#findUnfinishedPredecessor(
+          candidate.handler,
+          candidate.key!,
+          candidate.sequence!,
+        );
+        scan.noteOpen(orderingId, predecessor ?? candidate.sequence!);
+      }),
+    );
   }
 
   /**
@@ -1233,8 +1228,9 @@ export class MongoEventStore implements EventStore<ClientSession> {
     picked: readonly DeliveryDocument[],
     runningIds: ReadonlySet<string>,
     request: ClaimRequest,
-  ): Promise<Set<number>> {
+  ): Promise<{ readonly recorded: Set<number>; readonly handedBack: Set<number> }> {
     const picksByLane = new Map<number, string[]>();
+    const handedBack = new Set<number>();
     for (const document of picked) {
       picksByLane.set(document.laneId, [...(picksByLane.get(document.laneId) ?? []), document._id]);
     }
@@ -1273,14 +1269,15 @@ export class MongoEventStore implements EventStore<ClientSession> {
         });
       } else if (gone.length === lane.listed.length) {
         operations.push(freeLane(lane.laneId, lane.epoch, gone));
+        handedBack.add(lane.laneId);
       }
     }
     if (operations.length === 0) {
-      return new Set();
+      return { recorded: new Set(), handedBack };
     }
     const result = await this.#lanes.bulkWrite(operations, { ordered: false });
     if (result.matchedCount === operations.length) {
-      return new Set(picksByLane.keys());
+      return { recorded: new Set(picksByLane.keys()), handedBack };
     }
     const current = await this.#lanes
       .find(
@@ -1288,7 +1285,7 @@ export class MongoEventStore implements EventStore<ClientSession> {
         { projection: { epoch: 1, owner: 1, holder: 1 } },
       )
       .toArray();
-    return new Set(
+    const recorded = new Set(
       current
         .filter(
           (lane) =>
@@ -1298,6 +1295,7 @@ export class MongoEventStore implements EventStore<ClientSession> {
         )
         .map((lane) => lane._id),
     );
+    return { recorded, handedBack };
   }
 
   /**
@@ -1311,20 +1309,31 @@ export class MongoEventStore implements EventStore<ClientSession> {
     claimed: readonly DeliveryDocument[],
     scope: ReadonlyMap<number, ScopeLane>,
   ): Promise<DeliveryDocument[]> {
-    const overtaken = new Set<string>();
-    await Promise.all(
-      claimed.map(async (document) => {
-        if (
-          document.key !== undefined &&
-          (await this.#findUnfinishedPredecessor(
-            document.handler,
-            document.key,
-            document.sequence!,
-          )) !== undefined
-        ) {
-          overtaken.add(document._id);
-        }
-      }),
+    const keyed = claimed.filter((document) => document.key !== undefined);
+    if (keyed.length === 0) {
+      return [...claimed];
+    }
+    // One query for the whole batch: each branch is one probe of the ordering index.
+    const blockers = await this.#deliveries
+      .find(
+        {
+          $or: keyed.map((document) => ({
+            handler: document.handler,
+            key: document.key!,
+            sequence: { $lt: document.sequence! },
+            dueAt: { $exists: true },
+          })),
+        },
+        { projection: { handler: 1, key: 1 } },
+      )
+      .toArray();
+    const blocked = new Set(
+      blockers.map((blocker) => orderingIdentity(blocker.handler, blocker.key!)),
+    );
+    const overtaken = new Set(
+      keyed
+        .filter((document) => blocked.has(orderingIdentity(document.handler, document.key!)))
+        .map((document) => document._id),
     );
     if (overtaken.size === 0) {
       return [...claimed];
@@ -1418,30 +1427,39 @@ export class MongoEventStore implements EventStore<ClientSession> {
     if (anyParked === null) {
       return;
     }
-    for (const handler of new Set(handlers)) {
-      let afterKey: string | undefined;
-      for (;;) {
-        const lowest = await this.#deliveries.findOne(
-          {
-            handler,
-            lane: 'parked',
-            ...(afterKey === undefined ? {} : { key: { $gt: afterKey } }),
-          },
-          { sort: { key: 1, sequence: 1 }, projection: { key: 1, sequence: 1 } },
-        );
-        if (lowest === null) {
-          break;
-        }
-        afterKey = lowest.key!;
-        if (
-          (await this.#findUnfinishedPredecessor(handler, afterKey, lowest.sequence!)) === undefined
-        ) {
-          await this.#deliveries.updateOne(
-            { _id: lowest._id, lane: 'parked' },
-            { $set: { lane: 'ready' } },
-          );
-        }
-      }
+    // The lowest parked delivery of every key, one aggregation per handler in parallel. With the
+    // handler fixed and one group field, the server answers it with a distinct scan of the small
+    // partial index: one index probe per parked key, not one per parked delivery.
+    const lowest = (
+      await Promise.all(
+        [...new Set(handlers)].map((handler) =>
+          this.#deliveries
+            .aggregate<{ _id: string; id: string; sequence: number }>([
+              { $match: { handler, lane: 'parked' } },
+              { $sort: { handler: 1, key: 1, sequence: 1 } },
+              {
+                $group: { _id: '$key', id: { $first: '$_id' }, sequence: { $first: '$sequence' } },
+              },
+            ])
+            .toArray()
+            .then((groups) => groups.map((group) => ({ ...group, handler }))),
+        ),
+      )
+    ).flat();
+    const next = await Promise.all(
+      lowest.map(async (parked) =>
+        (await this.#findUnfinishedPredecessor(parked.handler, parked._id, parked.sequence)) ===
+        undefined
+          ? [parked.id]
+          : [],
+      ),
+    );
+    const ready = next.flat();
+    if (ready.length > 0) {
+      await this.#deliveries.updateMany(
+        { _id: { $in: ready }, lane: 'parked' },
+        { $set: { lane: 'ready' } },
+      );
     }
   }
 
@@ -1468,15 +1486,79 @@ export class MongoEventStore implements EventStore<ClientSession> {
     );
     let completed = new Set<string>();
     if (issued.length > 0) {
-      completed =
-        session === undefined
-          ? await this.transaction((own) => this.#deleteCompleted(issued, now, own))
-          : await this.#deleteCompleted(issued, now, session);
+      if (session !== undefined) {
+        completed = await this.#deleteCompleted(issued, now, session);
+      } else if (this.#completionHistory) {
+        completed = await this.transaction((own) => this.#deleteCompleted(issued, now, own));
+      } else {
+        completed = await this.#deleteFenced(issued);
+      }
     }
     return leases.map(
       (lease, index) =>
         parsed[index] !== undefined &&
         completed.delete(leaseIdentity({ deliveryId: String(lease.deliveryId), ...parsed[index] })),
+    );
+  }
+
+  /**
+   * Completion without a transaction, used when no history record has to be
+   * written with the deletion. The deliveries' attempt counts are read first,
+   * then the lanes, and a delivery is deleted only if its attempt count is
+   * still the one read. A takeover charges an attempt to every delivery it
+   * takes from the previous owner before it reads anything, so:
+   * - a takeover before the delivery read shows up in the lane read (new epoch);
+   * - a takeover between the two reads shows up in the lane read as well;
+   * - a takeover after the lane read changed the attempt count, so the delete
+   *   matches nothing.
+   * A completion and a takeover therefore never both succeed. Two concurrent
+   * completions of the same lease may both report true (the dispatcher never
+   * issues them); one call with a lease listed twice reports it once.
+   */
+  async #deleteFenced(issued: readonly IssuedLease[]): Promise<Set<string>> {
+    const ids = [...new Set(issued.map((lease) => lease.deliveryId))];
+    const documents = await this.#deliveries
+      .find({ _id: { $in: ids }, status: 'pending' }, { projection: { attempts: 1 } })
+      .toArray();
+    const lanes = new Map(
+      (
+        await this.#lanes
+          .find(
+            { _id: { $in: [...new Set(issued.map((lease) => lease.laneId))] } },
+            { projection: { epoch: 1, inFlight: 1 } },
+          )
+          .toArray()
+      ).map((lane) => [lane._id, lane]),
+    );
+    const attemptsById = new Map(documents.map((document) => [document._id, document.attempts]));
+    const fenced = issued.filter((lease) => {
+      const lane = lanes.get(lease.laneId)!;
+      return (
+        attemptsById.has(lease.deliveryId) &&
+        lane.epoch === lease.epoch &&
+        lane.inFlight.includes(lease.deliveryId)
+      );
+    });
+    const fencedIds = [...new Set(fenced.map((lease) => lease.deliveryId))];
+    if (fencedIds.length === 0) {
+      return new Set();
+    }
+    const deleted = await this.#deliveries.deleteMany({
+      $or: fencedIds.map((id) => ({ _id: id, status: 'pending', attempts: attemptsById.get(id)! })),
+    });
+    let completedIds = new Set(fencedIds);
+    if (deleted.deletedCount < fencedIds.length) {
+      // Some lane was taken over after it was read: what is still there was not deleted.
+      const kept = await this.#deliveries
+        .find({ _id: { $in: fencedIds } }, { projection: { _id: 1 } })
+        .toArray();
+      const keptIds = new Set(kept.map((document) => document._id));
+      completedIds = new Set(fencedIds.filter((id) => !keptIds.has(id)));
+    }
+    return new Set(
+      fenced
+        .filter((lease) => completedIds.has(lease.deliveryId))
+        .map((lease) => leaseIdentity(lease)),
     );
   }
 
@@ -1684,6 +1766,33 @@ export class MongoEventStore implements EventStore<ClientSession> {
       }
     }
   }
+}
+
+/**
+ * Whether a candidate may be claimed, given what `scan` knows about its key
+ * (see `MongoEventStore.#notePredecessors`) and `blockedKeys`: the keys that
+ * run, to which every key this claim takes is added, so a claim takes at most
+ * one delivery per key.
+ */
+function isClaimable(
+  candidate: DeliveryDocument,
+  scan: ClaimScan,
+  blockedKeys: Set<string>,
+): boolean {
+  const { key, sequence } = candidate;
+  if (key === undefined) {
+    return true;
+  }
+  const orderingId = orderingIdentity(candidate.handler, key);
+  if (scan.waits(orderingId, sequence!)) {
+    scan.noteWaiting(orderingId, candidate._id, candidate.laneId);
+    return false;
+  }
+  if (blockedKeys.has(orderingId)) {
+    return false;
+  }
+  blockedKeys.add(orderingId);
+  return true;
 }
 
 /**
