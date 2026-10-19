@@ -1,6 +1,7 @@
 export { systemClock, type Clock } from './clock.js';
 export { MAX_TIMER_DELAY_MS, toMilliseconds, type Duration } from './duration.js';
 export { CatalogPublisher, type PublishTarget } from './catalog-publisher.js';
+export { consume, produce, type CatalogDeclaration, type CatalogRole } from './catalog-coverage.js';
 export {
   defineCatalog,
   defineHandlers,
@@ -10,10 +11,13 @@ export {
   type CatalogEntry,
   type CatalogEventClass,
   type CatalogEventName,
+  type CatalogEventSelection,
   type CatalogEvents,
   type DefineCatalogOptions,
   type EventOf,
+  type HandlerShapeOf,
   type HandlersOf,
+  type MatchingHandlers,
   type NoExtraHandlers,
   type PartialHandlersOf,
   type SubscribeCatalogOptions,
