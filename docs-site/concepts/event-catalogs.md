@@ -67,13 +67,14 @@ bus.subscribeCatalog(OrderEvents, handlers, { idPrefix: 'fulfilment' });
 
 ```text
 // onOrderShipped missing
-error TS2345: Property 'onOrderShipped' is missing in type '{ onOrderPlaced: () => undefined; }' but required in type 'HandlersOf<OrderEvents, unknown>'.
+error TS2345: Argument of type '{ onOrderPlaced: () => undefined; }' is not assignable to parameter of type 'HandlerShapeOf<OrderEvents, "OrderPlaced" | "OrderShipped"> & MatchingHandlers<...>'.
+  Property 'onOrderShipped' is missing in type '{ onOrderPlaced: () => undefined; }' but required in type 'HandlerShapeOf<OrderEvents, "OrderPlaced" | "OrderShipped">'.
 
 // onOrderRefunded is not an event of the catalog
 error TS2322: Type '() => undefined' is not assignable to type 'never'.
 ```
 
-A consumer that deliberately handles only some events says so with `PartialHandlersOf<typeof OrderEvents, 'OrderShipped'>`.
+A consumer that deliberately handles only some events says so with `HandlersOf<typeof OrderEvents, 'OrderShipped'>`, `defineHandlers(OrderEvents, handlers, { events: ['OrderShipped'] })` or `bus.subscribeCatalog(OrderEvents, handlers, { events: ['OrderShipped'] })`; see the microservices section below.
 
 ## Publishing only what belongs to the catalog
 
@@ -102,6 +103,103 @@ ConfigurationError: Catalog events without a handler or route:
 ```
 
 The check runs before the store is set up or any transport connects, so a failed check has no side effects and the NestJS application simply does not boot.
+
+## Microservices: shared catalogs
+
+Between services, a catalog is a contract: it lives in a shared package, one service produces an event and another consumes it. Each service only covers its part, so instead of a bare catalog (every event needs a handler or route here) it declares its role per event.
+
+```ts
+// @acme/contracts
+export const OrderEvents = defineCatalog(
+  { OrderPlaced, OrderCancelled, OrderShipped },
+  { name: 'OrderEvents' },
+);
+```
+
+**Producer service** (orders): publishes `OrderPlaced` and `OrderCancelled`, handles `OrderShipped`.
+
+```ts
+const bus = new RelayBus({
+  store: new PostgresEventStore({ pool }),
+  transports: [kafka],
+  routes: [
+    { event: OrderPlaced, transport: 'kafka', destination: 'orders' },
+    { event: OrderCancelled, transport: 'kafka', destination: 'orders' },
+  ],
+  subscriptions: [{ transport: 'kafka', destinations: ['shipments'] }],
+  catalogs: [
+    produce(OrderEvents, { events: ['OrderPlaced', 'OrderCancelled'] }),
+    consume(OrderEvents, { events: ['OrderShipped'] }),
+  ],
+});
+
+bus.subscribeCatalog(
+  OrderEvents,
+  { onOrderShipped: (event) => markShipped(event.payload.orderId) },
+  { events: ['OrderShipped'] },
+);
+
+const orders = bus.forCatalog(OrderEvents, { events: ['OrderPlaced', 'OrderCancelled'] });
+await orders.publish(new OrderPlaced({ orderId, total }), { transaction, key: orderId });
+```
+
+**Consumer service** (shipping, NestJS): handles `OrderPlaced` and `OrderCancelled`, publishes `OrderShipped`.
+
+```ts
+@Injectable()
+@EventConsumer(OrderEvents, { events: ['OrderPlaced', 'OrderCancelled'], transactional: true })
+export class ShippingHandlers {
+  onOrderPlaced(event: EventOf<typeof OrderPlaced>, context: HandlerContext<ClientSession>) {}
+  onOrderCancelled(event: EventOf<typeof OrderCancelled>, context: HandlerContext<ClientSession>) {}
+}
+
+RelayBusModule.forRoot({
+  store: new MongoEventStore({ client }),
+  transports: [kafka],
+  subscriptions: [{ transport: 'kafka', destinations: ['orders'] }],
+  routes: [{ event: OrderShipped, transport: 'kafka', destination: 'shipments' }],
+  catalogs: [
+    consume(OrderEvents, { events: ['OrderPlaced', 'OrderCancelled'] }),
+    produce(OrderEvents, { events: ['OrderShipped'] }),
+  ],
+});
+```
+
+What each declaration checks:
+
+| Declaration                     | Each listed event needs | Does not count  |
+| ------------------------------- | ----------------------- | --------------- |
+| `consume(catalog, { events? })` | a local handler         | a route         |
+| `produce(catalog, { events? })` | a route to a transport  | a local handler |
+| `catalog` (bare)                | a handler or a route    |                 |
+
+The compiler catches the mistakes it can see:
+
+```text
+// unknown event name
+error TS2322: Type '"OrderRefunded"' is not assignable to type '"OrderPlaced" | "OrderCancelled" | "OrderShipped"'.
+
+// subset missing handler: events lists OrderShipped but the handlers object has no onOrderShipped
+error TS2345: Argument of type '{ onOrderPlaced: () => undefined; }' is not assignable to parameter of type 'HandlersOf<OrderEvents, "OrderPlaced" | "OrderShipped", PoolClient>'.
+
+// publishing an event the view does not produce
+error TS2345: Argument of type 'OrderPlaced' is not assignable to parameter of type 'OrderShipped'.
+
+// @EventConsumer(OrderEvents, { events: ['OrderPlaced', 'OrderShipped'] }) on a class without onOrderShipped
+error TS1238: Unable to resolve signature of class decorator when called as an expression.
+```
+
+and the boot check catches the rest, per event:
+
+```text
+ConfigurationError: Catalog events this service does not cover:
+  - OrderEvents.OrderPlaced (order.placed.v1): consumed here, needs handler method onOrderPlaced
+  - OrderEvents.OrderShipped (order.shipped.v1): produced here, needs a route to a transport; a local handler does not deliver it to other services
+```
+
+On the consuming side, events arrive through the transport (`bus.receive`). They are matched to the catalog handlers by event type, stored once per event id (a broker redelivery is a no-op) and validated against the event's schema before the handler runs; a payload that fails validation is dead-lettered.
+
+Ordering holds per handler and event type: events of one type and key reach the consumer's handler in publish order when the broker keeps them in order (Kafka: same partition, which the key decides; RabbitMQ: `ordered: true`). Events of different types under one key go through separate routes and handlers, so they can interleave; put a version or timestamp in the payload when one handler depends on another's effect.
 
 ## Related
 
