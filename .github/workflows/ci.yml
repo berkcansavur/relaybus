@@ -42,6 +42,13 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      # perf-budgets.json is a ratchet: a pull request may lower budgets, never raise or drop one.
+      - name: Performance budgets
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --depth=1 origin "$GITHUB_BASE_REF"
+          node scripts/check-perf-budgets.mjs FETCH_HEAD
+
   test:
     name: test (node ${{ matrix.node }})
     runs-on: ubuntu-latest

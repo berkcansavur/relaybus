@@ -15,8 +15,17 @@ export interface TestDatabase {
   stop(): Promise<void>;
 }
 
-export async function startDatabase(image: string = SUPPORTED_IMAGES[0]!): Promise<TestDatabase> {
-  const container = await new PostgreSqlContainer(image).start();
+/**
+ * Starts a database container. `settings` are server settings (`name=value`), for example to keep
+ * WAL and statistics free of background noise in the performance design tests.
+ */
+export async function startDatabase(
+  image: string = SUPPORTED_IMAGES[0]!,
+  settings: readonly string[] = [],
+): Promise<TestDatabase> {
+  const container = await new PostgreSqlContainer(image)
+    .withCommand(['postgres', ...settings.flatMap((setting) => ['-c', setting])])
+    .start();
   const connectionString = container.getConnectionUri();
   const pool = createTestPool(connectionString, 20);
   return {
