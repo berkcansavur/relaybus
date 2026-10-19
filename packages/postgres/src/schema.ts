@@ -47,6 +47,7 @@ export function createPostgresSchemaStatements(options: PostgresSchemaOptions = 
   event_id text NOT NULL REFERENCES ${names.events} (id) ON DELETE CASCADE,
   handler text NOT NULL,
   lane smallint NOT NULL,
+  claims integer NOT NULL DEFAULT 0,
   status text NOT NULL CHECK (status IN ('pending', 'processing', 'completed', 'dead')),
   attempts integer NOT NULL DEFAULT 0,
   available_at timestamptz NOT NULL,
@@ -59,6 +60,7 @@ export function createPostgresSchemaStatements(options: PostgresSchemaOptions = 
   CONSTRAINT ${names.indexes.deliveryEventHandler} UNIQUE (event_id, handler)
 ) WITH (autovacuum_vacuum_scale_factor = 0.02, autovacuum_analyze_scale_factor = 0.05)`,
     upgradeFromVersion010(names),
+    `ALTER TABLE ${names.deliveries} ADD COLUMN IF NOT EXISTS claims integer NOT NULL DEFAULT 0`,
     `ALTER TABLE ${names.deliveries} SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_analyze_scale_factor = 0.05)`,
     ...names.indexes.obsolete.map((index) => `DROP INDEX IF EXISTS ${names.quotedSchema}.${index}`),
     `CREATE INDEX IF NOT EXISTS ${names.indexes.deliveryLaneDue} ON ${names.deliveries} (lane, available_at, id) WHERE status = 'pending'`,
@@ -70,8 +72,15 @@ export function createPostgresSchemaStatements(options: PostgresSchemaOptions = 
   epoch bigint NOT NULL DEFAULT 0,
   lease_owner text,
   lease_expires_at timestamptz,
-  in_flight text[] NOT NULL DEFAULT '{}'
+  in_flight text[] NOT NULL DEFAULT '{}',
+  claim_floor bigint NOT NULL DEFAULT 0
 ) WITH (fillfactor = 50)`,
+    `ALTER TABLE ${names.lanes} ADD COLUMN IF NOT EXISTS claim_floor bigint NOT NULL DEFAULT 0`,
+    `CREATE TABLE IF NOT EXISTS ${names.eventCompletions} (
+  event_id text PRIMARY KEY REFERENCES ${names.events} (id) ON DELETE CASCADE,
+  completed_at timestamptz NOT NULL
+)`,
+    `CREATE INDEX IF NOT EXISTS ${names.indexes.eventCompletionsCompleted} ON ${names.eventCompletions} (completed_at, event_id)`,
     `INSERT INTO ${names.lanes} (lane) SELECT generate_series(0, ${LANE_COUNT - 1})::smallint ON CONFLICT (lane) DO NOTHING`,
   ];
   if (names.completionHistory) {

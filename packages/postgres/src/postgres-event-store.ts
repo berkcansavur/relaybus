@@ -78,6 +78,8 @@ export type PostgresEventStoreOptions<TTransaction = PoolClient> =
 const DEFAULT_PURGE_BATCH_SIZE = 1_000;
 /** Lanes a claim takes in its first round; every further round takes twice as many. */
 const INITIAL_LANES_PER_ROUND = 4;
+/** Attempts of the held-lane claim before a stale statement is given up for this call (a later claim finds the work). */
+const MAXIMUM_STALE_CLAIM_ATTEMPTS = 3;
 
 interface EventRow {
   readonly id: string;
@@ -91,6 +93,15 @@ interface EventRow {
   readonly causation_id: string | null;
   readonly occurred_at: string;
   readonly handlers: readonly string[];
+}
+
+interface HandedOutClaim extends LaneLease {
+  readonly owner: string;
+  readonly deliveryId: string;
+}
+
+function handedOutKey(deliveryId: string, leaseToken: string): string {
+  return `${deliveryId}\u0000${leaseToken}`;
 }
 
 interface DeliveryRow {
@@ -144,6 +155,11 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   readonly #purgeBatchSize: number;
   readonly #completionHistory: boolean;
   readonly #logger: RelayBusLogger;
+  /** Every claim handed to a caller and not settled yet, by delivery id and exact lease token. */
+  readonly #handedOut = new Map<string, HandedOutClaim>();
+  readonly #unreconciled = new Set<string>();
+  readonly #generations = new Map<string, bigint>();
+  readonly #ownerQueues = new Map<string, Promise<void>>();
   #ownedPool: Pool | undefined;
 
   constructor(options: PostgresEventStoreOptions<TTransaction>) {
@@ -226,17 +242,40 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     const plan = planAppend(entries);
     const createdAt = now.toISOString();
     const sequences = await this.#reserveSequences(plan.events, transaction);
-    const insertedEventIds = new Set(
-      plan.events.length === 0
+    const eventRows = toEventRows(plan, sequences);
+    const insertEvents = async (rows: readonly EventRow[]): Promise<string[]> =>
+      rows.length === 0
         ? []
         : (
             await this.#executor.query(
               this.#statements.insertEvents,
-              [JSON.stringify(toEventRows(plan, sequences)), createdAt],
+              [JSON.stringify(rows), createdAt],
               transaction,
             )
-          ).map((row) => row['id'] as string),
-    );
+          ).map((row) => row['id'] as string);
+    const insertedEventIds = new Set(await insertEvents(eventRows));
+    // An event that already exists may be getting the same new handler from another transaction
+    // at this very moment. Whoever holds the event decides, so the freshness check of the insert
+    // below sees what the other transaction committed, even if its delivery has completed since.
+    // An existing event that a purge removed meanwhile is inserted again instead of being skipped.
+    let existingRows = eventRows.filter((row) => !insertedEventIds.has(row.id));
+    while (existingRows.length > 0 && plan.deliveries.length > 0) {
+      const locked = new Set(
+        (
+          await this.#executor.query(
+            this.#statements.lockExistingEvents,
+            [JSON.stringify(existingRows.map((row) => row.id).sort())],
+            transaction,
+          )
+        ).map((row) => row['id'] as string),
+      );
+      const gone = existingRows.filter((row) => !locked.has(row.id));
+      const reinserted = await insertEvents(gone);
+      for (const eventId of reinserted) {
+        insertedEventIds.add(eventId);
+      }
+      existingRows = gone.filter((row) => !insertedEventIds.has(row.id));
+    }
     const insertedDeliveries =
       plan.deliveries.length === 0
         ? []
@@ -273,26 +312,66 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
    * for a whole lease. See {@link PostgresStatements.claim} for the rules a
    * delivery must satisfy.
    */
-  async claim(request: ClaimRequest): Promise<ClaimedDelivery[]> {
+  claim(request: ClaimRequest): Promise<ClaimedDelivery[]> {
     if (request.handlers.length === 0 || !(request.limit > 0)) {
-      return [];
+      return Promise.resolve([]);
     }
-    const heldRows = await this.#executor.query(this.#statements.claimHeld, [
-      request.now.toISOString(),
-      JSON.stringify(request.handlers),
-      request.limit,
-      request.leaseOwner,
-      request.leaseExpiresAt.toISOString(),
-    ]);
+    return this.#serialized(request.leaseOwner, () => this.#claim(request));
+  }
+
+  /**
+   * Runs `work` after the earlier claims of the same owner on this store settled. The
+   * bookkeeping of what was handed out and the reconciliation of a failed claim need
+   * one claim at a time per owner (the dispatcher claims one batch at a time anyway;
+   * `runOnce` next to a running dispatcher is what this guards against).
+   */
+  #serialized<T>(owner: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.#ownerQueues.get(owner) ?? Promise.resolve();
+    const run = previous.then(work, work);
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.#ownerQueues.set(owner, tail);
+    void tail.then(() => {
+      if (this.#ownerQueues.get(owner) === tail) {
+        this.#ownerQueues.delete(owner);
+      }
+    });
+    return run;
+  }
+
+  async #claim(request: ClaimRequest): Promise<ClaimedDelivery[]> {
+    if (
+      this.#unreconciled.has(request.leaseOwner) &&
+      !(await this.#reconcile(request.leaseOwner))
+    ) {
+      // The generation moved on and the lanes were not told: claiming now would take the owner's live lanes for foreign ones.
+      throw new Error(
+        `[PostgresEventStore](claim) Giving back unreturned deliveries still fails, so no claim is made | owner=${request.leaseOwner}`,
+      );
+    }
+    let heldRows: readonly PostgresRow[];
+    try {
+      heldRows = await this.#claimHeldLanes(request);
+    } catch (error) {
+      await this.#reconcile(request.leaseOwner);
+      throw error;
+    }
     const claimed = heldRows.filter((row) => row['delivery_id'] !== null);
+    this.#forgetFinished(heldRows[0]!, request.leaseOwner, claimed);
+    this.#handOut(claimed, request.leaseOwner);
     if (claimed.length < request.limit) {
       const blockedLanes =
         heldRows[0]!['window_saturated'] === true
           ? (JSON.parse(heldRows[0]!['held_lanes'] as string) as number[])
           : [];
       try {
-        claimed.push(...(await this.#claimMore(request, claimed.length, blockedLanes)));
+        const more = await this.#claimMore(request, claimed.length, blockedLanes);
+        this.#handOut(more, request.leaseOwner);
+        claimed.push(...more);
       } catch (error) {
+        await this.#reconcile(request.leaseOwner);
         if (claimed.length === 0) {
           throw error;
         }
@@ -301,7 +380,34 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
         );
       }
     }
+    // The steps pick from different lanes; hand the batch out in due order, like a single query would.
+    claimed.sort(compareDue);
     return claimed.map((row) => mapClaimedDelivery(row, request.leaseExpiresAt));
+  }
+
+  /**
+   * Runs the one-statement claim of the held lanes, again when it reports that it waited for a lane lock
+   * and read deliveries with an older snapshot than the lane it got. A lane is only locked by an operation
+   * of its own owner (another claim, a reschedule), so a few attempts are enough.
+   */
+  async #claimHeldLanes(request: ClaimRequest): Promise<readonly PostgresRow[]> {
+    const parameters = [
+      request.now.toISOString(),
+      JSON.stringify(request.handlers),
+      request.limit,
+      request.leaseOwner,
+      request.leaseExpiresAt.toISOString(),
+      this.#generation(request.leaseOwner).toString(),
+    ];
+    let rows = await this.#executor.query(this.#statements.claimHeld, parameters);
+    for (
+      let attempt = 1;
+      attempt < MAXIMUM_STALE_CLAIM_ATTEMPTS && rows[0]!['stale'] === true;
+      attempt += 1
+    ) {
+      rows = await this.#executor.query(this.#statements.claimHeld, parameters);
+    }
+    return rows;
   }
 
   /**
@@ -317,6 +423,8 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     const now = request.now.toISOString();
     const leaseExpiresAt = request.leaseExpiresAt.toISOString();
     const handlers = JSON.stringify(request.handlers);
+    // Taken before the transaction starts: a transaction that reaches the server late keeps its generation.
+    const generation = this.#generation(request.leaseOwner).toString();
     return this.#executor.transaction(async (transaction) => {
       const claimed: PostgresRow[] = [];
       const remaining = (): number => request.limit - alreadyClaimed - claimed.length;
@@ -324,7 +432,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       if (blockedLanes.length > 0) {
         const locked = await this.#executor.query(
           this.#statements.lockHeldLanes,
-          [request.leaseOwner, now],
+          [request.leaseOwner, now, generation],
           transaction,
         );
         const slowRows = await this.#executor.query(
@@ -337,7 +445,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       for (let laneCount = INITIAL_LANES_PER_ROUND; remaining() > 0;) {
         const taken = await this.#executor.query(
           this.#statements.takeFreeLanes,
-          [now, handlers, laneCount, request.leaseOwner, leaseExpiresAt],
+          [now, handlers, laneCount, request.leaseOwner, leaseExpiresAt, generation],
           transaction,
         );
         if (taken.length === 0) {
@@ -358,6 +466,92 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       await this.#recordClaim(claimed, takenLanes, request, transaction);
       return claimed;
     });
+  }
+
+  /**
+   * The generation of the owner's claim statements. It only grows, also across restarts (it starts at the
+   * clock), and a reconciliation moves it up, which fences off every earlier statement still in flight.
+   */
+  #generation(owner: string, advance = false): bigint {
+    const current = this.#generations.get(owner) ?? BigInt(Date.now());
+    const next = advance
+      ? current + 1n > BigInt(Date.now())
+        ? current + 1n
+        : BigInt(Date.now())
+      : current;
+    this.#generations.set(owner, next);
+    return next;
+  }
+
+  /** Forgets a handed-out lease once the store answered about it (any answer: the claim is over or fenced out). */
+  async #settled(lease: LeaseReference, work: Promise<boolean>): Promise<boolean> {
+    const result = await work;
+    this.#handedOut.delete(handedOutKey(lease.deliveryId, lease.leaseToken));
+    return result;
+  }
+
+  /** Remembers the claims handed to the caller of `claim` until they are settled. */
+  #handOut(rows: readonly PostgresRow[], leaseOwner: string): void {
+    for (const row of rows) {
+      const claim = mapClaimedDelivery(row, new Date(0));
+      this.#handedOut.set(handedOutKey(claim.deliveryId, claim.leaseToken), {
+        owner: leaseOwner,
+        deliveryId: claim.deliveryId,
+        ...parseLeaseToken(claim.leaseToken)!,
+      });
+    }
+  }
+
+  /**
+   * Drops the registrations of the owner's held lanes whose delivery no longer runs there
+   * (completed inside the caller's transaction, deleted, or listed no more). Registrations of
+   * lanes this claim did not see stay: their tokens may still be valid.
+   */
+  #forgetFinished(row: PostgresRow, leaseOwner: string, claimed: readonly PostgresRow[]): void {
+    // Lanes the statement freed are examined too: nothing runs there any more.
+    const heldLanes = new Set(JSON.parse(row['examined_lanes'] as string) as number[]);
+    const running = new Set([
+      ...(JSON.parse(row['running_ids'] as string) as string[]),
+      ...claimed.map((picked) => picked['delivery_id'] as string),
+    ]);
+    for (const [key, entry] of this.#handedOut) {
+      if (
+        entry.owner === leaseOwner &&
+        heldLanes.has(entry.lane) &&
+        !running.has(entry.deliveryId)
+      ) {
+        this.#handedOut.delete(key);
+      }
+    }
+  }
+
+  /**
+   * After a claim failed, possibly after the database recorded its batch: gives back the recorded
+   * deliveries that were never handed out, keeping exactly the claims handed out and not settled.
+   * A failure is remembered and retried before the owner's next claim: other deliveries keep
+   * renewing the lane, so an unreturned one would otherwise never be recovered.
+   */
+  async #reconcile(leaseOwner: string): Promise<boolean> {
+    // Claim statements of the generation before are fenced off by the new one.
+    const generation = this.#generation(leaseOwner, true);
+    const handedOut = [...this.#handedOut.values()]
+      .filter((entry) => entry.owner === leaseOwner)
+      .map(({ deliveryId, lane, epoch, claims }) => ({ id: deliveryId, lane, epoch, claims }));
+    try {
+      await this.#executor.query(this.#statements.reconcileClaims, [
+        leaseOwner,
+        JSON.stringify(handedOut),
+        generation.toString(),
+      ]);
+      this.#unreconciled.delete(leaseOwner);
+      return true;
+    } catch (error) {
+      this.#unreconciled.add(leaseOwner);
+      this.#logger.error(
+        `[PostgresEventStore](reconcile) Giving back unreturned deliveries failed, it is retried before the next claim | owner=${leaseOwner} | error=${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
   }
 
   /** Fast claim, then the slow one when the fast window was full of blocked followers. */
@@ -382,12 +576,20 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
           (row) => row['delivery_id'] !== null && !pickedIds.has(row['delivery_id']),
         ),
       );
-      picked.sort(
-        (left, right) =>
-          compareText(left['due_at'] as string, right['due_at'] as string) ||
-          compareText(left['delivery_id'] as string, right['delivery_id'] as string),
-      );
-      picked.length = Math.min(picked.length, limit);
+      // The two statements read at different moments: a dead letter requeued in between can put a key's
+      // predecessor in one result and its successor in the other. Only the lowest of a key may run.
+      const seenKeys = new Set<string>();
+      const kept = [...picked]
+        .sort((left, right) => compareSequence(left, right))
+        .filter((row) => {
+          if (row['delivery_key'] === null) {
+            return true;
+          }
+          const group = `${row['handler'] as string}\u0000${row['delivery_key'] as string}`;
+          return !seenKeys.has(group) && Boolean(seenKeys.add(group));
+        });
+      kept.sort(compareDue);
+      return kept.slice(0, limit);
     }
     return picked;
   }
@@ -426,6 +628,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
         lease.deliveryId,
         held.lane,
         held.epoch,
+        held.claims,
         leaseExpiresAt.toISOString(),
       ]),
     );
@@ -445,39 +648,51 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     error: ErrorInfo,
     now: Date,
   ): Promise<boolean> {
-    return this.#whenIssued(lease, (held) =>
-      this.#changed(this.#statements.reschedule, [
-        lease.deliveryId,
-        held.lane,
-        held.epoch,
-        availableAt.toISOString(),
-        JSON.stringify(error),
-        now.toISOString(),
-      ]),
+    return this.#settled(
+      lease,
+      this.#whenIssued(lease, (held) =>
+        this.#changed(this.#statements.reschedule, [
+          lease.deliveryId,
+          held.lane,
+          held.epoch,
+          held.claims,
+          availableAt.toISOString(),
+          JSON.stringify(error),
+          now.toISOString(),
+        ]),
+      ),
     );
   }
 
   bury(lease: LeaseReference, error: ErrorInfo, now: Date): Promise<boolean> {
-    return this.#whenIssued(lease, (held) =>
-      this.#changed(this.#statements.bury, [
-        lease.deliveryId,
-        held.lane,
-        held.epoch,
-        JSON.stringify(error),
-        now.toISOString(),
-      ]),
+    return this.#settled(
+      lease,
+      this.#whenIssued(lease, (held) =>
+        this.#changed(this.#statements.bury, [
+          lease.deliveryId,
+          held.lane,
+          held.epoch,
+          held.claims,
+          JSON.stringify(error),
+          now.toISOString(),
+        ]),
+      ),
     );
   }
 
   /** Returns a leased delivery to pending, due now, without counting the attempt. */
   release(lease: LeaseReference, now: Date): Promise<boolean> {
-    return this.#whenIssued(lease, (held) =>
-      this.#changed(this.#statements.release, [
-        lease.deliveryId,
-        held.lane,
-        held.epoch,
-        now.toISOString(),
-      ]),
+    return this.#settled(
+      lease,
+      this.#whenIssued(lease, (held) =>
+        this.#changed(this.#statements.release, [
+          lease.deliveryId,
+          held.lane,
+          held.epoch,
+          held.claims,
+          now.toISOString(),
+        ]),
+      ),
     );
   }
 
@@ -511,20 +726,32 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
    */
   async purge(request: PurgeRequest): Promise<PurgeResult> {
     const total = { deletedDeliveries: 0, deletedEvents: 0 };
-    const batches: Array<[string, Date | undefined]> = [
-      [this.#statements.purgeCompletedBatch(), request.completedBefore],
-      [this.#statements.purgeDeadBatch(), request.deadBefore],
+    const batches: Array<[string, Date | undefined, string]> = [
+      [
+        this.#statements.purgeCompletedBatch(),
+        request.completedBefore,
+        this.#statements.deleteOrphanEventsWithoutCompletion,
+      ],
+      [
+        this.#statements.purgeDeadBatch(),
+        request.deadBefore,
+        this.#statements.deleteOrphanEventsWithoutCompletion,
+      ],
     ];
     if (this.#completionHistory) {
-      batches.push([this.#statements.purgeCompletionHistoryBatch(), request.completedBefore]);
+      batches.push([
+        this.#statements.purgeCompletionHistoryBatch(),
+        request.completedBefore,
+        this.#statements.deleteOrphanEventsWithoutCompletion,
+      ]);
     }
-    for (const [sql, cutoff] of batches) {
+    for (const [sql, cutoff, deleteOrphans] of batches) {
       if (cutoff === undefined) {
         continue;
       }
       let deletedInBatch = this.#purgeBatchSize;
       while (deletedInBatch === this.#purgeBatchSize) {
-        const batch = await this.#purgeBatch(sql, cutoff);
+        const batch = await this.#purgeBatch(sql, cutoff, deleteOrphans);
         deletedInBatch = batch.deletedDeliveries;
         total.deletedDeliveries += batch.deletedDeliveries;
         total.deletedEvents += batch.deletedEvents;
@@ -534,7 +761,20 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       .filter((cutoff) => cutoff !== undefined)
       .sort((first, second) => first.getTime() - second.getTime())[0];
     if (orphanCutoff !== undefined) {
-      total.deletedEvents += await this.#purgeOrphanEvents(orphanCutoff);
+      total.deletedEvents += await this.#purgeOrphanEvents(
+        this.#statements.lockOrphanEventsBatch,
+        this.#statements.deleteOrphanEventsWithoutCompletion,
+        orphanCutoff,
+        false,
+      );
+    }
+    if (request.completedBefore !== undefined) {
+      total.deletedEvents += await this.#purgeOrphanEvents(
+        this.#statements.lockCompletedOrphanEventsBatch,
+        this.#statements.deleteExpiredCompletedOrphanEvents,
+        request.completedBefore,
+        true,
+      );
     }
     return total;
   }
@@ -584,34 +824,44 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   }
 
   /**
-   * Deletes the delivery of every lease whose lane epoch still matches. Returns
-   * one flag per lease, in order; a lease listed twice completes once.
+   * Deletes the delivery of every lease that is still the current claim of its
+   * delivery. Returns one flag per lease, in order. Results are matched to leases
+   * by position, so two leases of one delivery (a stale and a current one) get
+   * their own answers; a lease listed twice completes once, at its first position.
    */
   async #completeLeases(
     leases: readonly LeaseReference[],
     now: Date,
     transaction: TTransaction | undefined,
   ): Promise<boolean[]> {
-    const held = leases.map((lease) => parseLeaseToken(lease.leaseToken));
-    const issued = leases.flatMap((lease, index) =>
-      held[index] === undefined ? [] : [{ id: lease.deliveryId, ...held[index] }],
-    );
-    const completedIds = new Set<string>();
+    const issued: Array<{ ord: number; id: string } & LaneLease> = [];
+    const seen = new Set<string>();
+    leases.forEach((lease, ord) => {
+      const held = parseLeaseToken(lease.leaseToken);
+      const identity = `${lease.deliveryId}\u0000${lease.leaseToken}`;
+      if (held !== undefined && !seen.has(identity)) {
+        seen.add(identity);
+        issued.push({ ord, id: lease.deliveryId, ...held });
+      }
+    });
+    const completed = new Set<number>();
     if (issued.length > 0) {
       const rows = await this.#executor.query(
         this.#statements.complete,
-        this.#completionHistory
-          ? [JSON.stringify(issued), now.toISOString()]
-          : [JSON.stringify(issued)],
+        [JSON.stringify(issued), now.toISOString()],
         transaction,
       );
       for (const row of rows) {
-        completedIds.add(row['id'] as string);
+        completed.add(readCount(row, 'ord'));
       }
     }
-    return leases.map(
-      (lease, index) => held[index] !== undefined && completedIds.delete(lease.deliveryId),
-    );
+    if (transaction === undefined) {
+      // Inside the caller's transaction the completion is only provisional: it may roll back and retry.
+      for (const lease of leases) {
+        this.#handedOut.delete(handedOutKey(lease.deliveryId, lease.leaseToken));
+      }
+    }
+    return leases.map((_, ord) => completed.has(ord));
   }
 
   async #reserveSequences(
@@ -641,19 +891,25 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     return firstSequences;
   }
 
-  async #purgeOrphanEvents(cutoff: Date): Promise<number> {
+  async #purgeOrphanEvents(
+    lockStatement: string,
+    deleteStatement: string,
+    cutoff: Date,
+    recheckCutoff: boolean,
+  ): Promise<number> {
     let deletedEvents = 0;
     let removedInBatch = this.#purgeBatchSize;
     while (removedInBatch === this.#purgeBatchSize) {
       removedInBatch = await this.#executor.transaction(async (transaction) => {
         const locked = await this.#executor.query(
-          this.#statements.lockOrphanEventsBatch,
+          lockStatement,
           [cutoff.toISOString(), this.#purgeBatchSize],
           transaction,
         );
+        const ids = JSON.stringify(locked.map((row: PostgresRow) => row['id'] as string));
         const removed = await this.#executor.query(
-          this.#statements.deleteOrphanEvents,
-          [JSON.stringify(locked.map((row: PostgresRow) => row['id'] as string))],
+          deleteStatement,
+          recheckCutoff ? [ids, cutoff.toISOString()] : [ids],
           transaction,
         );
         return readCount(removed[0]!, 'count');
@@ -666,6 +922,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   async #purgeBatch(
     sql: string,
     cutoff: Date,
+    deleteOrphans: string,
   ): Promise<{ deletedDeliveries: number; deletedEvents: number }> {
     return this.#executor.transaction(async (transaction) => {
       const deleted = await this.#executor.query(
@@ -685,7 +942,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
         transaction,
       );
       const removed = await this.#executor.query(
-        this.#statements.deleteOrphanEvents,
+        deleteOrphans,
         [JSON.stringify(locked.map((row: PostgresRow) => row['id'] as string))],
         transaction,
       );
@@ -761,6 +1018,19 @@ function toEventRows(plan: AppendPlan, firstSequences: ReadonlyMap<string, bigin
       handlers: handlersByEvent.get(event.id) ?? [],
     };
   });
+}
+
+function compareSequence(left: PostgresRow, right: PostgresRow): number {
+  const first = BigInt((left['sequence'] as string | null) ?? 0);
+  const second = BigInt((right['sequence'] as string | null) ?? 0);
+  return Number(first > second) - Number(first < second);
+}
+
+function compareDue(left: PostgresRow, right: PostgresRow): number {
+  return (
+    compareText(left['due_at'] as string, right['due_at'] as string) ||
+    compareText(left['delivery_id'] as string, right['delivery_id'] as string)
+  );
 }
 
 function compareText(left: string, right: string): number {

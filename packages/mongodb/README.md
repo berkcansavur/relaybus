@@ -102,7 +102,7 @@ The projection write and the delivery's completion commit together or not at all
 | `transactionOptions` | snapshot read concern, `w: 'majority'`, primary | Passed to `withTransaction`.                                                                                      |
 | `purgeBatchSize`     | `500`                                           | Documents deleted per purge step.                                                                                 |
 | `logger`             | `console`                                       | Receives warnings about best-effort steps that failed (parking).                                                  |
-| `generateIdentifier` | -                                               | Deprecated and ignored: a lease token is `<laneId>:<epoch>`.                                                      |
+| `generateIdentifier` | -                                               | Deprecated and ignored: a lease token is `<laneId>:<epoch>:<claims>`.                                             |
 
 Non-transactional writes (claims, renewals) use write concern `majority` and primary reads, whatever the client
 default is, so a lease survives a failover and the ordering check never reads a stale secondary.
@@ -196,9 +196,22 @@ documents; they are the slow path for blocked keys only.
 of its key already ran; it blocks the ones that have not been claimed yet, and it cannot start
 while a later delivery of its key is running.
 
-**Fencing.** A lease token is `<laneId>:<epoch>`. `complete`, `completeMany`, `reschedule`,
-`release`, `bury` and `extendLease` apply only while the lane still has that epoch and lists the
-delivery; a worker that lost its lane changes nothing. A token this store cannot have issued is
+**Fencing.** A lease token is `<laneId>:<epoch>:<claims>`. `claims` is the delivery's claim
+generation: it grows whenever a claim of the delivery ends (retry, release, burial, lost lease), so
+the lease of an earlier claim never matches a later claim of the same delivery, even by the same
+owner in the same lane epoch. `complete`, `completeMany`, `reschedule`, `release`, `bury` and
+`extendLease` apply only while the lane still has that epoch and lists the delivery, and the delivery
+still has that generation (a missing generation, as in documents of 0.1.0, counts as 0); a worker
+that lost its lane changes nothing. Claims of one owner on one store instance run one after the
+other, so overlapping claims (`bus.runOnce()` next to a running dispatcher) never read the same
+in-flight list. Renewals check the claim generation and extend the lane in one transaction, so a
+stale lease never extends the lane of a newer claim. A claim that fails at any point, even after
+its record reached the database without the reply reaching the process, reconciles the owner's
+lanes on this instance in one transaction: a listed delivery stays listed only if this instance
+handed out its current claim (current lane epoch and claim generation, exact lease token) and has
+not seen it settled; every other one is taken out and its claim generation moves on, so no old
+lease can match a later claim of it. A worker taking such a lane over meanwhile conflicts with the
+reconciliation, which then leaves its claims alone. A token this store cannot have issued is
 refused without a database call. An expired lease nobody took over is still honoured.
 
 **Completion and takeover.** A worker that takes a lane over first writes every delivery the
@@ -211,11 +224,14 @@ never conflict with each other; it relies on that charge instead:
   (and inserts the history records). The completion and a takeover write the same delivery
   document, so whichever commits second either hits a write conflict and is retried against the
   new state (seeing the new epoch, or the delivery gone), or waits for the first to finish.
-- Otherwise `complete` and `completeMany` need no transaction: they read the deliveries' attempt
-  counts, then the lanes, and delete only the deliveries whose attempt count is still the one they
-  read. A takeover before the lane read shows up in it as a new epoch; a takeover after it changed
-  the attempt count, so the delete matches nothing. A batch of any size from any number of lanes
-  costs three commands.
+- Otherwise `complete` and `completeMany` need no transaction: they read the deliveries' claim
+  generations, then the lanes, and delete only the deliveries that still have the lease's
+  generation. A takeover before the lane read shows up in it as a new epoch; a takeover, retry or
+  release after it changed the generation, so the delete matches nothing. A batch of any size from
+  any number of lanes costs four commands (the fourth records the completion time on the events).
+  When fewer deliveries were deleted than leases were fenced (a claim ended or changed hands
+  meanwhile), the call reports no lease as completed: a missing document cannot be told apart
+  from one the new claim completed, so success is reported only when it is proven.
 
 A completion and a takeover can never both succeed, which is what makes a transactional handler's
 writes effectively-once. Two concurrent completions of the same lease without a transaction may both
@@ -229,8 +245,10 @@ retry limit and the dead letters. The take moves the previous owner's in-flight 
 `lost` list in the same write; `lost` is charged before anything is read from the lane and cleared
 afterwards, and whoever holds the lane next charges a `lost` list it finds first. A claim that fails
 anywhere after the take therefore loses no charge and leaves nothing listed as running. Charging
-and clearing are separate writes, not a transaction: a failure exactly between them charges those
-deliveries once more.
+and clearing are separate writes, not a transaction, but each charge is recorded on the delivery
+(`lostAt`: the lane epoch of the last lost claim charged, which only grows), so charging the same
+list again after a failure between them, or a delayed charge of an older lost claim, charges
+nothing twice. The charge also moves the claim generation on.
 
 **Completion history.** Completed deliveries are deleted. With `completionHistory: true` every
 completion also inserts a record into `completed_deliveries` in the same transaction. Records are
@@ -331,14 +349,16 @@ with the upgraded documents.
 `purgeBatchSize`, dead deliveries (`deadBefore`), completion history records and legacy `completed`
 documents (`completedBefore`), each batch together with the events nothing references any more **in
 one transaction**, so a crash can never leave a delivery without its event. Then it deletes events
-created before the earliest given cutoff that nothing references: the events of completed (deleted)
-deliveries, and events no handler was subscribed to. An append that adds a delivery to an event while
+nothing references. Every completion records its time on the event (`completedAt`, the latest
+one), and such an event is kept as deduplication record until `completedBefore` passes that time,
+however old the event is; `deadBefore` alone never removes it. Events that never had a completion
+(no subscribers, or only dead letters) go once they were created before the earliest given cutoff. An append that adds a delivery to an event while
 it is being purged writes the event, conflicts with the purge, and one of them restarts, so a
 delivery never loses its event.
 
 An event deleted by purge takes its `handlers` list with it: a broker redelivery or publish retry
 of that event id after the purge is appended as a new event and runs its handlers again (the same
-holds for the PostgreSQL store). Keep retention longer than any redelivery window.
+holds for the PostgreSQL store). Keep completed retention longer than any redelivery window.
 
 One counter document per distinct ordering key stays in `key_sequences`. They are tiny; if your
 keys are unbounded (for example one per request), clean up counters of long-finished keys yourself.

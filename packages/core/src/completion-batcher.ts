@@ -31,6 +31,7 @@ export class CompletionBatcher {
   readonly #runningCount: () => number;
   #pending: PendingCompletion[] = [];
   #timer: NodeJS.Timeout | undefined;
+  #closing = false;
 
   /**
    * @param runningCount Number of deliveries the dispatcher is running right
@@ -56,6 +57,7 @@ export class CompletionBatcher {
     return new Promise<boolean>((resolve, reject) => {
       this.#pending.push({ lease, resolve, reject });
       if (
+        this.#closing ||
         this.#pending.length >= this.#settings.maxBatchSize ||
         this.#pending.length >= this.#runningCount()
       ) {
@@ -64,6 +66,17 @@ export class CompletionBatcher {
         this.#timer ??= setTimeout(() => this.#flush(), this.#settings.windowMs);
       }
     });
+  }
+
+  /**
+   * Shutdown has begun (or ended): while closing, nothing waits for company any more, so the completions
+   * already queued are written now and later ones at once.
+   */
+  setClosing(closing: boolean): void {
+    this.#closing = closing;
+    if (closing && this.#pending.length > 0) {
+      this.#flush();
+    }
   }
 
   #flush(): void {

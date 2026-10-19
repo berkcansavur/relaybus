@@ -160,7 +160,7 @@ describe('setup across table prefixes', () => {
       `SELECT count(*)::int AS tables FROM information_schema.tables WHERE table_schema = $1`,
       [schema],
     );
-    expect(result.rows[0]).toEqual({ tables: 48 });
+    expect(result.rows[0]).toEqual({ tables: 60 });
   });
 });
 

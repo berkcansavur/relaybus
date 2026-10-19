@@ -1060,6 +1060,138 @@ export function eventStoreContract<TTransaction>(
       });
     });
 
+    describe('stale leases of one delivery', () => {
+      const error = { name: 'Error', message: 'x' };
+
+      it('refuses the lease of an attempt that was released when the same owner claims it again', async () => {
+        await append([{ event: createEnvelope(), deliveries: [createDelivery('handler-a')] }]);
+        const [stale] = await claim(['handler-a'], at(0), 100, 'worker-1');
+        expect(await store.release(stale!, at(1))).toBe(true);
+        const [current] = await claim(['handler-a'], at(2), 100, 'worker-1');
+        expect(current!.deliveryId).toBe(stale!.deliveryId);
+        expect(current!.leaseToken).not.toBe(stale!.leaseToken);
+        expect(await store.complete(stale!, at(3))).toBe(false);
+        expect(await store.bury(stale!, error, at(3))).toBe(false);
+        expect(await store.reschedule(stale!, at(9), error, at(3))).toBe(false);
+        expect(await store.release(stale!, at(3))).toBe(false);
+        expect(await store.extendLease(stale!, at(LEASE_MS * 3), at(3))).toBe(false);
+        expect(await store.complete(current!, at(4))).toBe(true);
+      });
+
+      it('refuses the lease of an attempt that was rescheduled when the same owner claims it again', async () => {
+        await append([{ event: createEnvelope(), deliveries: [createDelivery('handler-a')] }]);
+        const [stale] = await claim(['handler-a'], at(0), 100, 'worker-1');
+        expect(await store.reschedule(stale!, at(10), error, at(1))).toBe(true);
+        const [current] = await claim(['handler-a'], at(10), 100, 'worker-1');
+        expect(current).toMatchObject({ deliveryId: stale!.deliveryId, attempt: 2 });
+        expect(await store.complete(stale!, at(11))).toBe(false);
+        expect(await store.bury(stale!, error, at(11))).toBe(false);
+        expect(await completeMany(store, [stale!], at(11))).toEqual([false]);
+        expect(await store.complete(current!, at(12))).toBe(true);
+      });
+
+      it('matches the results of completeMany to the lease, not to the delivery id', async () => {
+        await append([{ event: createEnvelope(), deliveries: [createDelivery('handler-a')] }]);
+        const [stale] = await claim(['handler-a'], at(0), 100, 'worker-1');
+        await store.release(stale!, at(1));
+        const [current] = await claim(['handler-a'], at(2), 100, 'worker-1');
+        expect(await completeMany(store, [stale!, current!], at(3))).toEqual([false, true]);
+        await append([{ event: createEnvelope(), deliveries: [createDelivery('handler-b')] }]);
+        const [staleB] = await claim(['handler-b'], at(4), 100, 'worker-1');
+        await store.release(staleB!, at(5));
+        const [currentB] = await claim(['handler-b'], at(6), 100, 'worker-1');
+        expect(await completeMany(store, [currentB!, staleB!], at(7))).toEqual([true, false]);
+      });
+    });
+
+    describe('retention of the deduplication record', () => {
+      const DAY = 86_400_000;
+
+      it('keeps an event for the retention window after its last delivery completed, however old it is', async () => {
+        const event = createEnvelope();
+        await append([{ event, deliveries: [createDelivery('handler-a')] }]);
+        const [delivery] = await claim(['handler-a'], at(30 * DAY));
+        expect(await store.complete(delivery!, at(30 * DAY + 1))).toBe(true);
+        // The event is 30 days old but completed just now: a 29 day completed retention must not take it.
+        expect(await store.purge({ completedBefore: at(29 * DAY) })).toMatchObject({
+          deletedEvents: 0,
+        });
+        const again = await append(
+          [{ event, deliveries: [createDelivery('handler-a')] }],
+          at(30 * DAY + 2),
+        );
+        expect(again.appendedDeliveryCount).toBe(0);
+        expect(await store.purge({ completedBefore: at(31 * DAY) })).toMatchObject({
+          deletedEvents: 1,
+        });
+        const afterwards = await append(
+          [{ event, deliveries: [createDelivery('handler-a')] }],
+          at(31 * DAY),
+        );
+        expect(afterwards.appendedEventIds).toEqual([event.id]);
+      });
+
+      it('keeps the later completion time of an event when completions are recorded out of order', async () => {
+        const event = createEnvelope();
+        await append([
+          { event, deliveries: [createDelivery('handler-a'), createDelivery('handler-b')] },
+        ]);
+        const claimed = await claim(['handler-a', 'handler-b']);
+        expect(claimed).toHaveLength(2);
+        const [first, second] = claimed.sort((left, right) =>
+          left.handler.localeCompare(right.handler),
+        );
+        expect(await store.complete(first!, at(200))).toBe(true);
+        // A worker with a slow clock records an earlier time afterwards: it must not move the event back.
+        expect(await store.complete(second!, at(100))).toBe(true);
+        expect(await store.purge({ completedBefore: at(150) })).toMatchObject({ deletedEvents: 0 });
+        const again = await append(
+          [{ event, deliveries: [createDelivery('handler-a'), createDelivery('handler-b')] }],
+          at(201),
+        );
+        expect(again.appendedDeliveryCount).toBe(0);
+      });
+
+      it('remembers every handler of an event appended twice in one transaction', async () => {
+        const event = createEnvelope();
+        const result = await store.transaction(async (transaction) => {
+          await store.append(
+            transaction,
+            [{ event, deliveries: [createDelivery('handler-a')] }],
+            at(0),
+          );
+          return store.append(
+            transaction,
+            [{ event, deliveries: [createDelivery('handler-b')] }],
+            at(0),
+          );
+        });
+        expect(result).toMatchObject({ duplicateEventIds: [event.id], appendedDeliveryCount: 1 });
+        const claimed = await claim(['handler-a', 'handler-b']);
+        expect(claimed).toHaveLength(2);
+        for (const delivery of claimed) {
+          expect(await store.complete(delivery, at(1))).toBe(true);
+        }
+        const again = await append(
+          [{ event, deliveries: [createDelivery('handler-a'), createDelivery('handler-b')] }],
+          at(2),
+        );
+        expect(again).toMatchObject({ duplicateEventIds: [event.id], appendedDeliveryCount: 0 });
+      });
+
+      it('does not let the dead-letter cutoff remove events whose deliveries completed', async () => {
+        const event = createEnvelope();
+        await append([{ event, deliveries: [createDelivery('handler-a')] }]);
+        const [delivery] = await claim(['handler-a']);
+        await store.complete(delivery!, at(1));
+        expect(await store.purge({ deadBefore: at(100 * DAY) })).toMatchObject({
+          deletedEvents: 0,
+        });
+        const again = await append([{ event, deliveries: [createDelivery('handler-a')] }], at(2));
+        expect(again.appendedDeliveryCount).toBe(0);
+      });
+    });
+
     describe('lost leases', () => {
       it('hands a delivery of a crashed worker to the next claimer with the attempt counted', async () => {
         await append(

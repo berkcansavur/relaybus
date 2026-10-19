@@ -38,6 +38,19 @@ export interface DispatcherDependencies {
   readonly sleep?: (milliseconds: number) => Promise<void>;
 }
 
+/**
+ * A change of a delivery's state (complete, reschedule, bury, release) that the store did not answer.
+ * It stays in the lane's in-flight list, and other deliveries of the lane keep renewing the lane
+ * lease, so nothing else would ever recover it: the dispatcher retries it until the store applies it
+ * (`settle` resolves true) or says the lease is gone (false).
+ */
+interface PendingSettlement {
+  readonly delivery: ClaimedDelivery;
+  readonly settle: () => Promise<boolean>;
+  /** Reports the outcome that could not be reported when the store failed. */
+  readonly applied: () => void;
+}
+
 interface InFlightDelivery {
   readonly handler: string;
   readonly controller: AbortController;
@@ -62,6 +75,9 @@ export class Dispatcher {
   readonly #sleep: (milliseconds: number) => Promise<void>;
   readonly #inFlight = new Set<InFlightDelivery>();
   readonly #completions: CompletionBatcher | undefined;
+  readonly #pending = new Map<string, PendingSettlement>();
+  #recoveryTimer: NodeJS.Timeout | undefined;
+  #recovery: Promise<void> | undefined;
   #running = false;
   #loop: Promise<void> | undefined;
   #wakeUp: (() => void) | undefined;
@@ -96,6 +112,7 @@ export class Dispatcher {
       return;
     }
     this.#running = true;
+    this.#completions?.setClosing(false);
     this.#loop = this.#runLoop();
   }
 
@@ -111,9 +128,12 @@ export class Dispatcher {
    */
   async stop(): Promise<void> {
     if (!this.#running) {
+      // Batches run by hand (`runOnce`) leave settlements to recover without ever starting the loop.
+      await this.#closeRecovery(Date.now() + this.#dependencies.settings.shutdownTimeoutMs);
       return;
     }
     this.#running = false;
+    this.#completions?.setClosing(true);
     this.wake();
     const deadline = Date.now() + this.#dependencies.settings.shutdownTimeoutMs;
     await this.#waitUntil(this.#loop!, deadline);
@@ -124,7 +144,64 @@ export class Dispatcher {
       }
       await settled;
     }
-    await this.#relinquish();
+    await this.#closeRecovery(deadline);
+    await this.#waitUntil(this.#relinquish(), deadline);
+  }
+
+  /**
+   * Gives the settlements still pending one last try and forgets them. A pass of the timer may be inside the
+   * store: it ends before the last pass starts. A store that does not answer before the deadline gets no
+   * further call, since it may be closed right after.
+   */
+  async #closeRecovery(deadline: number): Promise<void> {
+    clearInterval(this.#recoveryTimer);
+    this.#recoveryTimer = undefined;
+    const lastTry = (async () => {
+      await this.#recovery;
+      await this.#recoverSettlements();
+    })();
+    await this.#waitUntil(lastTry, deadline);
+    this.#pending.clear();
+  }
+
+  /**
+   * Retries every pending settlement once; a pass that is already running is the one returned. A store that
+   * still fails leaves the settlement for the next attempt (it was reported when it first failed).
+   */
+  #recoverSettlements(): Promise<void> {
+    this.#recovery ??= this.#recoverAll().finally(() => {
+      this.#recovery = undefined;
+    });
+    return this.#recovery;
+  }
+
+  async #recoverAll(): Promise<void> {
+    for (const [key, entry] of [...this.#pending]) {
+      // Shutdown gave up on this one (the pending map was cleared): the store may be closed by now.
+      if (this.#pending.get(key) !== entry) {
+        continue;
+      }
+      try {
+        const applied = await entry.settle();
+        this.#pending.delete(pendingKey(entry.delivery));
+        if (applied) {
+          entry.applied();
+        } else {
+          this.#dependencies.notifier.notify('onLeaseLost', { delivery: entry.delivery });
+        }
+      } catch {
+        // Still down: the next tick tries again.
+      }
+    }
+  }
+
+  #retain(entry: PendingSettlement): void {
+    this.#pending.set(pendingKey(entry.delivery), entry);
+    this.#recoveryTimer ??= setInterval(
+      () => void this.#recoverSettlements(),
+      this.#dependencies.settings.pollIntervalMs,
+    );
+    this.#recoveryTimer.unref();
   }
 
   /** Gives lease groups the owner no longer works on back to the store, so other workers need not wait for expiry. */
@@ -264,6 +341,12 @@ export class Dispatcher {
   async #execute(delivery: ClaimedDelivery, controller: AbortController): Promise<void> {
     const { registry, notifier, clock } = this.#dependencies;
     const registration = registry.get(delivery.handler)!;
+    // A new claim of this delivery makes whatever was pending for its earlier claims moot.
+    for (const key of [...this.#pending.keys()].filter((pending) =>
+      pending.startsWith(`${delivery.deliveryId}\u0000`),
+    )) {
+      this.#pending.delete(key);
+    }
     notifier.notify('onDeliveryStarted', { delivery });
     const startedAt = clock.now().getTime();
     if (delivery.attempt > registration.retry.attempts) {
@@ -281,15 +364,22 @@ export class Dispatcher {
         ? await this.#guardTransactionalLease(registration, delivery, controller)
         : this.#startHeartbeat(delivery, controller);
       const outcome = await this.#runHandler(registration, delivery, controller);
+      const durationMs = clock.now().getTime() - startedAt;
       if (outcome === 'completed') {
-        notifier.notify('onDeliverySucceeded', {
+        notifier.notify('onDeliverySucceeded', { delivery, durationMs });
+      } else {
+        this.#retain({
           delivery,
-          durationMs: clock.now().getTime() - startedAt,
+          settle: () => this.#complete(delivery),
+          applied: () => notifier.notify('onDeliverySucceeded', { delivery, durationMs }),
         });
       }
     } catch (error) {
       if (error instanceof LeaseLostError) {
         notifier.notify('onLeaseLost', { delivery });
+        if (!error.storeConfirmed) {
+          await this.#giveBack(registration, delivery, error);
+        }
       } else if (error instanceof DispatcherStoppedError) {
         await this.#release(delivery);
       } else {
@@ -316,7 +406,9 @@ export class Dispatcher {
       await store.transaction(async (transaction) => {
         await this.#invoke(registration, event, delivery, controller, transaction);
         if (!(await store.complete(delivery, clock.now(), transaction))) {
-          throw new LeaseLostError(`Lease on delivery ${delivery.deliveryId} was lost`);
+          throw new LeaseLostError(`Lease on delivery ${delivery.deliveryId} was lost`, {
+            storeConfirmed: true,
+          });
         }
       });
       return 'completed';
@@ -345,7 +437,9 @@ export class Dispatcher {
         continue;
       }
       if (!completed) {
-        throw new LeaseLostError(`Lease on delivery ${delivery.deliveryId} was lost`);
+        throw new LeaseLostError(`Lease on delivery ${delivery.deliveryId} was lost`, {
+          storeConfirmed: true,
+        });
       }
       return 'completed';
     }
@@ -451,7 +545,9 @@ export class Dispatcher {
     if (registration.timeoutMs !== null && now.getTime() + registration.timeoutMs >= expiry) {
       expiry = now.getTime() + registration.timeoutMs + settings.leaseDurationMs;
       if (!(await store.extendLease(delivery, new Date(expiry), now))) {
-        throw new LeaseLostError(`Lease on delivery ${delivery.deliveryId} was lost`);
+        throw new LeaseLostError(`Lease on delivery ${delivery.deliveryId} was lost`, {
+          storeConfirmed: true,
+        });
       }
     }
     const timer = setTimeout(
@@ -473,8 +569,10 @@ export class Dispatcher {
     const { store, clock, notifier, settings } = this.#dependencies;
     let confirmedExpiry = delivery.leaseExpiresAt.getTime();
     let renewing = false;
-    const abortLeaseLost = (): void => {
-      controller.abort(new LeaseLostError(`Lease on delivery ${delivery.deliveryId} was lost`));
+    const abortLeaseLost = (storeConfirmed = false): void => {
+      controller.abort(
+        new LeaseLostError(`Lease on delivery ${delivery.deliveryId} was lost`, { storeConfirmed }),
+      );
     };
     const timer = setInterval(
       () => {
@@ -494,7 +592,7 @@ export class Dispatcher {
             if (extended) {
               confirmedExpiry = expiry;
             } else {
-              abortLeaseLost();
+              abortLeaseLost(true);
             }
           })
           .catch((error: unknown) => notifier.failure('extend-lease', error))
@@ -513,12 +611,22 @@ export class Dispatcher {
     delivery: ClaimedDelivery,
     error: unknown,
   ): Promise<void> {
-    const { store, clock, random, notifier } = this.#dependencies;
     const policy = registration.retry;
     if (delivery.attempt >= policy.attempts || !isRetryableError(policy, error)) {
       await this.#bury(delivery, error);
       return;
     }
+    await this.#reschedule(registration, delivery, error);
+  }
+
+  /** Schedules the next attempt with the retry policy's backoff. */
+  async #reschedule(
+    registration: HandlerRegistration,
+    delivery: ClaimedDelivery,
+    error: unknown,
+  ): Promise<void> {
+    const { store, clock, random, notifier } = this.#dependencies;
+    const policy = registration.retry;
     const errorInfo = toErrorInfo(error);
     const now = clock.now();
     const availableAt = new Date(
@@ -529,6 +637,12 @@ export class Dispatcher {
       rescheduled = await store.reschedule(delivery, availableAt, errorInfo, now);
     } catch (storeError) {
       notifier.failure('reschedule', storeError);
+      this.#retain({
+        delivery,
+        settle: () => store.reschedule(delivery, availableAt, errorInfo, now),
+        applied: () =>
+          notifier.notify('onDeliveryRetryScheduled', { delivery, error: errorInfo, availableAt }),
+      });
       return;
     }
     if (rescheduled) {
@@ -546,12 +660,37 @@ export class Dispatcher {
       buried = await store.bury(delivery, errorInfo, clock.now());
     } catch (storeError) {
       notifier.failure('bury', storeError);
+      this.#retain({
+        delivery,
+        settle: () => store.bury(delivery, errorInfo, clock.now()),
+        applied: () => notifier.notify('onDeliveryDead', { delivery, error: errorInfo }),
+      });
       return;
     }
     if (buried) {
       notifier.notify('onDeliveryDead', { delivery, error: errorInfo });
     } else {
       notifier.notify('onLeaseLost', { delivery });
+    }
+  }
+
+  /**
+   * A worker that only noticed locally that its lease ran out may still own the delivery in the
+   * store, where other deliveries of its lane keep renewing the lane: it must not stay in flight
+   * for ever. The attempt took longer than its lease, so it counts as a failed attempt (an
+   * exhausted delivery is dead-lettered, whatever a custom `retryIf` says): a handler that always
+   * outlives its lease cannot run for ever at attempt 1. If the lease is gone for real the store
+   * refuses and nothing changes. The lost lease was reported already.
+   */
+  async #giveBack(
+    registration: HandlerRegistration,
+    delivery: ClaimedDelivery,
+    error: LeaseLostError,
+  ): Promise<void> {
+    if (delivery.attempt >= registration.retry.attempts) {
+      await this.#bury(delivery, error);
+    } else {
+      await this.#reschedule(registration, delivery, error);
     }
   }
 
@@ -562,6 +701,11 @@ export class Dispatcher {
       released = await store.release(delivery, clock.now());
     } catch (storeError) {
       notifier.failure('release', storeError);
+      this.#retain({
+        delivery,
+        settle: () => store.release(delivery, clock.now()),
+        applied: () => notifier.notify('onDeliveryReleased', { delivery }),
+      });
       return;
     }
     if (released) {
@@ -570,6 +714,11 @@ export class Dispatcher {
       notifier.notify('onLeaseLost', { delivery });
     }
   }
+}
+
+/** Settlements are pending per claim: an older claim of a delivery must never replace or remove the newer one's. */
+function pendingKey(delivery: ClaimedDelivery): string {
+  return `${delivery.deliveryId}\u0000${delivery.leaseToken}`;
 }
 
 function rejectOnAbort(signal: AbortSignal): Promise<never> {

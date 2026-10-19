@@ -183,3 +183,44 @@ describe('InMemoryEventStore completion', () => {
     });
   });
 });
+
+describe('InMemoryEventStore append that fails to serialize', () => {
+  it('lets the caller append the corrected event under the same id in the same transaction', async () => {
+    const store = new InMemoryEventStore();
+    const event = createEnvelope();
+    const broken = { ...event, payload: { amount: 1n } } as unknown as typeof event;
+    const result = await store.transaction(async (transaction) => {
+      await expect(
+        store.append(transaction, [{ event: broken, deliveries: [createDelivery('h')] }], at(0)),
+      ).rejects.toThrow();
+      return store.append(transaction, [{ event, deliveries: [createDelivery('h')] }], at(0));
+    });
+    expect(result).toMatchObject({ appendedEventIds: [event.id], appendedDeliveryCount: 1 });
+    expect(await store.statistics(at(0))).toMatchObject({ pending: 1 });
+  });
+});
+
+describe('InMemoryEventStore purge next to an open append', () => {
+  it('keeps an event that an open transaction is adding a handler to', async () => {
+    const store = new InMemoryEventStore();
+    const event = createEnvelope();
+    await store.transaction((transaction) =>
+      store.append(transaction, [{ event, deliveries: [] }], at(0)),
+    );
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const appending = store.transaction(async (transaction) => {
+      await store.append(transaction, [{ event, deliveries: [createDelivery('a')] }], at(1));
+      await gate;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // The event is an old orphan, but a transaction that has not committed yet is about to attach a delivery.
+    expect(await store.purge({ completedBefore: at(1_000) })).toEqual({
+      deletedDeliveries: 0,
+      deletedEvents: 0,
+    });
+    release();
+    await appending;
+    expect(await store.listDeliveries({ eventId: event.id })).toHaveLength(1);
+  });
+});

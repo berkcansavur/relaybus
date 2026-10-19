@@ -437,6 +437,11 @@ export class RelayBus<TTransaction = unknown> {
     if (this.#state === 'starting') {
       await this.#starting!.catch(() => undefined);
     }
+    if (this.#state === 'idle') {
+      // Batches run by hand may have left settlements that the dispatcher keeps retrying in the background.
+      await this.#dispatcher.stop();
+      return;
+    }
     if (this.#state !== 'running') {
       return;
     }

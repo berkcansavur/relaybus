@@ -85,6 +85,8 @@ interface StoredEvent {
    * completed (deleted) delivery is never created again.
    */
   readonly handlers: Set<string>;
+  /** When a delivery of this event last completed. Retention of completed deliveries is measured from here, not from creation. */
+  completedAt: Date | null;
 }
 
 interface SerializedEnvelope extends Omit<EventEnvelope, 'occurredAt'> {
@@ -121,6 +123,10 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
   readonly #keySequences = new Map<string, number>();
   /** Row-lock emulation: event ids and ordering keys written by open transactions. */
   readonly #locks = new Map<string, HeldLock>();
+  readonly #writes = new WeakMap<
+    InMemoryTransaction,
+    { eventIds: Set<string>; deliveryKeys: Set<string> }
+  >();
   readonly #generateIdentifier: IdentifierGenerator;
   readonly #retainCompleted: boolean;
 
@@ -158,13 +164,17 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
         ...(entry.event.key === null ? [] : [`key:${entry.event.key}`]),
       ]),
     );
-    const pendingEventIds = new Set<string>();
-    const pendingDeliveryKeys = new Set<string>();
+    // What earlier appends of this transaction wrote is not applied yet, but it is visible to this one.
+    const written = this.#written(transaction);
+    const pendingEventIds = written.eventIds;
+    const pendingDeliveryKeys = written.deliveryKeys;
     const appendedEventIds: string[] = [];
     const duplicateEventIds: string[] = [];
     let appendedDeliveryCount = 0;
     for (const entry of entries) {
       const eventId = entry.event.id;
+      // Before anything is remembered: an event that cannot be serialized leaves no trace behind.
+      const serialized = serializeEnvelope(entry.event);
       const isDuplicate = this.#events.has(eventId) || pendingEventIds.has(eventId);
       if (isDuplicate) {
         duplicateEventIds.push(eventId);
@@ -184,7 +194,6 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
         return true;
       });
       appendedDeliveryCount += newDeliveries.length;
-      const serialized = serializeEnvelope(entry.event);
       transaction.enqueue(() => {
         if (!isDuplicate) {
           this.#events.set(eventId, {
@@ -192,6 +201,7 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
             sequence: this.#nextSequence(serialized.key),
             createdAt: now,
             handlers: new Set(),
+            completedAt: null,
           });
         }
         const stored = this.#events.get(eventId)!;
@@ -370,18 +380,25 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
     const referencedEventIds = new Set(
       [...this.#deliveries.values()].map((delivery) => delivery.eventId),
     );
-    // Events no delivery references (every delivery completed and was deleted, or none was
-    // ever created) go once they are older than the earliest cutoff, like in the database stores.
+    // Events no delivery references go once their retention ran out. An event that had a delivery
+    // complete is measured from that completion and only by the completed cutoff; any other
+    // (dead-lettered or never delivered) from its creation and by the earliest cutoff.
     const cutoffs = [request.completedBefore, request.deadBefore]
       .filter((cutoff) => cutoff !== undefined)
       .map((cutoff) => cutoff.getTime());
     const orphanCutoff = cutoffs.length === 0 ? Number.NEGATIVE_INFINITY : Math.min(...cutoffs);
+    const completedCutoff = request.completedBefore?.getTime() ?? Number.NEGATIVE_INFINITY;
     let deletedEvents = 0;
     for (const [eventId, event] of [...this.#events]) {
-      const isOrphan =
-        !referencedEventIds.has(eventId) &&
-        (touchedEventIds.has(eventId) || event.createdAt.getTime() < orphanCutoff);
-      if (isOrphan) {
+      // An open append transaction holds the event (like a row lock): it is about to attach a delivery.
+      if (referencedEventIds.has(eventId) || this.#locks.has(`event:${eventId}`)) {
+        continue;
+      }
+      const expired =
+        event.completedAt === null
+          ? touchedEventIds.has(eventId) || event.createdAt.getTime() < orphanCutoff
+          : event.completedAt.getTime() < completedCutoff;
+      if (expired) {
         this.#events.delete(eventId);
         deletedEvents += 1;
       }
@@ -414,6 +431,16 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
    * until `transaction` finishes, the way a database holds row locks. Sorted
    * acquisition keeps two transactions from waiting on each other.
    */
+  /** The events and deliveries the transaction appended so far, which are not applied before it commits. */
+  #written(transaction: InMemoryTransaction): { eventIds: Set<string>; deliveryKeys: Set<string> } {
+    let written = this.#writes.get(transaction);
+    if (written === undefined) {
+      written = { eventIds: new Set(), deliveryKeys: new Set() };
+      this.#writes.set(transaction, written);
+    }
+    return written;
+  }
+
   async #lock(transaction: InMemoryTransaction, names: readonly string[]): Promise<void> {
     for (const name of [...new Set(names)].sort()) {
       let held = this.#locks.get(name);
@@ -472,6 +499,10 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
 
   /** Deletes a completed delivery, or marks it completed when a history is kept. */
   #finish(delivery: StoredDelivery, now: Date): void {
+    const event = this.#events.get(delivery.eventId)!;
+    if (event.completedAt === null || event.completedAt < now) {
+      event.completedAt = now;
+    }
     if (!this.#retainCompleted) {
       this.#deliveries.delete(delivery.id);
       return;

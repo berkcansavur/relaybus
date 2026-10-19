@@ -34,6 +34,11 @@ export interface EventDocument {
   readonly handlers: readonly string[];
   /** When the event was appended (the caller's clock). Orphaned events older than a purge cutoff are deleted. */
   readonly createdAt: Date;
+  /**
+   * Latest completion of one of its deliveries. An event nothing references
+   * any more is kept as deduplication record until `completedBefore` passes it.
+   */
+  readonly completedAt?: Date;
 }
 
 /**
@@ -73,6 +78,16 @@ export interface DeliveryDocument {
   readonly lane?: DeliveryLane;
   /** Attempts that ended: failed, or lost with their lane. A running attempt is not counted yet. */
   readonly attempts: number;
+  /**
+   * Claim generation: grows when a claim of the delivery ends (retry, release,
+   * burial, lost lease). Absent means 0 (documents written before it existed).
+   */
+  readonly claims?: number;
+  /**
+   * Lane epoch of the last lost claim charged to the delivery. It only grows, so
+   * a repeated or delayed charge of the same or an older lost claim is skipped.
+   */
+  readonly lostAt?: number;
   readonly availableAt: Date;
   readonly dueAt?: Date;
   readonly lastError?: ErrorInfo;
@@ -109,7 +124,20 @@ export interface LaneDocument {
    * them is charged one attempt before the new holder reads the lane, then the
    * list is cleared.
    */
-  readonly lost: readonly string[];
+  readonly lost: readonly LostDelivery[];
+  /**
+   * Grows with every claim recorded in the lane and every reconciliation of it.
+   * A claim records only under the revision it read, so a record that reaches
+   * the server after its claim failed and was reconciled changes nothing.
+   * Absent means 0.
+   */
+  readonly revision?: number;
+}
+
+/** A delivery that was in flight when its lane was taken over, and the epoch it was claimed under. */
+export interface LostDelivery {
+  readonly id: string;
+  readonly epoch: number;
 }
 
 /** Shape of a document in the completion history (`completionHistory: true`). `_id` is the delivery id. */

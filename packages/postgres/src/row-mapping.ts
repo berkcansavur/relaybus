@@ -48,16 +48,18 @@ export function mapEventEnvelope(row: PostgresRow): EventEnvelope {
  * The fencing token of a claimed delivery names its lane and the lane's epoch,
  * so every state change can check the lane without reading the delivery first.
  */
-export function formatLeaseToken(lane: number, epoch: string): string {
-  return `${lane}:${epoch}`;
+export function formatLeaseToken(lane: number, epoch: string, claims: number): string {
+  return `${lane}:${epoch}:${claims}`;
 }
 
 export interface LaneLease {
   readonly lane: number;
   readonly epoch: string;
+  /** How many claims of this delivery ended before this one; every end of a claim bumps it, so an old lease can never match a newer claim. */
+  readonly claims: number;
 }
 
-const LEASE_TOKEN_PATTERN = /^(\d{1,3}):(\d{1,18})$/;
+const LEASE_TOKEN_PATTERN = /^(\d{1,3}):(\d{1,18}):(\d{1,9})$/;
 
 /** Splits a lease token; undefined when it was not issued by this store. */
 export function parseLeaseToken(token: string): LaneLease | undefined {
@@ -65,13 +67,17 @@ export function parseLeaseToken(token: string): LaneLease | undefined {
   if (match === null || Number(match[1]) >= LANE_COUNT) {
     return undefined;
   }
-  return { lane: Number(match[1]), epoch: match[2]! };
+  return { lane: Number(match[1]), epoch: match[2]!, claims: Number(match[3]) };
 }
 
 export function mapClaimedDelivery(row: PostgresRow, leaseExpiresAt: Date): ClaimedDelivery {
   return {
     deliveryId: text(row, 'delivery_id'),
-    leaseToken: formatLeaseToken(readCount(row, 'lane'), text(row, 'epoch')),
+    leaseToken: formatLeaseToken(
+      readCount(row, 'lane'),
+      text(row, 'epoch'),
+      readCount(row, 'claims'),
+    ),
     handler: text(row, 'handler'),
     attempt: readCount(row, 'attempt'),
     leaseExpiresAt,

@@ -118,6 +118,7 @@ const migration = createPostgresSchemaSql({ schema: 'app', tablePrefix: 'bus_' }
 | `events`               | One row per event: `id` (**text**, so any caller id works), `type`, `source`, `key`, `sequence`, `payload jsonb`, `headers jsonb`, correlation and causation ids, `occurred_at`, `created_at`, and `handlers`, the handlers that ever got a delivery (it outlives the deliveries). |
 | `deliveries`           | One row per (event, handler) that is not finished: `lane`, `status` (`pending` or `dead`), `attempts`, `available_at`, `last_error jsonb`, key and sequence copied from the event, timestamps. `unique (event_id, handler)`, foreign key to events with `ON DELETE CASCADE`.       |
 | `lanes`                | 256 rows, one per lane: `epoch` (the fencing token), `lease_owner`, `lease_expires_at` and `in_flight` (ids of the deliveries the owner claimed). `fillfactor = 50` and no secondary index, so its updates are heap-only (HOT).                                                    |
+| `event_completions`    | One row per event that had a delivery complete, with the time of its last completion. Retention of completed work (`retention.completed`) is measured from it, however old the event is; events that never had a delivery complete are measured from their creation.               |
 | `key_sequences`        | One counter row per ordering key.                                                                                                                                                                                                                                                  |
 | `completed_deliveries` | Only with `completionHistory`: one insert-only row per completed delivery.                                                                                                                                                                                                         |
 
@@ -171,7 +172,7 @@ tool, run it as one transaction with the workers stopped. Running 0.1.0 and the 
   statement find the head of every key with `DISTINCT ON (handler, key)`. The stress test in
   `test/claim-concurrency.integration.test.ts` runs 12 claimers on 3 pools against 30 keys and fails if a key is ever in
   flight twice or out of order.
-- **Fenced.** A lease token is `<lane>:<epoch>`. `complete`, `completeMany`, `reschedule`, `bury`, `release` and
+- **Fenced.** A lease token is `<lane>:<epoch>:<claims>`, where `claims` counts how many claims of that delivery ended before this one (every `reschedule`, `release`, `bury` and takeover bumps it), so a lease of an older attempt never matches a newer claim even when the same worker re-claims the delivery in the same lane epoch. `complete`, `completeMany`, `reschedule`, `bury`, `release` and
   `extendLease` apply only while the lane still has that epoch and lists the delivery as in flight; a worker that lost
   its lane changes nothing. Completion takes a `FOR KEY SHARE` lock on the lane row until the transaction ends, so a takeover
   (which locks the row `FOR UPDATE`) and a transactional handler's completion cannot both succeed: the handler's writes
@@ -221,6 +222,11 @@ tool, run it as one transaction with the workers stopped. Running 0.1.0 and the 
   created with `autovacuum_vacuum_scale_factor = 0.02`; for sustained throughput above a few thousand deliveries per
   second also lower `autovacuum_vacuum_cost_delay` for this table (or run a periodic `VACUUM`), and watch
   `pg_stat_user_tables.n_dead_tup`. The lane table is vacuumed by HOT pruning alone.
+- **Lost answers and stale reads.** A claim from held lanes is one statement. If the connection fails after the database recorded the
+  batch but before the answer arrived, the store gives back every delivery of its own lanes that it never handed out (it remembers what it
+  handed out until the dispatcher settled it). A claim that waited for a lane lock re-runs itself when the lane changed meanwhile, so it
+  never claims from a snapshot older than the lane it got. The dispatcher retries a completion, reschedule, bury or release that the store
+  did not answer until it lands or the lease is gone, so a delivery cannot stay in flight under a lane that other deliveries keep renewing.
 - **Lane exclusivity.** While a worker holds a lane under a live lease, other workers do not see its pending
   deliveries, even when they sit idle. A worker that dies delays its lanes by at most the lease duration
   (`dispatcher.leaseDuration`); a worker that stops gracefully gives them back immediately. Lanes are chosen

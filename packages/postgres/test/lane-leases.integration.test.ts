@@ -591,3 +591,663 @@ describe('a claim that needs more than the lanes it holds', () => {
     expect(next!.event.key).toBe('hot');
   });
 });
+
+describe('interleavings that used to break the fence', () => {
+  /** Resolves once `count` backend processes wait for a lock and run a statement containing `marker`. */
+  async function waitForBlocked(marker: string, count: number): Promise<void> {
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      const result = await database.pool.query<{ waiting: number }>(
+        `SELECT count(*)::int AS waiting FROM pg_stat_activity
+         WHERE wait_event_type = 'Lock' AND query LIKE $1`,
+        [`%${marker}%`],
+      );
+      if (result.rows[0]!.waiting >= count) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`fewer than ${count} statements containing ${marker} are waiting for a lock`);
+  }
+
+  async function laneOf(key: string): Promise<number> {
+    const result = await database.pool.query<{ lane: number }>(
+      `SELECT (hashtextextended($1::text, 0) & 255)::int AS lane`,
+      [key],
+    );
+    return result.rows[0]!.lane;
+  }
+
+  it('does not let a completion delete a delivery that was rescheduled while the completion waited', async () => {
+    const { store, schema } = await createStore();
+    await append(store, [{ event: createEnvelope(), handlers: ['h'] }]);
+    const [stale] = await claim(store, ['h'], 'worker-1');
+    const rescheduling = await database.pool.connect();
+    try {
+      await rescheduling.query('BEGIN');
+      // What reschedule does to the delivery row: a new due time and a new claim generation.
+      await rescheduling.query(
+        `UPDATE "${schema}".relaybus_deliveries SET available_at = $1, attempts = attempts + 1, claims = claims + 1
+         WHERE id = $2`,
+        [at(10), stale!.deliveryId],
+      );
+      const completing = store.completeMany([stale!], at(1));
+      await waitForBlocked('FOR KEY SHARE', 1);
+      await rescheduling.query('COMMIT');
+      expect(await completing).toEqual([false]);
+    } finally {
+      rescheduling.release();
+    }
+    const remaining = await database.pool.query(
+      `SELECT count(*)::int AS count FROM "${schema}".relaybus_deliveries WHERE id = $1`,
+      [stale!.deliveryId],
+    );
+    expect(remaining.rows[0]).toEqual({ count: 1 });
+  });
+
+  it('does not claim a delivery from a stale snapshot after waiting behind its reschedule', async () => {
+    const { store, schema } = await createStore();
+    await append(store, [{ event: createEnvelope(), handlers: ['h'] }]);
+    const [running] = await claim(store, ['h'], 'worker-1');
+    const rescheduling = await database.pool.connect();
+    try {
+      await rescheduling.query('BEGIN');
+      await rescheduling.query(
+        `UPDATE "${schema}".relaybus_lanes SET in_flight = array_remove(in_flight, $1) WHERE lease_owner = 'worker-1'`,
+        [running!.deliveryId],
+      );
+      await rescheduling.query(
+        `UPDATE "${schema}".relaybus_deliveries SET available_at = $1, attempts = attempts + 1, claims = claims + 1 WHERE id = $2`,
+        [at(10 * LEASE_MS), running!.deliveryId],
+      );
+      // This claim reads the delivery with the snapshot it took before the reschedule committed.
+      const waiting = claim(store, ['h'], 'worker-1', at(1));
+      await waitForBlocked('held AS MATERIALIZED', 1);
+      await rescheduling.query('COMMIT');
+      expect(await waiting).toEqual([]);
+    } finally {
+      rescheduling.release();
+    }
+    const [due] = await claim(store, ['h'], 'worker-1', at(10 * LEASE_MS));
+    expect(due).toMatchObject({ attempt: 2 });
+    expect(await store.complete(due!, at(10 * LEASE_MS + 1))).toBe(true);
+  });
+
+  it('keeps the deliveries two overlapping claims of one owner recorded', async () => {
+    const { store, schema } = await createStore();
+    await append(store, [
+      { event: createEnvelope({ key: 'one-lane' }), handlers: ['h1', 'h2', 'h3'] },
+    ]);
+    expect(await claim(store, ['h1'], 'worker-1')).toHaveLength(1);
+    const locker = await database.pool.connect();
+    try {
+      // Hold the lane row so both claims queue behind it and run one after the other afterwards.
+      await locker.query('BEGIN');
+      await locker.query(
+        `SELECT 1 FROM "${schema}".relaybus_lanes WHERE lease_owner = 'worker-1' FOR UPDATE`,
+      );
+      const second = claim(store, ['h2'], 'worker-1', at(1), 1);
+      const third = claim(store, ['h3'], 'worker-1', at(1), 1);
+      // One of them waits for the lane row; the other queues behind it in the store (one claim at a time per owner).
+      await waitForBlocked('held AS MATERIALIZED', 1);
+      await locker.query('COMMIT');
+      const batches = [...(await second), ...(await third)];
+      expect(batches.map((delivery) => delivery.handler).sort()).toEqual(['h2', 'h3']);
+    } finally {
+      locker.release();
+    }
+    // Both are still in flight: nothing may be handed out again.
+    expect(await claim(store, ['h1', 'h2', 'h3'], 'worker-1', at(2))).toEqual([]);
+  });
+
+  it('finds claimable work behind a window that blocked followers of many lanes fill together', async () => {
+    const { store } = await createStore();
+    const keys: string[] = [];
+    const lanes = new Set<number>();
+    for (let index = 0; keys.length < 5; index += 1) {
+      const key = `window-${index}`;
+      const lane = await laneOf(key);
+      if (!lanes.has(lane)) {
+        lanes.add(lane);
+        keys.push(key);
+      }
+    }
+    for (const key of keys) {
+      await append(
+        store,
+        Array.from({ length: 60 }, () => ({
+          event: createEnvelope({ key }),
+          handlers: ['blocked'],
+        })),
+        at(0),
+      );
+    }
+    expect(await claim(store, ['blocked'], 'worker-1', at(5), 5)).toHaveLength(5);
+    for (const key of keys) {
+      await append(store, [{ event: createEnvelope({ key }), handlers: ['free'] }], at(10));
+    }
+    // Every lane has fewer than 64 due deliveries, but together the blocked followers fill the 256 window.
+    const claimed = await claim(store, ['blocked', 'free'], 'worker-1', at(20), 10);
+    expect(claimed.map((delivery) => delivery.handler)).toEqual(Array(5).fill('free'));
+  });
+
+  it('locks an existing event before it adds a handler to it', async () => {
+    const schema = uniqueSchema();
+    const statements: string[] = [];
+    const inner = new PgExecutor(database.pool);
+    const executor: PostgresExecutor<PoolClient> = {
+      transaction: (work) => inner.transaction(work),
+      query: (sql, parameters, transaction) => {
+        statements.push(sql);
+        return inner.query(sql, parameters, transaction);
+      },
+    };
+    const store = new PostgresEventStore({ executor, schema });
+    await store.setup();
+    const event = createEnvelope();
+    await append(store, [{ event, handlers: ['h1'] }]);
+    statements.length = 0;
+    await append(store, [{ event, handlers: ['h1', 'h2'] }]);
+    const lock = statements.findIndex(
+      (sql) => sql.includes('FOR NO KEY UPDATE') && sql.includes('ORDER BY id'),
+    );
+    const insert = statements.findIndex((sql) => sql.includes('fresh AS'));
+    expect(lock).toBeGreaterThanOrEqual(0);
+    expect(lock).toBeLessThan(insert);
+  });
+});
+
+describe('retention after an upgrade from 0.1.0', () => {
+  it('keeps the event of a recently completed delivery when an old completed row of 0.1.0 is purged', async () => {
+    const { store, schema } = await createStore();
+    const event = createEnvelope();
+    await append(store, [{ event, handlers: ['legacy', 'current'] }]);
+    // The 0.1.0 delivery: kept as a completed row.
+    await database.pool.query(
+      `UPDATE "${schema}".relaybus_deliveries SET status = 'completed', completed_at = $1 WHERE handler = 'legacy'`,
+      [at(10)],
+    );
+    const [current] = await claim(store, ['current'], 'worker-1', at(100));
+    expect(await store.complete(current!, at(100))).toBe(true);
+    expect(await store.purge({ completedBefore: at(50) })).toEqual({
+      deletedDeliveries: 1,
+      deletedEvents: 0,
+    });
+    const again = await store.transaction((transaction) =>
+      store.append(transaction, [{ event, deliveries: [createDelivery('current')] }], at(101)),
+    );
+    expect(again.appendedDeliveryCount).toBe(0);
+    expect(await store.purge({ completedBefore: at(200) })).toEqual({
+      deletedDeliveries: 0,
+      deletedEvents: 1,
+    });
+  });
+});
+
+describe('a claim whose response was lost', () => {
+  /** A store whose statements can fail after the database executed them, like a connection reset before the answer. */
+  async function createLossyStore() {
+    const schema = uniqueSchema();
+    const inner = new PgExecutor(database.pool);
+    const errors: string[] = [];
+    const lossy = {
+      loseNext: undefined as string | undefined,
+      staleForever: false,
+      failReconcile: undefined as unknown,
+      failReconcileOnce: false,
+      running: 0,
+      maximumRunning: 0,
+      late: undefined as (() => Promise<unknown>) | undefined,
+      delayNext: false,
+      delayReconcile: false,
+      delayTransaction: false,
+      reconciled: [] as unknown[],
+    };
+    const executor: PostgresExecutor<PoolClient> = {
+      transaction: (work) => {
+        if (lossy.delayTransaction) {
+          lossy.delayTransaction = false;
+          lossy.late = () => inner.transaction(work);
+          return Promise.reject(new Error('query timeout'));
+        }
+        return inner.transaction(work);
+      },
+      query: async (sql, parameters, transaction) => {
+        if (lossy.failReconcile !== undefined && sql.includes('SET in_flight = ARRAY(')) {
+          const failure = lossy.failReconcile as Error;
+          if (lossy.failReconcileOnce) {
+            lossy.failReconcile = undefined;
+          }
+          throw failure;
+        }
+        if (sql.includes('SET in_flight = ARRAY(')) {
+          lossy.reconciled.push(JSON.parse(parameters[1] as string));
+        }
+        if (lossy.delayReconcile && sql.includes('SET in_flight = ARRAY(')) {
+          lossy.delayReconcile = false;
+          lossy.late = () => inner.query(sql, parameters, transaction);
+          throw new Error('query timeout');
+        }
+        if (lossy.staleForever && sql.includes('stale AS')) {
+          return [
+            {
+              stale: true,
+              delivery_id: null,
+              held_lanes: '[]',
+              examined_lanes: '[]',
+              running_ids: '[]',
+              window_saturated: false,
+            },
+          ];
+        }
+        if (lossy.delayNext && sql.includes('held AS MATERIALIZED')) {
+          // The client gives up (a timeout); the statement is still on its way to the server.
+          lossy.delayNext = false;
+          lossy.late = () => inner.query(sql, parameters, transaction);
+          throw new Error('query timeout');
+        }
+        const claimingHeld = sql.includes('held AS MATERIALIZED');
+        if (claimingHeld) {
+          lossy.running += 1;
+          lossy.maximumRunning = Math.max(lossy.maximumRunning, lossy.running);
+        }
+        try {
+          const rows = await inner.query(sql, parameters, transaction);
+          if (lossy.loseNext !== undefined && sql.includes(lossy.loseNext)) {
+            lossy.loseNext = undefined;
+            throw new Error('connection reset before the answer');
+          }
+          return rows;
+        } finally {
+          if (claimingHeld) {
+            lossy.running -= 1;
+          }
+        }
+      },
+    };
+    const store = new PostgresEventStore({
+      executor,
+      schema,
+      logger: {
+        log: () => undefined,
+        warn: () => undefined,
+        error: (message) => void errors.push(message),
+      },
+    });
+    await store.setup();
+    return { store, lossy, errors };
+  }
+
+  it('does not keep the deliveries it recorded but never handed out', async () => {
+    const { store, lossy } = await createLossyStore();
+    await append(store, [{ event: createEnvelope({ key: 'one-lane' }), handlers: ['h1', 'h2'] }]);
+    expect(await claim(store, ['h1'], 'worker-1')).toHaveLength(1);
+    lossy.loseNext = 'held AS MATERIALIZED';
+    await expect(claim(store, ['h2'], 'worker-1', at(1))).rejects.toThrow('connection reset');
+    // The statement recorded h2 in the lane; nobody received it, so it must run again from the next claim.
+    const [again] = await claim(store, ['h2'], 'worker-1', at(2));
+    expect(again).toMatchObject({ handler: 'h2', attempt: 1 });
+  });
+
+  it('keeps what a claim handed out when it reconciles', async () => {
+    const { store, lossy } = await createLossyStore();
+    await append(store, [{ event: createEnvelope({ key: 'one-lane' }), handlers: ['h1', 'h2'] }]);
+    const [running] = await claim(store, ['h1'], 'worker-1');
+    lossy.loseNext = 'held AS MATERIALIZED';
+    await expect(claim(store, ['h2'], 'worker-1', at(1))).rejects.toThrow('connection reset');
+    // h1 was handed out and is still running: the reconciliation must not release it.
+    expect(await claim(store, ['h1'], 'worker-1', at(2))).toEqual([]);
+    expect(await store.complete(running!, at(3))).toBe(true);
+  });
+
+  it('reports a reconciliation that fails too and still raises the original error', async () => {
+    const { store, lossy, errors } = await createLossyStore();
+    await append(store, [{ event: createEnvelope(), handlers: ['h'] }]);
+    lossy.loseNext = 'held AS MATERIALIZED';
+    lossy.failReconcile = new Error('still down');
+    await expect(claim(store, ['h'], 'worker-1')).rejects.toThrow('connection reset');
+    lossy.failReconcile = 'plain text failure';
+    // The reconciliation owed from the first failure is retried first and fails too: no claim is made.
+    await expect(claim(store, ['h'], 'worker-1')).rejects.toThrow('no claim is made');
+    expect(errors).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('error=still down'),
+        expect.stringContaining('error=plain text failure'),
+      ]),
+    );
+  });
+
+  it('does not forget the claim of a newer attempt when a stale lease of the delivery is settled', async () => {
+    const { store, lossy } = await createLossyStore();
+    await append(store, [{ event: createEnvelope({ key: 'one-lane' }), handlers: ['h1', 'h2'] }]);
+    const [stale] = await claim(store, ['h1'], 'worker-1');
+    expect(await store.release(stale!, at(1))).toBe(true);
+    const [current] = await claim(store, ['h1'], 'worker-1', at(2));
+    expect(await store.complete(stale!, at(3))).toBe(false);
+    lossy.loseNext = 'held AS MATERIALIZED';
+    await expect(claim(store, ['h2'], 'worker-1', at(4))).rejects.toThrow('connection reset');
+    // The newer attempt is still handed out: the reconciliation must keep it listed and its lease valid.
+    expect(await claim(store, ['h1'], 'worker-1', at(5))).toEqual([]);
+    expect(await store.complete(current!, at(6))).toBe(true);
+  });
+
+  it('keeps the claim of a transactional completion that may still roll back', async () => {
+    const { store, lossy } = await createLossyStore();
+    await append(store, [{ event: createEnvelope({ key: 'one-lane' }), handlers: ['h1', 'h2'] }]);
+    const [running] = await claim(store, ['h1'], 'worker-1');
+    await expect(
+      store.transaction(async (transaction) => {
+        expect(await store.complete(running!, at(1), transaction)).toBe(true);
+        lossy.loseNext = 'held AS MATERIALIZED';
+        await expect(claim(store, ['h2'], 'worker-1', at(2))).rejects.toThrow('connection reset');
+        throw new Error('handler transaction rolled back');
+      }),
+    ).rejects.toThrow('rolled back');
+    // The delivery is still running under its lease: the reconciliation must not have unlisted it.
+    expect(await store.complete(running!, at(3))).toBe(true);
+  });
+
+  it('retries a failed reconciliation before the next claim of the owner', async () => {
+    const { store, lossy } = await createLossyStore();
+    await append(store, [{ event: createEnvelope({ key: 'one-lane' }), handlers: ['h1', 'h2'] }]);
+    expect(await claim(store, ['h1'], 'worker-1')).toHaveLength(1);
+    lossy.loseNext = 'held AS MATERIALIZED';
+    lossy.failReconcile = new Error('still down');
+    lossy.failReconcileOnce = true;
+    await expect(claim(store, ['h2'], 'worker-1', at(1))).rejects.toThrow('connection reset');
+    // h2 is recorded in the lane but nobody has it; the next claim reconciles first and then takes it.
+    const [again] = await claim(store, ['h2'], 'worker-1', at(2));
+    expect(again).toMatchObject({ handler: 'h2', attempt: 1 });
+  });
+
+  it('runs the claims of one owner one at a time', async () => {
+    const { store, lossy } = await createLossyStore();
+    await append(
+      store,
+      Array.from({ length: 6 }, () => ({ event: createEnvelope(), handlers: ['h'] })),
+    );
+    const batches = await Promise.all([
+      claim(store, ['h'], 'worker-1', at(0), 2),
+      claim(store, ['h'], 'worker-1', at(0), 2),
+      claim(store, ['h'], 'worker-1', at(0), 2),
+    ]);
+    expect(lossy.maximumRunning).toBe(1);
+    const ids = batches.flat().map((delivery) => delivery.deliveryId);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toHaveLength(6);
+  });
+
+  it('ignores a claim statement that reaches the server after its caller gave up and the owner reconciled', async () => {
+    const { store, lossy } = await createLossyStore();
+    await append(store, [{ event: createEnvelope({ key: 'one-lane' }), handlers: ['h1', 'h2'] }]);
+    expect(await claim(store, ['h1'], 'worker-1')).toHaveLength(1);
+    lossy.delayNext = true;
+    await expect(claim(store, ['h2'], 'worker-1', at(1))).rejects.toThrow('query timeout');
+    // The abandoned statement arrives only now, after the reconciliation of the owner.
+    await lossy.late!();
+    const [again] = await claim(store, ['h2'], 'worker-1', at(2));
+    expect(again).toMatchObject({ handler: 'h2', attempt: 1 });
+  });
+
+  it('ignores the lane a free-lane claim takes when it reaches the server after its caller gave up', async () => {
+    const { store, lossy } = await createLossyStore();
+    await append(store, [{ event: createEnvelope({ key: 'one-lane' }), handlers: ['h'] }]);
+    lossy.delayTransaction = true;
+    await expect(claim(store, ['h'], 'worker-1')).rejects.toThrow('query timeout');
+    // The abandoned transaction takes the lane and records the delivery after the owner reconciled.
+    await lossy.late!();
+    // Nobody was given that delivery: the owner's next claim takes the lane over, like one of a crashed worker.
+    const [again] = await claim(store, ['h'], 'worker-1', at(1));
+    expect(again).toMatchObject({ handler: 'h', attempt: 2 });
+    expect(await claim(store, ['h'], 'worker-1', at(2))).toEqual([]);
+    expect(await store.complete(again!, at(3))).toBe(true);
+  });
+
+  it('charges the attempt of a delivery its previous incarnation held when an owner restarts under the same name', async () => {
+    const schema = uniqueSchema();
+    const first = new PostgresEventStore({ executor: new PgExecutor(database.pool), schema });
+    await first.setup();
+    await append(first, [{ event: createEnvelope({ key: 'one-lane' }), handlers: ['h'] }]);
+    const [poison] = await claim(first, ['h'], 'worker-1');
+    expect(poison).toMatchObject({ attempt: 1 });
+    // The process crashed with the delivery running and came back before its lease expired.
+    const second = new PostgresEventStore({ executor: new PgExecutor(database.pool), schema });
+    const [again] = await claim(second, ['h'], 'worker-1', at(1));
+    expect(again).toMatchObject({ deliveryId: poison!.deliveryId, attempt: 2 });
+    expect(await first.complete(poison!, at(2))).toBe(false);
+  });
+
+  it('holds a taken-over lane for its new owner whatever claim floor the previous owner left', async () => {
+    const schema = uniqueSchema();
+    const store = new PostgresEventStore({ executor: new PgExecutor(database.pool), schema });
+    await store.setup();
+    await append(store, [{ event: createEnvelope({ key: 'one-lane' }), handlers: ['h'] }]);
+    const [first] = await claim(store, ['h'], 'worker-1');
+    await database.pool.query(`UPDATE "${schema}".relaybus_lanes SET claim_floor = $1`, [
+      String(Date.now() * 2),
+    ]);
+    // worker-1 dies; worker-2 takes the lane after its lease expired.
+    const [taken] = await claim(store, ['h'], 'worker-2', at(LEASE_MS + 1));
+    expect(taken).toMatchObject({ deliveryId: first!.deliveryId, attempt: 2 });
+    await append(store, [{ event: createEnvelope({ key: 'one-lane' }), handlers: ['g'] }]);
+    const [other] = await claim(store, ['g'], 'worker-2', at(LEASE_MS + 2));
+    expect(other).toMatchObject({ handler: 'g', attempt: 1 });
+  });
+
+  it('does not retake a live lane of a newer generation when a free-lane claim arrives late', async () => {
+    const { store, lossy } = await createLossyStore();
+    await append(store, [{ event: createEnvelope({ key: 'one-lane' }), handlers: ['h'] }]);
+    lossy.delayTransaction = true;
+    await expect(claim(store, ['h'], 'worker-1')).rejects.toThrow('query timeout');
+    // The owner reconciled and claims again; the abandoned transaction arrives while that delivery runs.
+    const [running] = await claim(store, ['h'], 'worker-1', at(1));
+    expect(running).toBeDefined();
+    await lossy.late!();
+    expect(await store.extendLease(running!, at(LEASE_MS * 2))).toBe(true);
+    expect(await claim(store, ['h'], 'worker-2', at(2))).toEqual([]);
+    expect(await store.complete(running!, at(3))).toBe(true);
+  });
+
+  it('does not claim again while the reconciliation of a failed claim still fails', async () => {
+    const { store, lossy } = await createLossyStore();
+    await append(store, [{ event: createEnvelope({ key: 'one-lane' }), handlers: ['h1', 'h2'] }]);
+    const [running] = await claim(store, ['h1'], 'worker-1');
+    lossy.loseNext = 'held AS MATERIALIZED';
+    lossy.failReconcile = new Error('still down');
+    await expect(claim(store, ['h2'], 'worker-1', at(1))).rejects.toThrow('connection reset');
+    // The generation moved on but the lanes were not reconciled: claiming now would treat the live lane as foreign.
+    await expect(claim(store, ['h2'], 'worker-1', at(2))).rejects.toThrow('no claim is made');
+    expect(await store.complete(running!, at(3))).toBe(true);
+    lossy.failReconcile = undefined;
+    const [next] = await claim(store, ['h2'], 'worker-1', at(4));
+    expect(next).toMatchObject({ handler: 'h2', attempt: 1 });
+  });
+
+  it('forgets a claim completed in the caller transaction once the next claim freed its lane', async () => {
+    const { store, lossy } = await createLossyStore();
+    await append(store, [{ event: createEnvelope({ key: 'one-lane' }), handlers: ['h'] }]);
+    const [running] = await claim(store, ['h'], 'worker-1');
+    await store.transaction((transaction) => store.complete(running!, at(1), transaction));
+    // Nothing runs in the lane any more: this claim frees it.
+    expect(await claim(store, ['h'], 'worker-1', at(2))).toEqual([]);
+    lossy.loseNext = 'held AS MATERIALIZED';
+    await append(store, [{ event: createEnvelope({ key: 'two' }), handlers: ['h'] }]);
+    await expect(claim(store, ['h'], 'worker-1', at(3))).rejects.toThrow('connection reset');
+    expect(lossy.reconciled).toEqual([[]]);
+  });
+
+  it('ignores a reconciliation that reaches the server after a newer reconciliation and a new claim', async () => {
+    const { store, lossy } = await createLossyStore();
+    await append(store, [{ event: createEnvelope({ key: 'one-lane' }), handlers: ['h1', 'h2'] }]);
+    const [first] = await claim(store, ['h1'], 'worker-1');
+    expect(first).toBeDefined();
+    lossy.loseNext = 'held AS MATERIALIZED';
+    lossy.delayReconcile = true;
+    await expect(claim(store, ['h2'], 'worker-1', at(1))).rejects.toThrow('connection reset');
+    // The next claim reconciles again, then hands out the delivery the lost claim had recorded.
+    const [second] = await claim(store, ['h2'], 'worker-1', at(2));
+    expect(second).toMatchObject({ handler: 'h2', attempt: 1 });
+    // The first reconciliation arrives only now with its old picture of what was handed out.
+    await lossy.late!();
+    expect(await claim(store, ['h2'], 'worker-1', at(3))).toEqual([]);
+    expect(await store.complete(second!, at(4))).toBe(true);
+  });
+
+  it('gives up a held-lane claim that stays stale and still takes free lanes', async () => {
+    const { store, lossy } = await createLossyStore();
+    await append(store, [{ event: createEnvelope(), handlers: ['h'] }]);
+    lossy.staleForever = true;
+    expect(await claim(store, ['h'], 'worker-1')).toHaveLength(1);
+  });
+});
+
+describe('takeover of a lane that changed while the statement waited', () => {
+  it('charges only the deliveries the locked version of the lane still lists', async () => {
+    const schema = uniqueSchema();
+    const inner = new PgExecutor(database.pool);
+    let gated = false;
+    const executor: PostgresExecutor<PoolClient> = {
+      transaction: (work) => inner.transaction(work),
+      query: (sql, parameters, transaction) =>
+        inner.query(
+          gated && sql.includes('FOR UPDATE OF free SKIP LOCKED')
+            ? // Waits, after the statement took its snapshot and before it locks the lane, for the test.
+              sql
+                .replace(
+                  'WHERE free.lease_expires_at IS NULL',
+                  'WHERE (SELECT pg_advisory_xact_lock_shared(7777) IS NOT NULL) AND (free.lease_expires_at IS NULL',
+                )
+                .replace(
+                  'ORDER BY oldest.available_at, oldest.id',
+                  ') ORDER BY oldest.available_at, oldest.id',
+                )
+            : sql,
+          parameters,
+          transaction,
+        ),
+    };
+    const store = new PostgresEventStore({ executor, schema });
+    await store.setup();
+    await append(store, [{ event: createEnvelope({ key: 'one-lane' }), handlers: ['h'] }]);
+    const [crashed] = await claim(store, ['h'], 'worker-1');
+    const blocker = await database.pool.connect();
+    try {
+      await blocker.query('SELECT pg_advisory_lock(7777)');
+      gated = true;
+      const takeover = claim(store, ['h'], 'worker-2', at(LEASE_MS + 1));
+      for (;;) {
+        const waiting = await database.pool.query(
+          "SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted",
+        );
+        if (waiting.rowCount !== 0) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      // The previous owner records its failed attempt after the takeover statement took its snapshot.
+      expect(await store.reschedule(crashed!, at(0), error, at(LEASE_MS + 1))).toBe(true);
+      await blocker.query('SELECT pg_advisory_unlock(7777)');
+      const [taken] = await takeover;
+      // One attempt failed (charged by the reschedule) and this is the second: it was not charged twice.
+      expect(taken).toMatchObject({ deliveryId: crashed!.deliveryId, attempt: 2 });
+    } finally {
+      blocker.release();
+    }
+  });
+});
+
+describe('interleavings of two statements of one call', () => {
+  async function hookedStore(
+    hook: (sql: string, schema: string) => Promise<void>,
+  ): Promise<{ store: PostgresEventStore; schema: string }> {
+    const schema = uniqueSchema();
+    const inner = new PgExecutor(database.pool);
+    const executor: PostgresExecutor<PoolClient> = {
+      transaction: (work) => inner.transaction(work),
+      query: async (sql, parameters, transaction) => {
+        const rows = await inner.query(sql, parameters, transaction);
+        await hook(sql, schema);
+        return rows;
+      },
+    };
+    const store = new PostgresEventStore({ executor, schema });
+    await store.setup();
+    return { store, schema };
+  }
+
+  it('hands out only the lowest delivery of a key when a dead letter is requeued between the fast and the slow claim', async () => {
+    let requeue: (() => Promise<void>) | undefined;
+    const { store, schema } = await hookedStore(async (sql) => {
+      if (
+        requeue !== undefined &&
+        sql.includes('due_window AS MATERIALIZED') &&
+        !sql.includes('held AS')
+      ) {
+        const run = requeue;
+        requeue = undefined;
+        await run();
+      }
+    });
+    const events = Array.from({ length: 72 }, () => createEnvelope({ key: 'one-key' }));
+    for (const event of events) {
+      await append(store, [{ event, handlers: ['h'] }]);
+    }
+    const [head] = await claim(store, ['h'], 'worker-0', at(0), 1);
+    expect(head!.event.id).toBe(events[0]!.id);
+    expect(await store.bury(head!, error, at(1))).toBe(true);
+    requeue = async () => {
+      await database.pool.query(
+        `UPDATE "${schema}".relaybus_deliveries SET status = 'pending', attempts = 0 WHERE id = $1`,
+        [head!.deliveryId],
+      );
+    };
+    const claimed = await claim(store, ['h'], 'worker-1', at(LEASE_MS + 2), 200);
+    expect(claimed.map((delivery) => delivery.event.id)).toEqual([events[0]!.id]);
+  });
+
+  it('keeps an event whose completion time moved after the purge selected it', async () => {
+    let touch: (() => Promise<void>) | undefined;
+    const { store, schema } = await hookedStore(async (sql) => {
+      if (touch !== undefined && sql.includes('ORDER BY completion.completed_at')) {
+        const run = touch;
+        touch = undefined;
+        await run();
+      }
+    });
+    const event = createEnvelope();
+    await append(store, [{ event, handlers: ['h'] }]);
+    const [delivery] = await claim(store, ['h'], 'worker-1', at(0));
+    expect(await store.complete(delivery!, at(10))).toBe(true);
+    // A newer completion of the same event is recorded after the sweep selected the event.
+    touch = async () => {
+      await database.pool.query(
+        `UPDATE "${schema}".relaybus_event_completions SET completed_at = $1 WHERE event_id = $2`,
+        [at(1_000), event.id],
+      );
+    };
+    expect(await store.purge({ completedBefore: at(100) })).toMatchObject({ deletedEvents: 0 });
+    expect(await store.purge({ completedBefore: at(2_000) })).toMatchObject({ deletedEvents: 1 });
+  });
+
+  it('keeps an event that a purge removed between the insert and the lock of an append', async () => {
+    let purgeEvent: (() => Promise<void>) | undefined;
+    const { store, schema } = await hookedStore(async (sql) => {
+      if (purgeEvent !== undefined && sql.includes('ON CONFLICT (id) DO NOTHING')) {
+        const run = purgeEvent;
+        purgeEvent = undefined;
+        await run();
+      }
+    });
+    const event = createEnvelope();
+    await append(store, [{ event, handlers: [] }]);
+    purgeEvent = async () => {
+      await database.pool.query(`DELETE FROM "${schema}".relaybus_events WHERE id = $1`, [
+        event.id,
+      ]);
+    };
+    const result = await store.transaction((transaction) =>
+      store.append(transaction, [{ event, deliveries: [createDelivery('h')] }], at(1)),
+    );
+    expect(result.appendedDeliveryCount).toBe(1);
+    expect(await store.listDeliveries({ eventId: event.id })).toHaveLength(1);
+  });
+});

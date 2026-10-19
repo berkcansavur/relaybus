@@ -30,6 +30,8 @@ export interface PostgresNames {
   readonly keySequences: string;
   /** Lane lease rows: one per lane, see {@link LANE_COUNT}. */
   readonly lanes: string;
+  /** One row per event that had a delivery complete: when the last one did. Retention of completed work is measured from it. */
+  readonly eventCompletions: string;
   /** Completion history, present only with `completionHistory`. */
   readonly completions: string;
   readonly completionHistory: boolean;
@@ -42,6 +44,7 @@ export interface PostgresNames {
     readonly deliveryCompleted: string;
     readonly deliveryDead: string;
     readonly completionCompleted: string;
+    readonly eventCompletionsCompleted: string;
     /** Indexes of the 0.1.0 schema that the current schema drops. */
     readonly obsolete: readonly string[];
   };
@@ -89,6 +92,7 @@ export function resolvePostgresNames(options: PostgresSchemaOptions = {}): Postg
     deliveries: table('deliveries'),
     keySequences: table('key_sequences'),
     lanes: table('lanes'),
+    eventCompletions: table('event_completions'),
     completions: table('completed_deliveries'),
     completionHistory: options.completionHistory ?? false,
     indexes: {
@@ -99,6 +103,7 @@ export function resolvePostgresNames(options: PostgresSchemaOptions = {}): Postg
       deliveryCompleted: index('deliveries_completed_idx'),
       deliveryDead: index('deliveries_dead_idx'),
       completionCompleted: index('completed_deliveries_completed_idx'),
+      eventCompletionsCompleted: index('event_completions_completed_idx'),
       obsolete: [
         index('deliveries_due_idx'),
         index('deliveries_due_unkeyed_idx'),

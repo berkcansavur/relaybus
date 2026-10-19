@@ -111,6 +111,19 @@ RETURNING id`;
   }
 
   /**
+   * Locks events that were not inserted by the current append, in id order, so
+   * that appends adding handlers to the same event run one after the other.
+   * Parameters: `[eventIdsJson]`. `FOR NO KEY UPDATE` conflicts with itself and
+   * not with the foreign key checks of other inserts.
+   */
+  get lockExistingEvents(): string {
+    return `SELECT id FROM ${this.#names.events}
+WHERE id = ANY (ARRAY(SELECT jsonb_array_elements_text($1::jsonb)))
+ORDER BY id
+FOR NO KEY UPDATE`;
+  }
+
+  /**
    * Parameters: `[deliveriesJson, createdAt, insertedEventIdsJson]`. Key and
    * sequence are copied from the stored event, so a delivery added later to an
    * existing event keeps the event's position in its key and lands in the same
@@ -158,7 +171,11 @@ SELECT id FROM inserted`;
    * First step of a claim, one statement: claims from the lanes this owner
    * already holds and records the batch in those lanes, all atomically, so a
    * backlog that fills the batch costs one round trip. Parameters:
-   * `[now, handlersJson, limit, leaseOwner, leaseExpiresAt]`.
+   * `[now, handlersJson, limit, leaseOwner, leaseExpiresAt, generation]`.
+   * Only lanes whose `claim_floor` is exactly the generation are held: a lane above it was raised by a
+   * reconciliation, so a statement of a claim whose caller gave up (a client timeout does not cancel the
+   * statement on the server) and that reaches the server late records nothing; a lane below it was taken by
+   * such a late statement after the reconciliation, and its listed deliveries were never handed out.
    *
    * The held lanes are locked `FOR NO KEY UPDATE` in lane order (a lane that
    * another transaction of this owner is changing makes the statement wait, a
@@ -167,7 +184,8 @@ SELECT id FROM inserted`;
    * nothing and have no full scan window (so nothing claimable hides in them)
    * are freed. Always returns one row per picked delivery, or one row whose
    * `delivery_id` is null; `window_saturated` says that some lane filled its
-   * scan window, and `held_lanes` (JSON text) lists the lanes still held.
+   * scan window, and `held_lanes` (JSON text) lists the lanes still held and `examined_lanes` every lane the statement looked at,
+   * freed ones included.
    */
   get claimHeld(): string {
     const deliveries = this.#names.deliveries;
@@ -176,21 +194,33 @@ SELECT id FROM inserted`;
   SELECT lane.lane, lane.epoch, lane.in_flight
   FROM ${lanes} AS lane
   WHERE lane.lease_owner = $4::text AND lane.lease_expires_at > $1::timestamptz
+    AND lane.claim_floor = $6::bigint
   ORDER BY lane.lane
   FOR NO KEY UPDATE
-), ${this.#scopeAndRunning('SELECT held.lane, held.epoch, held.in_flight FROM held')},
+), stale AS (
+  -- A claim that waited for a lane lock sees the new lane row but reads deliveries with the snapshot it took
+  -- before the wait: whatever changed the lane meanwhile (a reschedule, a release) may also have changed
+  -- deliveries it cannot see. The statement then does nothing and reports it, and the caller runs it again.
+  SELECT EXISTS (
+    SELECT 1 FROM held
+    JOIN ${lanes} AS before ON before.lane = held.lane
+    WHERE before.epoch <> held.epoch OR before.in_flight IS DISTINCT FROM held.in_flight
+  ) AS value
+), ${this.#scopeAndRunning('SELECT held.lane, held.epoch, held.in_flight FROM held WHERE NOT (SELECT value FROM stale)')},
 ${this.#fastWindow()}
 ), picked_rows AS MATERIALIZED (
   ${this.#pickedRowsSelect()}
 ), by_lane AS (
   SELECT picked_rows.lane, array_agg(picked_rows.delivery_id) AS ids FROM picked_rows GROUP BY picked_rows.lane
 ), still_running AS (
-  SELECT lane.lane, array_agg(delivery.id) AS ids
+  -- The retained ids come from the locked \`held\` rows, not from the lane table: a claim that waited for the lock
+  -- must see the in-flight list the claim before it recorded, which the statement snapshot may not.
+  SELECT held.lane, array_agg(delivery.id) AS ids
   FROM by_lane
-  JOIN ${lanes} AS lane ON lane.lane = by_lane.lane
-  CROSS JOIN LATERAL unnest(lane.in_flight) AS flying (id)
+  JOIN held ON held.lane = by_lane.lane
+  CROSS JOIN LATERAL unnest(held.in_flight) AS flying (id)
   JOIN ${deliveries} AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
-  GROUP BY lane.lane
+  GROUP BY held.lane
 ), extended AS (
   UPDATE ${lanes} AS lane
   SET in_flight = COALESCE(still_running.ids, '{}') || by_lane.ids,
@@ -208,11 +238,21 @@ ${this.#fastWindow()}
   WHERE lane.lane = held.lane
     AND lane.lane NOT IN (SELECT lane FROM by_lane)
     AND lane.lane NOT IN (SELECT lane FROM saturated_lanes)
+    AND (SELECT count(*) FROM due_window) < ${CLAIM_SCAN_WINDOW}
+    AND NOT (SELECT value FROM stale)
     AND ${this.#noRunningDelivery('lane')}
   RETURNING lane.lane
 )
-SELECT EXISTS (SELECT 1 FROM saturated_lanes) AS window_saturated,
+SELECT (EXISTS (SELECT 1 FROM saturated_lanes) OR (SELECT count(*) FROM due_window) >= ${CLAIM_SCAN_WINDOW}) AS window_saturated,
+  (SELECT value FROM stale) AS stale,
+  (
+    SELECT COALESCE(jsonb_agg(delivery.id), '[]'::jsonb)
+    FROM held
+    CROSS JOIN LATERAL unnest(held.in_flight) AS flying (id)
+    JOIN ${deliveries} AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+  )::text AS running_ids,
   (SELECT COALESCE(jsonb_agg(held.lane), '[]'::jsonb) FROM held WHERE held.lane NOT IN (SELECT lane FROM freed))::text AS held_lanes,
+  (SELECT COALESCE(jsonb_agg(held.lane), '[]'::jsonb) FROM held)::text AS examined_lanes,
   picked.*
 FROM (SELECT 1) AS anchor
 LEFT JOIN picked_rows AS picked ON true
@@ -221,13 +261,14 @@ ORDER BY picked.due_at, picked.delivery_id`;
 
   /**
    * Locks the lanes this owner already holds under a live lease and returns
-   * them with their epochs. Parameters: `[leaseOwner, now]`. Rows are locked in
+   * them with their epochs. Parameters: `[leaseOwner, now, generation]`; lanes with another `claim_floor`
+   * belong to a claim of another generation and are left alone. Rows are locked in
    * lane order, the order every statement that locks several lanes uses.
    */
   get lockHeldLanes(): string {
     return `SELECT lane::int AS lane, epoch::text AS epoch
 FROM ${this.#names.lanes}
-WHERE lease_owner = $1::text AND lease_expires_at > $2::timestamptz
+WHERE lease_owner = $1::text AND lease_expires_at > $2::timestamptz AND claim_floor = $3::bigint
 ORDER BY lane
 FOR NO KEY UPDATE`;
   }
@@ -235,7 +276,11 @@ FOR NO KEY UPDATE`;
   /**
    * Takes up to `$3` free lanes (no lease, or an expired one) that have a due
    * delivery of the requested handlers, the ones with the oldest due delivery
-   * first. Parameters: `[now, handlersJson, laneCount, leaseOwner, leaseExpiresAt]`.
+   * first. Parameters: `[now, handlersJson, laneCount, leaseOwner, leaseExpiresAt, generation]`.
+   * The lane gets the owner's `generation` as its `claim_floor`. A lane the owner itself holds under a live
+   * lease with a lower floor was taken by a claim statement that reached the server after its caller gave up
+   * and the owner reconciled (or by an earlier incarnation of the same owner): it is taken over like the lane of a
+   * crashed worker, so its listed deliveries are charged an attempt.
    *
    * A taken lane gets a new epoch, which fences everything the previous owner
    * still holds. Deliveries the previous owner had in flight are the ones whose
@@ -248,7 +293,9 @@ FOR NO KEY UPDATE`;
     const deliveries = this.#names.deliveries;
     const lanes = this.#names.lanes;
     return `WITH picked AS (
-  SELECT free.lane
+  -- in_flight is read here, from the locked version of the lane: a settlement that committed after the
+  -- statement took its snapshot has taken its delivery out of the list already and must not be charged again.
+  SELECT free.lane, free.in_flight
   FROM ${lanes} AS free
   CROSS JOIN LATERAL (
     SELECT delivery.available_at, delivery.id
@@ -259,19 +306,21 @@ FOR NO KEY UPDATE`;
     LIMIT 1
   ) AS oldest
   WHERE free.lease_expires_at IS NULL OR free.lease_expires_at <= $1::timestamptz
+    OR (free.lease_owner = $4::text AND free.claim_floor < $6::bigint)
   ORDER BY oldest.available_at, oldest.id
   LIMIT $3::int
   FOR UPDATE OF free SKIP LOCKED
 ), charged AS (
-  UPDATE ${deliveries} AS delivery SET attempts = delivery.attempts + 1
+  UPDATE ${deliveries} AS delivery SET attempts = delivery.attempts + 1, claims = delivery.claims + 1
   FROM (
-    SELECT unnest(lane.in_flight) AS id FROM ${lanes} AS lane JOIN picked ON picked.lane = lane.lane
+    SELECT unnest(picked.in_flight) AS id FROM picked
   ) AS lost
   WHERE delivery.id = lost.id AND delivery.status = 'pending'
   RETURNING delivery.id
 ), taken AS (
   UPDATE ${lanes} AS lane
-  SET epoch = lane.epoch + 1, lease_owner = $4::text, lease_expires_at = $5::timestamptz, in_flight = '{}'
+  SET epoch = lane.epoch + 1, lease_owner = $4::text, lease_expires_at = $5::timestamptz, in_flight = '{}',
+      claim_floor = $6::bigint
   FROM picked WHERE lane.lane = picked.lane
   RETURNING lane.lane, lane.epoch
 )
@@ -456,7 +505,7 @@ ORDER BY picked.due_at, picked.delivery_id`;
   /** The picked deliveries joined with the lane epoch and their event, as the claim result columns. */
   #pickedRowsSelect(): string {
     return `SELECT candidates.available_at AS due_at, delivery.id AS delivery_id, delivery.lane::int AS lane,
-    scope.epoch::text AS epoch, delivery.handler, (delivery.attempts + 1)::int AS attempt,
+    scope.epoch::text AS epoch, delivery.claims AS claims, delivery.handler, delivery.key AS delivery_key, delivery.sequence::text AS sequence, (delivery.attempts + 1)::int AS attempt,
     ${eventColumns('event')}
   FROM candidates
   JOIN scope ON scope.lane = candidates.lane
@@ -516,6 +565,27 @@ SELECT (SELECT count(*) FROM extended)::int AS extended, (SELECT count(*) FROM f
   }
 
   /**
+   * Keeps in the in-flight lists of the lanes `$1` holds only the claims in `$2`
+   * (`[{ id, lane, epoch, claims }]`, the ones this store handed out and nobody
+   * settled yet) and takes every other delivery out. That is a batch a claim
+   * recorded but whose answer never arrived: nothing runs it and the lane lease,
+   * renewed by the owner's other deliveries, would keep it away from everybody for
+   * ever. A claim matches only with the lane epoch and the delivery generation it was
+   * handed out with. Parameters: `[leaseOwner, handedOutJson, generation]`; a lane whose `claim_floor` is above
+   * the generation was reconciled by a newer call, so an older (late) reconciliation leaves it alone.
+   */
+  get reconcileClaims(): string {
+    const deliveries = this.#names.deliveries;
+    const handedOut = `jsonb_to_recordset($2::jsonb) AS handed (id text, lane smallint, epoch bigint, claims int)`;
+    const kept = `SELECT 1 FROM ${handedOut} JOIN ${deliveries} AS delivery ON delivery.id = handed.id
+      WHERE handed.id = flying.id AND handed.lane = lane.lane AND handed.epoch = lane.epoch AND delivery.claims = handed.claims`;
+    return `UPDATE ${this.#names.lanes} AS lane
+SET in_flight = ARRAY(SELECT flying.id FROM unnest(lane.in_flight) AS flying (id) WHERE EXISTS (${kept})),
+    claim_floor = $3::bigint
+WHERE lane.lease_owner = $1::text AND lane.claim_floor <= $3::bigint`;
+  }
+
+  /**
    * Frees every lane `$1` holds that has no running delivery. Parameters:
    * `[leaseOwner]`.
    */
@@ -527,19 +597,25 @@ WHERE lane.lease_owner = $1::text AND ${this.#noRunningDelivery('lane')}`;
 
   /**
    * Extends the lease of the lane a running delivery belongs to; the lane lease
-   * never shrinks. Parameters: `[deliveryId, lane, epoch, leaseExpiresAt]`.
+   * never shrinks. Parameters: `[deliveryId, lane, epoch, claims, leaseExpiresAt]`.
    */
   get extendLease(): string {
     return countChanged(`UPDATE ${this.#names.lanes} AS lane
-SET lease_expires_at = GREATEST(lane.lease_expires_at, $4::timestamptz)
+SET lease_expires_at = GREATEST(lane.lease_expires_at, $5::timestamptz)
 WHERE lane.lane = $2::smallint AND lane.epoch = $3::bigint AND $1::text = ANY (lane.in_flight)
-  AND EXISTS (SELECT 1 FROM ${this.#names.deliveries} AS delivery WHERE delivery.id = $1::text AND delivery.status = 'pending')`);
+  AND EXISTS (
+    SELECT 1 FROM ${this.#names.deliveries} AS delivery
+    WHERE delivery.id = $1::text AND delivery.status = 'pending' AND delivery.claims = $4::int
+  )`);
   }
 
   /**
    * Deletes the running deliveries whose lane lease is still the one they were
-   * claimed under. Parameters: `[leasesJson]`, plus `now` when a completion history is kept, with
-   * `leasesJson = [{ id, lane, epoch }]`. Returns the ids that were completed.
+   * claimed under. Parameters: `[leasesJson, now]` with
+   * `leasesJson = [{ ord, id, lane, epoch, claims }]`. Returns the `ord` of every lease that was completed, so
+   * results are matched to leases and not to delivery ids. A delivery is only deleted by the claim that
+   * is still its current one (`claims`), which makes a stale lease harmless even when the same owner re-claimed
+   * the delivery in the same lane epoch. The event gets a completion time for retention.
    *
    * The lane rows are locked `FOR KEY SHARE` first, in lane order, and the lock
    * is held until the surrounding transaction ends. A claimer that takes the
@@ -556,8 +632,8 @@ WHERE lane.lane = $2::smallint AND lane.epoch = $3::bigint AND $1::text = ANY (l
     const deliveries = this.#names.deliveries;
     const history = this.#names.completionHistory;
     return `WITH leases AS (
-  SELECT lease.id, lease.lane, lease.epoch
-  FROM jsonb_to_recordset($1::jsonb) AS lease (id text, lane smallint, epoch bigint)
+  SELECT lease.ord, lease.id, lease.lane, lease.epoch, lease.claims
+  FROM jsonb_to_recordset($1::jsonb) AS lease (ord int, id text, lane smallint, epoch bigint, claims int)
 ), fence AS MATERIALIZED (
   SELECT lane.lane, lane.epoch, lane.in_flight
   FROM ${this.#names.lanes} AS lane
@@ -568,8 +644,13 @@ WHERE lane.lane = $2::smallint AND lane.epoch = $3::bigint AND $1::text = ANY (l
   DELETE FROM ${deliveries} AS delivery
   USING leases JOIN fence ON fence.lane = leases.lane AND fence.epoch = leases.epoch
   WHERE delivery.id = leases.id AND delivery.lane = leases.lane AND delivery.status = 'pending'
-    AND leases.id = ANY (fence.in_flight)
-  RETURNING delivery.id, delivery.event_id, delivery.handler, delivery.attempts, delivery.available_at, delivery.created_at
+    AND delivery.claims = leases.claims AND leases.id = ANY (fence.in_flight)
+  RETURNING leases.ord, delivery.id, delivery.event_id, delivery.handler, delivery.attempts, delivery.available_at, delivery.created_at
+), stamped AS (
+  INSERT INTO ${this.#names.eventCompletions} (event_id, completed_at)
+  SELECT DISTINCT completed.event_id, $2::timestamptz FROM completed
+  ON CONFLICT (event_id) DO UPDATE SET completed_at = GREATEST(${this.#names.eventCompletions}.completed_at, EXCLUDED.completed_at)
+  RETURNING event_id
 )${
       history
         ? `, archived AS (
@@ -579,42 +660,44 @@ WHERE lane.lane = $2::smallint AND lane.epoch = $3::bigint AND $1::text = ANY (l
 )`
         : ''
     }
-SELECT id FROM completed`;
+SELECT ord FROM completed`;
   }
 
   /**
    * Returns a running delivery to pending, due at `availableAt`, and takes it
    * out of the lane's in-flight list. Parameters:
-   * `[deliveryId, lane, epoch, availableAt, errorJson, now]`. The attempt that
+   * `[deliveryId, lane, epoch, claims, availableAt, errorJson, now]`. The attempt that
    * just ended is counted.
    */
   get reschedule(): string {
     return this.#leaveFlight(
-      `SET available_at = $4::timestamptz, last_error = $5::jsonb, attempts = delivery.attempts + 1, updated_at = $6::timestamptz`,
+      `SET available_at = $5::timestamptz, last_error = $6::jsonb, attempts = delivery.attempts + 1, claims = delivery.claims + 1, updated_at = $7::timestamptz`,
     );
   }
 
-  /** Parameters: `[deliveryId, lane, epoch, errorJson, now]`. The attempt that just ended is counted. */
+  /** Parameters: `[deliveryId, lane, epoch, claims, errorJson, now]`. The attempt that just ended is counted. */
   get bury(): string {
     return this.#leaveFlight(
-      `SET status = 'dead', last_error = $4::jsonb, attempts = delivery.attempts + 1, updated_at = $5::timestamptz`,
+      `SET status = 'dead', last_error = $5::jsonb, attempts = delivery.attempts + 1, claims = delivery.claims + 1, updated_at = $6::timestamptz`,
     );
   }
 
   /**
    * Gives a running delivery back without spending its attempt (an attempt is
    * only recorded when it ends in failure or a lost lease): pending, due `now`.
-   * Parameters: `[deliveryId, lane, epoch, now]`.
+   * Parameters: `[deliveryId, lane, epoch, claims, now]`.
    */
   get release(): string {
-    return this.#leaveFlight(`SET available_at = $4::timestamptz, updated_at = $4::timestamptz`);
+    return this.#leaveFlight(
+      `SET available_at = $5::timestamptz, claims = delivery.claims + 1, updated_at = $5::timestamptz`,
+    );
   }
 
   /**
    * Applies `assignments` to a running delivery and removes it from its lane's
    * in-flight list, if the lane still has the caller's epoch. The lane row is
    * locked first (`FOR NO KEY UPDATE`, which conflicts with a takeover's `FOR UPDATE`), so a takeover cannot interleave. Parameters
-   * `$1`..`$3` are always `[deliveryId, lane, epoch]`.
+   * `$1`..`$4` are always `[deliveryId, lane, epoch, claims]`; ending a claim bumps `claims`.
    */
   #leaveFlight(assignments: string): string {
     const lanes = this.#names.lanes;
@@ -626,6 +709,7 @@ SELECT id FROM completed`;
   UPDATE ${this.#names.deliveries} AS delivery ${assignments}
   FROM fence
   WHERE delivery.id = $1::text AND delivery.lane = fence.lane AND delivery.status = 'pending'
+    AND delivery.claims = $4::int
   RETURNING delivery.id
 ), trimmed AS (
   UPDATE ${lanes} AS lane SET in_flight = array_remove(lane.in_flight, $1::text)
@@ -799,14 +883,32 @@ JOIN ${this.#names.deliveries} AS delivery ON delivery.id = flying.id AND delive
 
   /**
    * Selects and locks one bounded batch of events created before the cutoff
-   * that no delivery references. Parameters: `[cutoff, batchSize]`. The ids go
-   * through {@link deleteOrphanEvents}, which re-checks under a fresh snapshot.
+   * that no delivery references and that never had a delivery complete (those
+   * are measured from their completion, see {@link lockCompletedOrphanEventsBatch}).
+   * Parameters: `[cutoff, batchSize]`. The ids go through
+   * {@link deleteOrphanEventsWithoutCompletion} or {@link deleteExpiredCompletedOrphanEvents}, which re-check under a fresh snapshot.
    */
   get lockOrphanEventsBatch(): string {
     return `SELECT event.id FROM ${this.#names.events} AS event
 WHERE event.created_at < $1::timestamptz
   AND ${this.#unreferenced('event')}
+  AND NOT EXISTS (SELECT 1 FROM ${this.#names.eventCompletions} AS completion WHERE completion.event_id = event.id)
 ORDER BY event.created_at, event.id
+LIMIT $2::int
+FOR UPDATE OF event SKIP LOCKED`;
+  }
+
+  /**
+   * Like {@link lockOrphanEventsBatch} for events that had a delivery complete:
+   * they go once their last completion is older than the cutoff, however old the
+   * event itself is. Parameters: `[cutoff, batchSize]`.
+   */
+  get lockCompletedOrphanEventsBatch(): string {
+    return `SELECT event.id FROM ${this.#names.events} AS event
+JOIN ${this.#names.eventCompletions} AS completion ON completion.event_id = event.id
+WHERE completion.completed_at < $1::timestamptz
+  AND ${this.#unreferenced('event')}
+ORDER BY completion.completed_at, event.id
 LIMIT $2::int
 FOR UPDATE OF event SKIP LOCKED`;
   }
@@ -823,17 +925,33 @@ FOR UPDATE SKIP LOCKED`;
   }
 
   /**
-   * Deletes locked events that no delivery references. It must run as a
-   * statement of its own after {@link lockEvents}: it then takes a fresh
-   * snapshot that includes every delivery committed before the lock was
-   * granted, so an event that just gained a delivery is never cascaded away.
-   * Parameters: `[eventIdsJson]`.
+   * Deletes events that no delivery references and whose last completion is older than
+   * `$2`, checked again under the fresh snapshot of this statement: a completion recorded
+   * after the sweep selected the event moves its time and keeps the event. Parameters:
+   * `[eventIdsJson, cutoff]`.
    */
-  get deleteOrphanEvents(): string {
-    const events = this.#names.events;
-    return countChanged(`DELETE FROM ${events} AS event
+  get deleteExpiredCompletedOrphanEvents(): string {
+    return countChanged(`DELETE FROM ${this.#names.events} AS event
 WHERE event.id = ANY (ARRAY(SELECT jsonb_array_elements_text($1::jsonb)))
-  AND ${this.#unreferenced('event')}`);
+  AND ${this.#unreferenced('event')}
+  AND EXISTS (
+    SELECT 1 FROM ${this.#names.eventCompletions} AS completion
+    WHERE completion.event_id = event.id AND completion.completed_at < $2::timestamptz
+  )`);
+  }
+
+  /**
+   * Deletes locked events that no delivery references and that never had a delivery complete.
+   * It must run as a statement of its own after {@link lockEvents}: it then takes a fresh
+   * snapshot that includes every delivery committed before the lock was granted, so an event
+   * that just gained a delivery is never cascaded away. Keeps events that had a delivery complete:
+   * deleting dead letters must not shorten the retention of completed work.
+   */
+  get deleteOrphanEventsWithoutCompletion(): string {
+    return countChanged(`DELETE FROM ${this.#names.events} AS event
+WHERE event.id = ANY (ARRAY(SELECT jsonb_array_elements_text($1::jsonb)))
+  AND ${this.#unreferenced('event')}
+  AND NOT EXISTS (SELECT 1 FROM ${this.#names.eventCompletions} AS completion WHERE completion.event_id = event.id)`);
   }
 
   /** True when no delivery and no completion history record references the event. */

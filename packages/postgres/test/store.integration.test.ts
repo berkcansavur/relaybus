@@ -61,6 +61,7 @@ describe('setup', () => {
     }
     expect(await tableNames(schema)).toEqual([
       'bus_deliveries',
+      'bus_event_completions',
       'bus_events',
       'bus_key_sequences',
       'bus_lanes',

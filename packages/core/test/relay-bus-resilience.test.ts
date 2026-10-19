@@ -539,6 +539,12 @@ describe('transactional leases', () => {
     await bus.runOnce();
     expect((signal!.reason as Error).message).toMatch(/expired/);
     expect(observer.onLeaseLost).toHaveBeenCalledTimes(1);
-    expect((await bus.listDeliveries())[0]!.status).toBe('processing');
+    // The lease ran out locally while the store still lists the delivery as ours: the attempt counts as
+    // failed and the delivery is rescheduled instead of staying in flight until some other worker takes the lane over.
+    expect((await bus.listDeliveries())[0]).toMatchObject({
+      status: 'pending',
+      attempts: 1,
+      lastError: { name: 'LeaseLostError' },
+    });
   });
 });

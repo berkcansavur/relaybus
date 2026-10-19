@@ -136,6 +136,8 @@ describe('requeued dead letters', () => {
     expect(await deliveries.find({ eventId: second.id }).next()).toEqual({
       ...before,
       attempts: 1,
+      claims: 1,
+      lostAt: expect.any(Number),
     });
     expect(await store.complete(crashed!, at(4 + LEASE_MS))).toBe(false);
     const [requeued] = await claimAt(store, 5 + LEASE_MS);

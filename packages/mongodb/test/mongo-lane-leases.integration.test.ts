@@ -151,7 +151,7 @@ describe('claiming does not write delivery documents', () => {
     expect(await lanes.find().sort({ _id: 1 }).toArray()).toEqual(lanesAfterClaim);
   });
 
-  it('completes a batch of leases from many lanes with three commands and no transaction', async () => {
+  it('completes a batch of leases from many lanes with four commands and no transaction', async () => {
     const { store } = await createStore();
     await append(
       store,
@@ -166,8 +166,13 @@ describe('claiming does not write delivery documents', () => {
       outcome = await store.completeMany(claimed, at(1));
     });
     expect(outcome).toEqual(claimed.map(() => true));
-    // Read the deliveries, read the lanes, delete: whatever the batch size.
-    expect(commands.map((command) => command.commandName)).toEqual(['find', 'find', 'delete']);
+    // Read the deliveries, read the lanes, record the events' completion, delete: whatever the batch size.
+    expect(commands.map((command) => command.commandName)).toEqual([
+      'find',
+      'find',
+      'update',
+      'delete',
+    ]);
   });
 
   it('completes a batch with its history records in one transaction with a fixed number of commands', async () => {
@@ -189,8 +194,9 @@ describe('claiming does not write delivery documents', () => {
     expect(names.filter((name) => name === 'commitTransaction')).toHaveLength(1);
     expect(names.filter((name) => name === 'delete')).toHaveLength(1);
     expect(names.filter((name) => name === 'insert')).toHaveLength(1);
-    expect(names.filter((name) => name === 'update')).toHaveLength(0);
-    expect(names.length).toBeLessThanOrEqual(6);
+    // The one update records the events' completion, outside the transaction.
+    expect(names.filter((name) => name === 'update')).toHaveLength(1);
+    expect(names.length).toBeLessThanOrEqual(7);
   });
 });
 
@@ -458,11 +464,16 @@ describe('failures during a claim', () => {
 
   it('charges the lost attempt exactly once when the claim fails right after taking the lane', async () => {
     const { store, deliveries, lanes, head, follower } = await headAndFollower();
-    failOnce('updateMany', '_deliveries');
+    // The charge of the lost attempts is one bulk write on the deliveries.
+    failOnce('bulkWrite', '_deliveries');
     await expect(claim(store, ['h'], 'worker-2', at(LEASE_MS))).rejects.toBe(failure);
     vi.restoreAllMocks();
     const lane = await lanes.findOne({ _id: laneOf('k', 'unused') });
-    expect(lane).toMatchObject({ owner: 'worker-2', inFlight: [], lost: [head.deliveryId] });
+    expect(lane).toMatchObject({
+      owner: 'worker-2',
+      inFlight: [],
+      lost: [{ id: head.deliveryId, epoch: Number(head.leaseToken.split(':')[1]) }],
+    });
     expect(await deliveries.findOne({ _id: head.deliveryId })).toMatchObject({ attempts: 0 });
     expect(await store.statistics(at(LEASE_MS))).toMatchObject({ processing: 0, pending: 2 });
 
@@ -747,14 +758,16 @@ describe('completion without a transaction', () => {
     expect(await peer.complete(taken[0]!, at(LEASE_MS + 2))).toBe(true);
   });
 
-  it('deletes nothing of a lane taken over after it was read, and still completes the other leases', async () => {
+  it('deletes nothing of a lane taken over after it was read, and reports no success it cannot prove', async () => {
     const { store, database, deliveries, early, late } = await twoLeases();
     const peer = new MongoEventStore({ client, database });
     let taken: ClaimedDelivery[] = [];
     before('deleteMany', '_deliveries', async () => {
       taken = await claim(peer, ['h'], 'worker-2', at(LEASE_MS));
     });
-    expect(await store.completeMany([early, late], at(LEASE_MS + 1))).toEqual([false, true]);
+    // The other lease's delivery is deleted, but one delete of the batch matched nothing, and
+    // which one cannot be told apart from a delivery the new claim completed: none is reported.
+    expect(await store.completeMany([early, late], at(LEASE_MS + 1))).toEqual([false, false]);
     vi.restoreAllMocks();
     expect(taken.map((delivery) => [delivery.deliveryId, delivery.attempt])).toEqual([
       [early.deliveryId, 2],
@@ -790,14 +803,19 @@ describe('unissued lease tokens', () => {
     },
   );
 
-  it('refuses a well-formed token of another epoch or another lane', async () => {
+  it('refuses a well-formed token of another epoch, another lane or another claim', async () => {
     const { store } = await createStore();
     await append(store, [{ event: createEnvelope(), handlers: ['h'] }]);
     const [real] = await claim(store, ['h'], 'worker-1');
-    const [lane, epoch] = real!.leaseToken.split(':').map(Number) as [number, number];
+    const [lane, epoch, claims] = real!.leaseToken.split(':').map(Number) as [
+      number,
+      number,
+      number,
+    ];
     const forged = [
-      { deliveryId: real!.deliveryId, leaseToken: `${lane}:${epoch + 1}` },
-      { deliveryId: real!.deliveryId, leaseToken: `${(lane + 1) % LANE_COUNT}:${epoch}` },
+      { deliveryId: real!.deliveryId, leaseToken: `${lane}:${epoch + 1}:${claims}` },
+      { deliveryId: real!.deliveryId, leaseToken: `${(lane + 1) % LANE_COUNT}:${epoch}:${claims}` },
+      { deliveryId: real!.deliveryId, leaseToken: `${lane}:${epoch}:${claims + 1}` },
     ];
     for (const lease of forged) {
       expect(await store.extendLease(lease, at(LEASE_MS * 2), at(1))).toBe(false);
@@ -805,7 +823,12 @@ describe('unissued lease tokens', () => {
       expect(await store.bury(lease, error, at(1))).toBe(false);
       expect(await store.release(lease, at(1))).toBe(false);
     }
-    expect(await store.completeMany([...forged, real!], at(1))).toEqual([false, false, true]);
+    expect(await store.completeMany([...forged, real!], at(1))).toEqual([
+      false,
+      false,
+      false,
+      true,
+    ]);
   });
 });
 
@@ -1036,6 +1059,13 @@ describe('purge without a completion history', () => {
   });
 });
 
+function bound(target: object, member: string | symbol): unknown {
+  const value: unknown = Reflect.get(target, member, target);
+  return typeof value === 'function'
+    ? (value as (...parameters: unknown[]) => unknown).bind(target)
+    : value;
+}
+
 describe('upgrade from 0.1.0', () => {
   const LEGACY_INDEXES = [
     { key: { eventId: 1, handler: 1 }, name: 'event_handler', unique: true },
@@ -1211,6 +1241,68 @@ describe('upgrade from 0.1.0', () => {
     const purged = await store.purge({ completedBefore: at(LEASE_MS * 3) });
     expect(purged.deletedDeliveries).toBe(1);
     expect(await events.findOne({ _id: silent.id })).toBeNull();
+  });
+
+  it('does not overwrite the handlers another process recorded while this one converted the same events', async () => {
+    const database = await createLegacyDatabase();
+    const { deliveries, events } = collections(database);
+    const event = createEnvelope();
+    await events.insertOne(legacyEvent(event, null));
+    await deliveries.insertOne({
+      _id: createUuidV7(),
+      eventId: event.id,
+      eventType: event.type,
+      handler: 'h',
+      status: 'completed',
+      attempts: 1,
+      availableAt: at(0),
+      createdAt: at(-1),
+      updatedAt: at(-1),
+      completedAt: at(1),
+    });
+    // A slower upgrader: another process finishes the conversion and subscribes a new handler between this
+    // one reading the events and writing them.
+    let faster = true;
+    const racing = new Proxy(client, {
+      get: (target, property) =>
+        property === 'db'
+          ? (name?: string) =>
+              new Proxy(target.db(name), {
+                get: (db, member) =>
+                  member === 'collection'
+                    ? (collectionName: string, options?: object) => {
+                        const collection = db.collection(collectionName, options);
+                        return collectionName.endsWith('deliveries')
+                          ? new Proxy(collection, {
+                              get: (inner, method) =>
+                                method === 'aggregate'
+                                  ? (...parameters: Parameters<typeof inner.aggregate>) => {
+                                      const cursor = inner.aggregate(...parameters);
+                                      return {
+                                        toArray: async () => {
+                                          if (faster) {
+                                            faster = false;
+                                            await events.updateOne(
+                                              { _id: event.id },
+                                              { $set: { handlers: ['h', 'added'] } },
+                                            );
+                                          }
+                                          return cursor.toArray();
+                                        },
+                                      };
+                                    }
+                                  : bound(inner, method),
+                            })
+                          : collection;
+                      }
+                    : bound(db, member),
+              })
+          : bound(target, property),
+    });
+    const store = new MongoEventStore({ client: racing, database });
+    await store.setup();
+    expect(faster).toBe(false);
+    expect(await events.findOne({ _id: event.id })).toMatchObject({ handlers: ['h', 'added'] });
   });
 
   it('converts large collections in batches and skips the conversion once the lanes exist', async () => {

@@ -23,21 +23,30 @@ export function laneOf(key: string | null, eventId: string): number {
   return hash & (LANE_COUNT - 1);
 }
 
-/** The lane lease a lease token names: the lane and the epoch it had when the delivery was claimed. */
+/**
+ * The claim a lease token names: the lane, the epoch the lane had, and the
+ * claim generation the delivery had when it was claimed.
+ */
 export interface LaneLease {
   readonly laneId: number;
   readonly epoch: number;
+  /**
+   * Claim generation of the delivery. It grows whenever a claim of the delivery
+   * ends (retry, release, burial, lost lease), so a lease of an earlier claim
+   * never matches a later claim of the same delivery in the same lane epoch.
+   */
+  readonly claims: number;
 }
 
 /**
- * The fencing token of a claimed delivery: `<laneId>:<epoch>`. Every state
- * change checks the lane with it, without reading the delivery first.
+ * The fencing token of a claimed delivery: `<laneId>:<epoch>:<claims>`. Every
+ * state change checks the lane epoch and the delivery's claim generation.
  */
-export function formatLeaseToken(laneId: number, epoch: number): string {
-  return `${laneId}:${epoch}`;
+export function formatLeaseToken(laneId: number, epoch: number, claims: number): string {
+  return `${laneId}:${epoch}:${claims}`;
 }
 
-const LEASE_TOKEN_PATTERN = /^(\d{1,3}):(\d{1,15})$/;
+const LEASE_TOKEN_PATTERN = /^(\d{1,3}):(\d{1,15}):(\d{1,15})$/;
 
 /** Splits a lease token; undefined when this store cannot have issued it. */
 export function parseLeaseToken(token: string): LaneLease | undefined {
@@ -45,5 +54,5 @@ export function parseLeaseToken(token: string): LaneLease | undefined {
   if (match === null || Number(match[1]) >= LANE_COUNT) {
     return undefined;
   }
-  return { laneId: Number(match[1]), epoch: Number(match[2]) };
+  return { laneId: Number(match[1]), epoch: Number(match[2]), claims: Number(match[3]) };
 }

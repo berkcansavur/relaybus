@@ -51,6 +51,16 @@ export class InvalidEnvelopeError extends NonRetryableError {
 /** The worker no longer owns the delivery it was processing. */
 export class LeaseLostError extends RelayBusError {
   override name = 'LeaseLostError';
+  /**
+   * Whether the store said so (a fenced write returned false). A worker that only noticed
+   * locally that its lease ran out may still own the delivery in the store and has to give it back.
+   */
+  readonly storeConfirmed: boolean;
+
+  constructor(message: string, options: { readonly storeConfirmed?: boolean } = {}) {
+    super(message);
+    this.storeConfirmed = options.storeConfirmed ?? false;
+  }
 }
 
 /** A handler did not settle within its configured timeout. Retried like any failure. */
