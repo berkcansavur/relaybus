@@ -19,7 +19,7 @@ All automation lives in `.github/`. Every third-party action is pinned to a full
 ### ci.yml jobs
 
 - `quality`: `pnpm format:check`, `pnpm lint`, `pnpm typecheck`.
-- `test (node 22.x | 24.x)`: `pnpm coverage` runs unit and integration projects (Testcontainers use the Docker daemon on `ubuntu-latest`). It fails when any 100% threshold from `vitest.config.ts` is missed. `coverage/lcov.info` and `coverage-summary.json` are uploaded as an artifact and to Codecov with OIDC (`use_oidc: true`, `fail_ci_if_error: false`), so no `CODECOV_TOKEN` is needed.
+- `test (node 22.x | 24.x)`: `pnpm coverage` runs unit and integration projects (Testcontainers use the Docker daemon on `ubuntu-latest`). The Docker servers are started once by `vitest.global-setup.ts` and shared by the integration files (see CONTRIBUTING.md). It fails when any 100% threshold from `vitest.config.ts` is missed. `coverage/lcov.info` and `coverage-summary.json` are uploaded as an artifact and to Codecov with OIDC (`use_oidc: true`, `fail_ci_if_error: false`), so no `CODECOV_TOKEN` is needed.
 - `build`: `pnpm build`, per-package `typecheck`, `publint` and `attw --pack` for every package.
 - `nestjs compat (@nestjs/* 11 | 12)`: re-resolves the `@nestjs/*` dev dependencies of `packages/nestjs` to the matrix major with `pnpm --filter @relaybus/nestjs add --save-dev`, asserts the resolved major, then runs the typecheck and the nestjs tests. The changed manifest and lockfile exist only on the runner.
 - `CI pass`: succeeds only when all of the above succeeded. Use this single check in branch protection.
