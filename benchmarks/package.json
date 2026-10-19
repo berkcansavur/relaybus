@@ -1,0 +1,14 @@
+{
+  "name": "relaybus-benchmarks",
+  "private": true,
+  "type": "module",
+  "description": "Throughput and latency harness for relaybus on real PostgreSQL and MongoDB (Testcontainers). Not part of the published packages.",
+  "scripts": {
+    "bench": "node run.ts",
+    "bench:quick": "node run.ts --quick",
+    "bench:pg": "node run.ts --store pg",
+    "bench:mongo": "node run.ts --store mongo",
+    "explain": "node explain.ts",
+    "report": "node report.ts"
+  }
+}
