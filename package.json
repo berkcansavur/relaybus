@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "pnpm -r run build",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json && tsc -p benchmarks/tsconfig.json",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -16,6 +16,8 @@
     "test:unit": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
     "coverage": "vitest run --coverage",
+    "bench:quick": "node benchmarks/cli.ts quick",
+    "bench:full": "node benchmarks/cli.ts full",
     "mutation": "stryker run",
     "release": "semantic-release",
     "release:dry-run": "semantic-release --dry-run --no-ci",

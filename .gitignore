@@ -9,3 +9,6 @@ reports/
 .env.*
 !.env.example
 .agent-briefs/
+
+benchmarks/.cache/
+benchmarks/results/runs/

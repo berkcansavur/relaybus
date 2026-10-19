@@ -3,3 +3,6 @@ coverage
 reports
 pnpm-lock.yaml
 CHANGELOG.md
+benchmarks/results
+benchmarks/baselines
+benchmarks/.cache

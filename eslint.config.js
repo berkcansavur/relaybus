@@ -2,13 +2,23 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  // The benchmark harness is typed and linted separately once it is reworked.
-  { ignores: ['**/dist/**', '**/coverage/**', 'reports/**', '.stryker-tmp/**', 'benchmarks/**'] },
+  {
+    ignores: [
+      '**/dist/**',
+      '**/coverage/**',
+      'reports/**',
+      '.stryker-tmp/**',
+      'benchmarks/.cache/**',
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {
     languageOptions: {
-      parserOptions: { project: ['./tsconfig.json'], tsconfigRootDir: import.meta.dirname },
+      parserOptions: {
+        project: ['./tsconfig.json', './benchmarks/tsconfig.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
     },
     rules: {
       '@typescript-eslint/no-floating-promises': 'error',
