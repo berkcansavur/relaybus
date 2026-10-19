@@ -138,6 +138,12 @@ export const sections = [
           'Publish outbox events to RabbitMQ with publisher confirms and consume them with an idempotent inbox.',
       },
       {
+        title: 'Interoperating with non-relaybus services',
+        path: 'recipes/interoperating-with-other-services',
+        description:
+          'Exchange events with services that do not use relaybus over Kafka and RabbitMQ: the wire format, and decoding plain JSON and structured CloudEvents with exactly-once handling.',
+      },
+      {
         title: 'Testing with FakeClock',
         path: 'recipes/testing-with-fakeclock',
         description:
