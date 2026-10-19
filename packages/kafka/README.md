@@ -53,25 +53,26 @@ const consuming = transport.isConsuming();
 
 ## Options
 
-| Option                         | Default         | Meaning                                                                                                                                                                                          |
-| ------------------------------ | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `kafka`                        | required        | A `kafkajs` `Kafka` or Confluent `KafkaJS.Kafka` instance. It is the producer/consumer factory.                                                                                                  |
-| `name`                         | `'kafka'`       | Transport name used by routes and subscriptions.                                                                                                                                                 |
-| `groupId`                      | none            | Consumer group. Required as soon as `subscribe` is used; publish-only services can omit it.                                                                                                      |
-| `fromBeginning`                | `true`          | Where a group without committed offsets starts. `true` so events published before the first start are not skipped.                                                                               |
-| `maxInFlightRequests`          | `1`             | Producer in-flight requests, 1 to 5. `1` keeps retries from reordering events of one key.                                                                                                        |
-| `producerConfig`               | `{}`            | Extra producer settings (partitioner, compression, ...). `idempotent` and `maxInFlightRequests` always win.                                                                                      |
-| `consumerConfig`               | `{}`            | Extra consumer settings (`sessionTimeout`, `retry`, `heartbeatInterval`, ...). `groupId` always wins.                                                                                            |
-| `processing.maxAttempts`       | `5`             | In-process attempts per delivery of a record.                                                                                                                                                    |
-| `processing.initialBackoff`    | `'200ms'`       | Delay before attempt 2, doubling per attempt.                                                                                                                                                    |
-| `processing.maxBackoff`        | `'5s'`          | Upper bound of the delay between attempts.                                                                                                                                                       |
-| `processing.heartbeatInterval` | `'1s'`          | Heartbeat interval while sleeping between attempts, so a long backoff never exceeds `sessionTimeout`.                                                                                            |
-| `startupTimeout`               | `'30s'`         | How long `subscribe` waits for the group join. A failed start-up disconnects the consumer it started.                                                                                            |
-| `publishTimeout`               | `'30s'`         | How long `publish` waits for the broker ack before rejecting with `PublishTimeoutError`.                                                                                                         |
-| `restart.initialBackoff`       | `'1s'`          | First delay of the consumer restart loop after an unrecoverable crash; doubles per failure.                                                                                                      |
-| `restart.maxBackoff`           | `'30s'`         | Upper bound of the restart delay.                                                                                                                                                                |
-| `onInvalidMessage`             | `'dead-letter'` | `'dead-letter'` (to `<topic>.dead`), `{ deadLetterTopic: string \| (sourceTopic) => string }`, a callback `(message) => void \| Promise<void>`, or `'skip'` (drops the record; explicit opt-in). |
-| `logger`                       | `console`       | `log`, `warn`, `error`. Messages start with `[KafkaTransport](method)`.                                                                                                                          |
+| Option                         | Default            | Meaning                                                                                                                                                                                                                                                                                                |
+| ------------------------------ | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `kafka`                        | required           | A `kafkajs` `Kafka` or Confluent `KafkaJS.Kafka` instance. It is the producer/consumer factory.                                                                                                                                                                                                        |
+| `name`                         | `'kafka'`          | Transport name used by routes and subscriptions.                                                                                                                                                                                                                                                       |
+| `groupId`                      | none               | Consumer group. Required as soon as `subscribe` is used; publish-only services can omit it.                                                                                                                                                                                                            |
+| `fromBeginning`                | `true`             | Where a group without committed offsets starts. `true` so events published before the first start are not skipped.                                                                                                                                                                                     |
+| `maxInFlightRequests`          | `1`                | Producer in-flight requests, 1 to 5. `1` keeps retries from reordering events of one key.                                                                                                                                                                                                              |
+| `producerConfig`               | `{}`               | Extra producer settings (partitioner, compression, ...). `idempotent` and `maxInFlightRequests` always win.                                                                                                                                                                                            |
+| `consumerConfig`               | `{}`               | Extra consumer settings (`sessionTimeout`, `retry`, `heartbeatInterval`, ...). `groupId` always wins.                                                                                                                                                                                                  |
+| `processing.maxAttempts`       | `5`                | In-process attempts per delivery of a record.                                                                                                                                                                                                                                                          |
+| `processing.initialBackoff`    | `'200ms'`          | Delay before attempt 2, doubling per attempt.                                                                                                                                                                                                                                                          |
+| `processing.maxBackoff`        | `'5s'`             | Upper bound of the delay between attempts.                                                                                                                                                                                                                                                             |
+| `processing.heartbeatInterval` | `'1s'`             | Heartbeat interval while sleeping between attempts, so a long backoff never exceeds `sessionTimeout`.                                                                                                                                                                                                  |
+| `startupTimeout`               | `'30s'`            | How long `subscribe` waits for the group join. A failed start-up disconnects the consumer it started.                                                                                                                                                                                                  |
+| `publishTimeout`               | `'30s'`            | How long `publish` waits for the broker ack before rejecting with `PublishTimeoutError`.                                                                                                                                                                                                               |
+| `restart.initialBackoff`       | `'1s'`             | First delay of the consumer restart loop after an unrecoverable crash; doubles per failure.                                                                                                                                                                                                            |
+| `restart.maxBackoff`           | `'30s'`            | Upper bound of the restart delay.                                                                                                                                                                                                                                                                      |
+| `onInvalidMessage`             | `'dead-letter'`    | `'dead-letter'` (to `<topic>.dead`), `{ deadLetterTopic: string \| (sourceTopic) => string }`, a callback `(message) => void \| Promise<void>`, or `'skip'` (drops the record; explicit opt-in).                                                                                                       |
+| `decode`                       | strict binary mode | How consumed records become events. `decodeCloudEvent` (binary and structured mode), `plainJsonDecoder({...})` (plain JSON from producers without relaybus) or your own function. See [Interoperating with services that do not use relaybus](#interoperating-with-services-that-do-not-use-relaybus). |
+| `logger`                       | `console`          | `log`, `warn`, `error`. Messages start with `[KafkaTransport](method)`.                                                                                                                                                                                                                                |
 
 ## Wire format
 
@@ -103,6 +104,85 @@ Payloads are JSON. An `undefined`, function, symbol, `BigInt` or circular payloa
 RFC 3339), are rejected on publish with `UnencodableEventError`, a `NonRetryableError`, because
 retrying cannot help. `Date` payload values become ISO strings. A header named `__proto__` is kept
 as ordinary data by the codec (kafkajs itself drops it when it builds the consumer's header object).
+
+## Interoperating with services that do not use relaybus
+
+**relaybus producer, other consumer.** Any Kafka client reads the record as is: the value is the
+JSON payload (UTF-8), the key is the event key, and the `ce_*` headers above carry the attributes.
+A plain consumer only needs `JSON.parse(value)` and the `ce_type` / `ce_id` headers. CloudEvents
+SDKs decode the record natively, because it is CloudEvents binary mode of the Kafka protocol
+binding: Java `io.cloudevents:cloudevents-kafka` (`CloudEventDeserializer`), Go `sdk-go`
+(`protocol/kafka_sarama`), and Spring Cloud Function / Spring Cloud Stream, which read the
+`ce_`-prefixed headers. Use `ce_id` to deduplicate: an outbox delivers at least once.
+
+**Other producer, relaybus consumer.** By default the transport accepts only binary-mode
+CloudEvents; anything else is malformed and dead-lettered, so a misconfigured producer cannot
+slip events in. Opt in per transport (one transport is one subscription) with `decode`:
+
+```ts
+import {
+  KafkaTransport,
+  decodeCloudEvent,
+  fromHeader,
+  fromPayloadField,
+  plainJsonDecoder,
+  type KafkaMessageDecoder,
+} from '@relaybus/kafka';
+
+// A Spring / Go / plain kafkajs producer writing JSON values with an `event-type` header.
+const transport = new KafkaTransport({
+  kafka,
+  groupId: 'billing',
+  decode: plainJsonDecoder({ type: fromHeader('event-type'), id: fromHeader('message-id') }),
+});
+
+// A topic that carries one kind of event; the ordering key from the payload.
+const oneEventType = plainJsonDecoder({
+  type: 'order.placed.v1',
+  key: fromPayloadField('orderId'),
+});
+
+// A CloudEvents SDK producer in structured mode (`content-type: application/cloudevents+json`).
+const cloudEvents: KafkaMessageDecoder = decodeCloudEvent;
+
+// Different formats per topic: switch on the record.
+const perTopic: KafkaMessageDecoder = (record) =>
+  record.topic === 'legacy.orders' ? oneEventType(record) : decodeCloudEvent(record);
+```
+
+| Decoder                    | Accepts                                                                                                                                                                                                                                        |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| default (`decodeEnvelope`) | Binary-mode CloudEvents only, strictly as described above. Unchanged.                                                                                                                                                                          |
+| `decodeCloudEvent`         | Binary mode as the default, plus structured mode: a JSON value with `specversion` `1.0`, `id`, `type`, `source`, optional `time` (else the record timestamp), `subject` (else the record key), `data` (the payload; `data_base64` is refused). |
+| `plainJsonDecoder(opts)`   | Any JSON value. A record that is a CloudEvent anyway (a `ce_specversion` header or a structured content type) goes through `decodeCloudEvent`, so relaybus and foreign producers can share a topic.                                            |
+| your function              | `(record) => ({ id, type, payload, ...optional })`. Missing fields are filled: `source` = topic, `key` = record key, `occurredAt` = record timestamp, `headers` = `{}`.                                                                        |
+
+`plainJsonDecoder` options (each extractor gets `{ topic, partition, offset, key, headers, payload, timestamp }`;
+an extractor returning `undefined` or `''` selects the default):
+
+| Option       | Default                              | Meaning                                                                                                                        |
+| ------------ | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `type`       | required                             | A fixed event type, or an extractor such as `fromHeader('event-type')` or `fromPayloadField('type')`.                          |
+| `id`         | `kafka:<topic>:<partition>:<offset>` | Inbox dedup id. The default is stable across redeliveries of the record. Prefer a producer id when it may send an event twice. |
+| `key`        | the record key                       | Ordering key. A key that is not UTF-8 (Java `LongSerializer`) is base64-encoded.                                               |
+| `source`     | the topic                            | Fixed text or an extractor.                                                                                                    |
+| `occurredAt` | the record timestamp                 | Extractor returning a `Date`.                                                                                                  |
+
+Every record header becomes an event header (the last value of a repeated header; a value that is
+not valid UTF-8 is left out, so binary ids can never collide).
+
+**Guarantees stay the same.** Decoding runs again on every redelivery and must be deterministic;
+the inbox deduplicates on the id, so a redelivered record is stored and handled once. A record that
+cannot be decoded (not JSON, a tombstone, no type, an invalid type, an extractor returning a
+non-string) and anything a custom decoder throws go to `onInvalidMessage` (dead-letter by default)
+with the reason in `relaybus-invalid-reason`; the consumer keeps running. Per-key order is the
+Kafka partition order, as for relaybus producers.
+
+**Limits.** The derived id assumes offsets are never reused: deleting and recreating a topic
+restarts its offsets, so records after a recreation could collide with ids already in the inbox
+(within its retention). Two sends of one event by a producer are two offsets; only an id set by the
+producer (`id: fromHeader(...)`) dedupes them. Payloads must be JSON (Avro or Protobuf need your own
+decoder function, which must stay synchronous).
 
 ## Partitioning and ordering
 
