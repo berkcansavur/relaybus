@@ -47,7 +47,7 @@ export interface Validation {
 
 export function validateRun(input: {
   handlers: number;
-  handled: Array<[number, number, number]>;
+  handled: ReadonlyArray<readonly [number, number, number]>;
   data: ValidationData;
   /** The run handled everything it was meant to; then nothing may remain open. */
   drained: boolean;
@@ -57,7 +57,8 @@ export function validateRun(input: {
   const id = (w: number, n: number): string => `${w}:${n}`;
   const expectedEvents = new Map(data.events.map((event) => [id(event.w, event.n), event]));
   const expected = new Set<string>();
-  for (const event of data.events) for (let h = 1; h <= handlers; h += 1) expected.add(`${id(event.w, event.n)}:${h}`);
+  for (const event of data.events)
+    for (let h = 1; h <= handlers; h += 1) expected.add(`${id(event.w, event.n)}:${h}`);
 
   const handledSet = new Set<string>();
   let unexpected = 0;
@@ -78,7 +79,11 @@ export function validateRun(input: {
       perKey.get(group)!.push([ts, event.sequence]);
     }
   }
-  const openSet = new Set(data.open.map((delivery) => `${id(delivery.w, delivery.n)}:${Number(delivery.handler.slice(1))}`));
+  const openSet = new Set(
+    data.open.map(
+      (delivery) => `${id(delivery.w, delivery.n)}:${Number(delivery.handler.slice(1))}`,
+    ),
+  );
   let lost = 0;
   for (const pair of expected) if (!handledSet.has(pair) && !openSet.has(pair)) lost += 1;
   let handledButStillOpen = 0;
@@ -89,8 +94,10 @@ export function validateRun(input: {
   for (const entries of perKey.values()) {
     entries.sort((a, b) => a[0] - b[0]);
     const sequences: number[] = [];
-    for (const [, sequence] of entries) if (sequences[sequences.length - 1] !== sequence) sequences.push(sequence);
-    for (let i = 1; i < sequences.length; i += 1) if (sequences[i]! <= sequences[i - 1]!) orderViolations += 1;
+    for (const [, sequence] of entries)
+      if (sequences[sequences.length - 1] !== sequence) sequences.push(sequence);
+    for (let i = 1; i < sequences.length; i += 1)
+      if (sequences[i]! <= sequences[i - 1]!) orderViolations += 1;
     const distinct = [...new Set(sequences)].sort((a, b) => a - b);
     // A key's events are numbered 1..m in commit order; the handled ones must be a prefix of that numbering.
     if (distinct.some((sequence, index) => sequence !== index + 1)) orderViolations += 1;
@@ -100,10 +107,14 @@ export function validateRun(input: {
   const reasons: string[] = [];
   if (lost > 0) reasons.push(`${lost} deliveries lost (neither handled nor open in the database)`);
   if (unexpected > 0) reasons.push(`${unexpected} handled deliveries were never published`);
-  if (duplicates - unexpected > input.leaseLost) reasons.push(`${duplicates - unexpected} duplicate invocations but only ${input.leaseLost} lease-lost reports`);
+  if (duplicates - unexpected > input.leaseLost)
+    reasons.push(
+      `${duplicates - unexpected} duplicate invocations but only ${input.leaseLost} lease-lost reports`,
+    );
   if (orderViolations > 0) reasons.push(`${orderViolations} per-key order violations`);
   if (deadAtEnd > 0) reasons.push(`${deadAtEnd} dead letters`);
-  if (input.drained && data.open.length > 0) reasons.push(`${data.open.length} deliveries still open after the run drained`);
+  if (input.drained && data.open.length > 0)
+    reasons.push(`${data.open.length} deliveries still open after the run drained`);
   return {
     valid: reasons.length === 0,
     reasons,

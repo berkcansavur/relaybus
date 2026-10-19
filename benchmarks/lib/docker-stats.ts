@@ -1,62 +1,77 @@
-import { execFile } from 'node:child_process';
+import { execFile, type ChildProcess } from 'node:child_process';
 
-/** Samples `docker stats` of one container in the background (each call takes ~1-2 s on Docker Desktop). */
+export interface DockerSummary {
+  readonly cpuAvgPct: number | null;
+  readonly cpuMaxPct: number | null;
+  readonly memMaxMiB: number | null;
+  readonly samples: number;
+}
+
+/** Converts `docker stats` memory text such as `1.2GiB` or `512MiB` to mebibytes. */
+export function parseMemoryMiB(text: string): number {
+  const match = /([\d.]+)\s*(KiB|MiB|GiB|B)/.exec(text);
+  if (match === null) return Number.NaN;
+  const value = parseFloat(match[1] ?? '');
+  const unit = match[2];
+  if (unit === 'GiB') return value * 1024;
+  if (unit === 'KiB') return value / 1024;
+  if (unit === 'B') return value / 1_048_576;
+  return value;
+}
+
+/** Samples `docker stats` of one container in the background (each call takes 1-2 s on Docker Desktop). */
 export class DockerSampler {
-  readonly cpu: number[] = [];
-  readonly memMiB: number[] = [];
+  readonly #containerId: string;
+  readonly #cpu: number[] = [];
+  readonly #memory: number[] = [];
   #running = false;
   #loop: Promise<void> | undefined;
-
-  readonly containerId: string;
+  #child: ChildProcess | undefined;
 
   constructor(containerId: string) {
-    this.containerId = containerId;
+    this.#containerId = containerId;
   }
 
   start(): void {
-    this.cpu.length = 0;
-    this.memMiB.length = 0;
+    this.#cpu.length = 0;
+    this.#memory.length = 0;
     this.#running = true;
-    this.#loop = (async () => {
-      while (this.#running) {
-        await new Promise<void>((resolve) => {
-          execFile(
-            'docker',
-            ['stats', '--no-stream', '--format', '{{.CPUPerc}}|{{.MemUsage}}', this.containerId],
-            (error, stdout) => {
-              if (!error) {
-                const [cpu, mem] = stdout.trim().split('|');
-                const cpuValue = parseFloat(cpu ?? '');
-                const memValue = parseMem(mem?.split('/')[0]?.trim() ?? '');
-                if (Number.isFinite(cpuValue)) this.cpu.push(cpuValue);
-                if (Number.isFinite(memValue)) this.memMiB.push(memValue);
-              }
-              resolve();
-            },
-          );
-        });
-      }
-    })();
+    this.#loop = this.#poll();
   }
 
-  async stop(): Promise<{ cpuAvgPct: number; cpuMaxPct: number; memMaxMiB: number; samples: number }> {
+  async stop(): Promise<DockerSummary> {
     this.#running = false;
+    // A call to `docker stats` takes 1-2 s; the sample in flight is abandoned instead of waited for.
+    this.#child?.kill();
     await this.#loop;
-    const avg = this.cpu.length === 0 ? NaN : this.cpu.reduce((a, b) => a + b, 0) / this.cpu.length;
+    if (this.#cpu.length === 0)
+      return { cpuAvgPct: null, cpuMaxPct: null, memMaxMiB: null, samples: 0 };
     return {
-      cpuAvgPct: round(avg, 0),
-      cpuMaxPct: round(Math.max(...this.cpu, 0), 0),
-      memMaxMiB: round(Math.max(...this.memMiB, 0), 0),
-      samples: this.cpu.length,
+      cpuAvgPct: Math.round(this.#cpu.reduce((a, b) => a + b, 0) / this.#cpu.length),
+      cpuMaxPct: Math.round(Math.max(...this.#cpu)),
+      memMaxMiB: Math.round(Math.max(...this.#memory, 0)),
+      samples: this.#cpu.length,
     };
   }
-}
 
-function parseMem(text: string): number {
-  const match = /([\d.]+)\s*(KiB|MiB|GiB|B)/.exec(text);
-  if (!match) return NaN;
-  const value = parseFloat(match[1]!);
-  return match[2] === 'GiB' ? value * 1024 : match[2] === 'KiB' ? value / 1024 : match[2] === 'B' ? value / 1048576 : value;
+  async #poll(): Promise<void> {
+    while (this.#running) {
+      await new Promise<void>((resolve) => {
+        this.#child = execFile(
+          'docker',
+          ['stats', '--no-stream', '--format', '{{.CPUPerc}}|{{.MemUsage}}', this.#containerId],
+          (error, stdout) => {
+            if (error === null) {
+              const [cpuText = '', memoryText = ''] = stdout.trim().split('|');
+              const cpu = parseFloat(cpuText);
+              const memory = parseMemoryMiB(memoryText.split('/')[0]?.trim() ?? '');
+              if (Number.isFinite(cpu)) this.#cpu.push(cpu);
+              if (Number.isFinite(memory)) this.#memory.push(memory);
+            }
+            resolve();
+          },
+        );
+      });
+    }
+  }
 }
-
-const round = (value: number, digits: number): number => Math.round(value * 10 ** digits) / 10 ** digits;
