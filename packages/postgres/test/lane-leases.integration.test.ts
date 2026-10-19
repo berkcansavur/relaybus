@@ -598,7 +598,7 @@ describe('interleavings that used to break the fence', () => {
     for (let attempt = 0; attempt < 400; attempt += 1) {
       const result = await database.pool.query<{ waiting: number }>(
         `SELECT count(*)::int AS waiting FROM pg_stat_activity
-         WHERE wait_event_type = 'Lock' AND query LIKE $1`,
+         WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE $1`,
         [`%${marker}%`],
       );
       if (result.rows[0]!.waiting >= count) {
@@ -1136,7 +1136,7 @@ describe('takeover of a lane that changed while the statement waited', () => {
       const takeover = claim(store, ['h'], 'worker-2', at(LEASE_MS + 1));
       for (;;) {
         const waiting = await database.pool.query(
-          "SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted",
+          "SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
         );
         if (waiting.rowCount !== 0) {
           break;

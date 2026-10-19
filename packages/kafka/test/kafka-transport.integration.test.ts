@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { beforeAll, describe, expect, it, inject, vi } from 'vitest';
 import { Kafka, Partitioners, logLevel, type Consumer } from 'kafkajs';
-import { KafkaContainer, type StartedKafkaContainer } from '@testcontainers/kafka';
 import {
   InMemoryEventStore,
   NonRetryableError,
@@ -15,10 +14,6 @@ import { createEnvelope, createLogger } from './fakes.js';
 
 class OrderPlaced extends defineEvent<{ orderId: string }>('order.placed.v1') {}
 
-const KAFKA_IMAGE = 'confluentinc/cp-kafka:7.5.0';
-const KAFKA_EXTERNAL_PORT = 9093;
-
-let container: StartedKafkaContainer;
 let brokers: string[];
 
 function createClient(): Kafka {
@@ -108,54 +103,8 @@ async function produceRaw(
   await producer.disconnect();
 }
 
-/**
- * The container reports started before the broker accepts every request, which made
- * the first test flaky in CI (`KafkaJSConnectionClosedError`). Produce and consume one
- * record through a consumer group so the broker and its group coordinator are ready.
- */
-async function waitForBroker(): Promise<void> {
-  const topic = `readiness-${randomUUID()}`;
-  for (let attempt = 1; ; attempt += 1) {
-    const kafka = createClient();
-    const admin = kafka.admin();
-    const producer = kafka.producer();
-    const consumer = kafka.consumer({ groupId: `readiness-${randomUUID()}` });
-    try {
-      await admin.connect();
-      await admin.createTopics({ topics: [{ topic }], waitForLeaders: true });
-      await producer.connect();
-      await producer.send({ topic, messages: [{ value: 'ready' }] });
-      await consumer.connect();
-      await consumer.subscribe({ topics: [topic], fromBeginning: true });
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('broker warm-up timed out')), 30_000);
-        void consumer.run({
-          eachMessage: async () => {
-            clearTimeout(timer);
-            resolve();
-          },
-        });
-      });
-      return;
-    } catch (error) {
-      if (attempt >= 10) {
-        throw error;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-    } finally {
-      await Promise.allSettled([admin.disconnect(), producer.disconnect(), consumer.disconnect()]);
-    }
-  }
-}
-
-beforeAll(async () => {
-  container = await new KafkaContainer(KAFKA_IMAGE).withKraft().start();
-  brokers = [`${container.getHost()}:${container.getMappedPort(KAFKA_EXTERNAL_PORT)}`];
-  await waitForBroker();
-});
-
-afterAll(async () => {
-  await container.stop();
+beforeAll(() => {
+  brokers = inject('kafkaBrokers');
 });
 
 describe('KafkaTransport against a real broker', () => {

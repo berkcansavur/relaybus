@@ -17,6 +17,8 @@
     "./packages/*/src/**/*.ts",
     "packages/*/test/**/*.ts",
     "vitest.config.ts",
+    "vitest.global-setup.ts",
+    "vitest.provided.d.ts",
     "examples/**/*.ts"
   ]
 }

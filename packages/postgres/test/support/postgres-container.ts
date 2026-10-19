@@ -1,31 +1,49 @@
-import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
+import { inject } from 'vitest';
 import { Pool } from 'pg';
+import { POSTGRES_IMAGES, SUPPORTED_POSTGRES_IMAGES } from './postgres-server.js';
 
-const SUPPORTED_IMAGES = ['postgres:17-alpine', 'postgres:13-alpine'];
-
-/** Images the contract runs against. `RELAYBUS_POSTGRES_IMAGES` (comma separated) overrides them. */
-export const POSTGRES_IMAGES: readonly string[] =
-  process.env['RELAYBUS_POSTGRES_IMAGES']?.split(',') ?? SUPPORTED_IMAGES;
+export { POSTGRES_IMAGES };
 
 export interface TestDatabase {
   readonly connectionString: string;
-  readonly container: StartedPostgreSqlContainer;
   /** Pool shared by the helpers of one test file. */
   readonly pool: Pool;
   stop(): Promise<void>;
 }
 
-export async function startDatabase(image: string = SUPPORTED_IMAGES[0]!): Promise<TestDatabase> {
-  const container = await new PostgreSqlContainer(image).start();
-  const connectionString = container.getConnectionUri();
+let databaseCounter = 0;
+
+/**
+ * Gives the calling test file its own database on the Postgres server that the global
+ * setup started for this run (one server per image, shared by every file). A database
+ * per file keeps catalog-wide state such as advisory locks and activity views apart.
+ */
+export async function startDatabase(
+  image: string = SUPPORTED_POSTGRES_IMAGES[0]!,
+): Promise<TestDatabase> {
+  const serverUri = inject('postgresServers')[image];
+  if (serverUri === undefined) {
+    throw new Error(
+      `No shared Postgres server for ${image}: the global setup started ${Object.keys(inject('postgresServers')).join(', ') || 'none'}`,
+    );
+  }
+  databaseCounter += 1;
+  const name = `t${process.pid}_${databaseCounter}`;
+  const admin = createTestPool(serverUri, 1);
+  try {
+    await admin.query(`CREATE DATABASE "${name}"`);
+  } finally {
+    await admin.end();
+  }
+  const url = new URL(serverUri);
+  url.pathname = `/${name}`;
+  const connectionString = url.toString();
   const pool = createTestPool(connectionString, 20);
   return {
     connectionString,
-    container,
     pool,
     async stop() {
       await pool.end();
-      await container.stop();
     },
   };
 }

@@ -10,6 +10,21 @@ const alias = Object.fromEntries(
   ]),
 );
 
+/** Integration files whose timing or server-wide effects must not overlap with other files. */
+const serialIntegrationTests = [
+  'packages/postgres/test/lane-leases.integration.test.ts',
+  'packages/postgres/test/claim-concurrency.integration.test.ts',
+  'packages/mongodb/test/mongo-lane-leases.integration.test.ts',
+  'packages/rabbitmq/test/broker-restart.integration.test.ts',
+];
+
+const integration = {
+  environment: 'node' as const,
+  testTimeout: 120_000,
+  hookTimeout: 180_000,
+  globalSetup: ['./vitest.global-setup.ts'],
+};
+
 export default defineConfig({
   resolve: { alias },
   test: {
@@ -26,12 +41,24 @@ export default defineConfig({
       {
         resolve: { alias },
         test: {
+          ...integration,
           name: 'integration',
           include: ['packages/*/test/**/*.integration.test.ts'],
-          environment: 'node',
-          testTimeout: 120_000,
-          hookTimeout: 180_000,
+          exclude: ['**/node_modules/**', ...serialIntegrationTests],
+          // Files share one server per backend and keep apart through unique names.
+          fileParallelism: true,
+          sequence: { groupOrder: 0 },
+        },
+      },
+      {
+        resolve: { alias },
+        test: {
+          ...integration,
+          name: 'integration-serial',
+          include: serialIntegrationTests,
+          // Lease timing and broker restarts: one file at a time, after everything else.
           fileParallelism: false,
+          sequence: { groupOrder: 1 },
         },
       },
     ],
