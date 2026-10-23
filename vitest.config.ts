@@ -16,6 +16,13 @@ const serialIntegrationTests = [
   'packages/postgres/test/claim-concurrency.integration.test.ts',
   'packages/mongodb/test/mongo-lane-leases.integration.test.ts',
   'packages/rabbitmq/test/broker-restart.integration.test.ts',
+  // End-to-end flows across a broker with wall-clock waits: under the parallel load of the
+  // other files they missed their deadlines now and then.
+  'packages/kafka/test/interoperability.integration.test.ts',
+  'packages/rabbitmq/test/interoperability.integration.test.ts',
+  'packages/kafka/test/catalog-services.integration.test.ts',
+  'packages/rabbitmq/test/catalog-services.integration.test.ts',
+  'packages/nestjs/test/catalog-services.integration.test.ts',
 ];
 
 const integration = {
