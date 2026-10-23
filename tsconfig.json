@@ -18,6 +18,8 @@
     "packages/*/test/**/*.ts",
     "test-support/**/*.ts",
     "vitest.config.ts",
+    "vitest.global-setup.ts",
+    "vitest.provided.d.ts",
     "examples/**/*.ts"
   ]
 }

@@ -1,12 +1,44 @@
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import amqplib from 'amqplib';
-import { RabbitMQContainer, type StartedRabbitMQContainer } from '@testcontainers/rabbitmq';
+import { inject } from 'vitest';
 import type { EventEnvelope } from '@relaybus/core';
 
-export const RABBITMQ_IMAGE = 'rabbitmq:4-alpine';
+const execFileAsync = promisify(execFile);
 
-export async function startBroker(): Promise<StartedRabbitMQContainer> {
-  return new RabbitMQContainer(RABBITMQ_IMAGE).start();
+/** What the tests use of the broker the global setup started for this run. */
+export interface TestBroker {
+  getAmqpUrl(): string;
+  /** Host port mapped to the AMQP port (5672). */
+  getMappedPort(port: 5672): number;
+  /** Runs a command inside the broker container, for example `rabbitmqctl`. */
+  exec(command: string[]): Promise<{ output: string; exitCode: number }>;
+  /** The broker is shared by every test file and stopped by the global setup. */
+  stop(): Promise<void>;
+}
+
+/**
+ * Connects to the broker shared by the whole run. Tests stay apart through `unique()`
+ * exchange, queue and group names. A test that restarts the broker must use
+ * `startDedicatedBroker()` instead.
+ */
+export function startBroker(): Promise<TestBroker> {
+  const { amqpUrl, amqpPort, containerId } = inject('rabbitmqBroker');
+  return Promise.resolve({
+    getAmqpUrl: () => amqpUrl,
+    getMappedPort: () => amqpPort,
+    exec: async (command) => {
+      try {
+        const { stdout } = await execFileAsync('docker', ['exec', containerId, ...command]);
+        return { output: stdout, exitCode: 0 };
+      } catch (error) {
+        const failure = error as { stdout?: string; code?: number };
+        return { output: failure.stdout ?? '', exitCode: failure.code ?? 1 };
+      }
+    },
+    stop: async () => {},
+  });
 }
 
 /** Short random suffix so tests sharing a broker never share exchanges or queues. */

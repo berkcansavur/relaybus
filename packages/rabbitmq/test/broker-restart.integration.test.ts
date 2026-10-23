@@ -2,7 +2,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { StartedRabbitMQContainer } from '@testcontainers/rabbitmq';
 import { RabbitMqUnavailableError } from '../src/errors.js';
 import { RabbitMqTransport } from '../src/rabbitmq-transport.js';
-import { eventually, remoteEnvelope, startBroker, unique } from './support/broker.js';
+import { eventually, remoteEnvelope, unique } from './support/broker.js';
+import { startDedicatedBroker } from './support/broker-server.js';
 import { TcpProxy } from './support/tcp-proxy.js';
 
 const silent = { log: () => undefined, warn: () => undefined, error: () => undefined };
@@ -11,7 +12,7 @@ let broker: StartedRabbitMQContainer;
 let proxy: TcpProxy;
 
 beforeAll(async () => {
-  broker = await startBroker();
+  broker = await startDedicatedBroker();
   proxy = new TcpProxy(() => broker.getMappedPort(5672));
   await proxy.listen();
 });

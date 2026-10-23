@@ -1,6 +1,5 @@
 import amqplib from 'amqplib';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import type { StartedRabbitMQContainer } from '@testcontainers/rabbitmq';
 import { InvalidEnvelopeError, type EventEnvelope } from '@relaybus/core';
 import {
   AmqpLimitExceededError,
@@ -17,13 +16,14 @@ import {
   startBroker,
   takeMessage,
   unique,
+  type TestBroker,
 } from './support/broker.js';
 import { TcpProxy } from './support/tcp-proxy.js';
 import { RabbitMqUnavailableError } from '../src/errors.js';
 
 const silent = { log: () => undefined, warn: () => undefined, error: () => undefined };
 
-let broker: StartedRabbitMQContainer;
+let broker: TestBroker;
 let amqpUrl: string;
 let proxy: TcpProxy;
 const transports: RabbitMqTransport[] = [];

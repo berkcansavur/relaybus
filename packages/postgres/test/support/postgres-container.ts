@@ -1,27 +1,64 @@
-import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
+import { PostgreSqlContainer } from '@testcontainers/postgresql';
+import { inject } from 'vitest';
 import { Pool } from 'pg';
+import { POSTGRES_IMAGES, SUPPORTED_POSTGRES_IMAGES } from './postgres-server.js';
 
-const SUPPORTED_IMAGES = ['postgres:17-alpine', 'postgres:13-alpine'];
-
-/** Images the contract runs against. `RELAYBUS_POSTGRES_IMAGES` (comma separated) overrides them. */
-export const POSTGRES_IMAGES: readonly string[] =
-  process.env['RELAYBUS_POSTGRES_IMAGES']?.split(',') ?? SUPPORTED_IMAGES;
+export { POSTGRES_IMAGES };
 
 export interface TestDatabase {
   readonly connectionString: string;
-  readonly container: StartedPostgreSqlContainer;
   /** Pool shared by the helpers of one test file. */
   readonly pool: Pool;
   stop(): Promise<void>;
 }
 
+let databaseCounter = 0;
+
 /**
- * Starts a database container. `settings` are server settings (`name=value`), for example to keep
- * WAL and statistics free of background noise in the performance design tests.
+ * Gives the calling test file its own database on the Postgres server that the global
+ * setup started for this run (one server per image, shared by every file). A database
+ * per file keeps catalog-wide state such as advisory locks and activity views apart.
+ * With `settings` (server settings, `name=value`) the file gets a dedicated container
+ * instead, for example to keep WAL and statistics free of other files' noise in the
+ * performance design tests.
  */
 export async function startDatabase(
-  image: string = SUPPORTED_IMAGES[0]!,
+  image: string = SUPPORTED_POSTGRES_IMAGES[0]!,
   settings: readonly string[] = [],
+): Promise<TestDatabase> {
+  if (settings.length > 0) {
+    return startDedicatedDatabase(image, settings);
+  }
+  const serverUri = inject('postgresServers')[image];
+  if (serverUri === undefined) {
+    throw new Error(
+      `No shared Postgres server for ${image}: the global setup started ${Object.keys(inject('postgresServers')).join(', ') || 'none'}`,
+    );
+  }
+  databaseCounter += 1;
+  const name = `t${process.pid}_${databaseCounter}`;
+  const admin = createTestPool(serverUri, 1);
+  try {
+    await admin.query(`CREATE DATABASE "${name}"`);
+  } finally {
+    await admin.end();
+  }
+  const url = new URL(serverUri);
+  url.pathname = `/${name}`;
+  const connectionString = url.toString();
+  const pool = createTestPool(connectionString, 20);
+  return {
+    connectionString,
+    pool,
+    async stop() {
+      await pool.end();
+    },
+  };
+}
+
+async function startDedicatedDatabase(
+  image: string,
+  settings: readonly string[],
 ): Promise<TestDatabase> {
   const container = await new PostgreSqlContainer(image)
     .withCommand(['postgres', ...settings.flatMap((setting) => ['-c', setting])])
@@ -30,7 +67,6 @@ export async function startDatabase(
   const pool = createTestPool(connectionString, 20);
   return {
     connectionString,
-    container,
     pool,
     async stop() {
       await pool.end();
