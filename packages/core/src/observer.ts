@@ -12,6 +12,7 @@ export type FailureStage =
   | 'relinquish'
   | 'extend-lease'
   | 'purge'
+  | 'watch'
   | 'observer';
 
 /**

@@ -62,6 +62,34 @@ type HandlerOutcome = 'completed' | 'unconfirmed';
 /** Delays between attempts to record a completion before leaving it to lease expiry. */
 const COMPLETION_RETRY_DELAYS_MS = [50, 250, 1_000] as const;
 
+/**
+ * Shortest time between the start of a claim and a claim caused by a wake-up (a publish, a notification
+ * from the store). The first wake-up after a quiet period claims at once; wake-ups that follow quickly
+ * are merged into one claim at the end of this time, so a stream of single publishes costs a claim per
+ * few milliseconds instead of a claim per event.
+ */
+const WAKE_COOLDOWN_MS = 5;
+
+/**
+ * Longest a free slot waits for others to free up before it is refilled alone. Fast handlers free a group
+ * of slots well within it, so their claims stay large; a slot of a slow handler stays empty for at most
+ * this long.
+ */
+const QUIET_REFILL_MS = 10;
+
+/**
+ * Share of a batch (or of the concurrency, when smaller) that must be free before settled deliveries
+ * trigger a claim. Measured with the claim-efficiency design test: at 0.5 a backlog drains with about
+ * 14 claims per 100 deliveries, at 0.7 with 11 and fewer completion calls too.
+ */
+const REFILL_FRACTION = 0.7;
+
+/** What one round of claims asked for and got. */
+interface ClaimRound {
+  readonly requested: number;
+  readonly claimed: number;
+}
+
 const defaultSleep = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -81,12 +109,28 @@ export class Dispatcher {
   #running = false;
   #loop: Promise<void> | undefined;
   #wakeUp: (() => void) | undefined;
-  #wakeRequested = false;
+  /** Free slots the claim the loop was woken for needs at least; undefined while nobody woke it. */
+  #signalledMinimum: number | undefined;
+  /** Free slots a claim needs unless the poll interval or the quiet refill time passed: claims refill in groups. */
+  readonly #refillThreshold: number;
+  /** Handlers whose last claim got less than it asked for: the store has nothing more for them right now. */
+  readonly #exhaustedHandlers = new Set<string>();
+  /** Grows with every wake-up: a claim that started before one must not mark a handler exhausted. */
+  #wakeGeneration = 0;
+  #lastClaimStartedAt = Number.NEGATIVE_INFINITY;
+  #cooldownTimer: NodeJS.Timeout | undefined;
+  #refillScheduled = false;
+  #quietRefillTimer: NodeJS.Timeout | undefined;
+  #unwatch: (() => Promise<void>) | undefined;
+  #watching: Promise<void> | undefined;
 
   constructor(dependencies: DispatcherDependencies) {
     this.#dependencies = dependencies;
     this.#sleep = dependencies.sleep ?? defaultSleep;
     const { store, clock, settings } = dependencies;
+    this.#refillThreshold = Math.ceil(
+      Math.min(settings.concurrency, settings.batchSize) * REFILL_FRACTION,
+    );
     const { completionBatchWindowMs: windowMs = 0, completionBatchSize: maxBatchSize = 1 } =
       settings;
     if (store.completeMany !== undefined && windowMs > 0) {
@@ -107,19 +151,81 @@ export class Dispatcher {
     return this.#inFlight.size;
   }
 
+  /**
+   * True while the store reports new deliveries to this dispatcher by itself (see
+   * {@link EventStore.watchNewDeliveries}), from every process: a publisher then has no reason to wake it.
+   */
+  get watchesNewDeliveries(): boolean {
+    return this.#unwatch !== undefined;
+  }
+
   start(): void {
     if (this.#running) {
       return;
     }
     this.#running = true;
     this.#completions?.setClosing(false);
+    this.#watching = this.#watchNewDeliveries();
     this.#loop = this.#runLoop();
   }
 
-  /** Shortens the wait before the next claim, for example right after a publish. */
+  /**
+   * Asks for a claim soon, for example right after a publish: at once after a quiet period, otherwise
+   * at the end of a short cooldown that merges the wake-ups arriving meanwhile into one claim.
+   */
   wake(): void {
-    this.#wakeRequested = true;
+    // New work may have arrived for handlers whose last claim found nothing.
+    this.#exhaustedHandlers.clear();
+    this.#wakeGeneration += 1;
+    const wait = this.#lastClaimStartedAt + WAKE_COOLDOWN_MS - Date.now();
+    if (wait <= 0) {
+      this.#requestClaim();
+      return;
+    }
+    this.#cooldownTimer ??= setTimeout(() => {
+      this.#cooldownTimer = undefined;
+      this.#requestClaim();
+    }, wait);
+  }
+
+  /** Ends the current wait of the claim loop, or the next one at once, for a claim once `minimumFree` slots are free. */
+  #signal(minimumFree: number): void {
+    this.#signalledMinimum = Math.min(this.#signalledMinimum ?? minimumFree, minimumFree);
     this.#wakeUp?.();
+  }
+
+  /**
+   * Starts listening to the store's reports of new deliveries. Polling stays the safety net: a store
+   * that cannot listen, or fails to, only costs latency, so a failure is reported and otherwise ignored.
+   */
+  async #watchNewDeliveries(): Promise<void> {
+    const { store, notifier } = this.#dependencies;
+    try {
+      const unwatch = await store.watchNewDeliveries?.(() => this.wake());
+      if (unwatch !== undefined && !this.#running) {
+        await unwatch();
+        return;
+      }
+      this.#unwatch = unwatch;
+      if (unwatch !== undefined) {
+        // Deliveries committed after the first claim and before listening began were reported to nobody.
+        this.wake();
+      }
+    } catch (error) {
+      notifier.failure('watch', error);
+    }
+  }
+
+  /** Stops listening to the store's reports of new deliveries. */
+  async #stopWatching(): Promise<void> {
+    await this.#watching;
+    const unwatch = this.#unwatch;
+    this.#unwatch = undefined;
+    try {
+      await unwatch?.();
+    } catch (error) {
+      this.#dependencies.notifier.failure('watch', error);
+    }
   }
 
   /**
@@ -134,8 +240,13 @@ export class Dispatcher {
     }
     this.#running = false;
     this.#completions?.setClosing(true);
-    this.wake();
+    clearTimeout(this.#cooldownTimer);
+    this.#cooldownTimer = undefined;
+    clearTimeout(this.#quietRefillTimer);
+    this.#quietRefillTimer = undefined;
+    this.#signal(this.#refillThreshold);
     const deadline = Date.now() + this.#dependencies.settings.shutdownTimeoutMs;
+    await this.#waitUntil(this.#stopWatching(), deadline);
     await this.#waitUntil(this.#loop!, deadline);
     const settled = Promise.allSettled([...this.#inFlight].map((delivery) => delivery.settled));
     if ((await this.#waitUntil(settled, deadline)) === 'timeout') {
@@ -216,7 +327,7 @@ export class Dispatcher {
 
   /** Claims one batch and resolves when every claimed delivery settled. Returns how many ran. */
   async processBatch(): Promise<number> {
-    const started = await this.#claimAndStart();
+    const { started } = await this.#claimAndStart();
     await Promise.allSettled(started.map((delivery) => delivery.settled));
     return started.length;
   }
@@ -231,47 +342,116 @@ export class Dispatcher {
     return outcome;
   }
 
+  /**
+   * Claims until stopped. A claim that filled its batch is followed by the next one at once while enough
+   * slots are free. Otherwise the loop sleeps until a wake-up (a publish, a store notification, or enough
+   * deliveries settling to refill a group of slots) or the poll interval. Only the poll interval claims
+   * for fewer free slots than the refill threshold, so a busy dispatcher never claims slot by slot.
+   */
   async #runLoop(): Promise<void> {
+    let minimumFree = 1;
     while (this.#running) {
-      let claimedCount = 0;
-      try {
-        claimedCount = (await this.#claimAndStart()).length;
-      } catch (error) {
-        this.#dependencies.notifier.failure('claim', error);
+      let round: ClaimRound = { requested: 0, claimed: 0 };
+      if (this.#freeSlots() >= minimumFree) {
+        try {
+          round = await this.#claimAndStart();
+        } catch (error) {
+          this.#dependencies.notifier.failure('claim', error);
+        }
       }
-      if (claimedCount > 0 && this.#freeSlots() > 0) {
+      if (
+        round.requested > 0 &&
+        round.claimed === round.requested &&
+        this.#freeSlots() >= this.#refillThreshold
+      ) {
+        minimumFree = this.#refillThreshold;
         continue;
       }
-      await this.#waitForWakeUp();
+      minimumFree = await this.#waitForWakeUp();
+      if (this.#freeSlots() < minimumFree) {
+        // Woken for more free slots than there are now: ask again, so the wake-up is not lost.
+        this.#requestClaim();
+      }
     }
   }
 
-  async #waitForWakeUp(): Promise<void> {
-    if (this.#wakeRequested) {
-      this.#wakeRequested = false;
-      return;
+  /** Waits for a wake-up or the poll interval. Resolves with the free slots the next claim needs. */
+  async #waitForWakeUp(): Promise<number> {
+    if (this.#signalledMinimum === undefined) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          this.#signalledMinimum = 1;
+          resolve();
+        }, this.#dependencies.settings.pollIntervalMs);
+        this.#wakeUp = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
+      this.#wakeUp = undefined;
     }
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(done, this.#dependencies.settings.pollIntervalMs);
-      function done(): void {
-        clearTimeout(timer);
-        resolve();
+    const minimumFree = this.#signalledMinimum!;
+    this.#signalledMinimum = undefined;
+    return minimumFree;
+  }
+
+  /**
+   * A delivery settled. Its slot is worth refilling when the store may have more for its handler: a keyed
+   * delivery unblocks the next one of its key, a delivery that did not succeed may be due again at once
+   * (a retry without delay, a release), and a handler whose last claim was full may have a backlog.
+   */
+  #onSettled(delivery: ClaimedDelivery, succeeded: boolean): void {
+    if (
+      delivery.event.key !== null ||
+      !succeeded ||
+      !this.#exhaustedHandlers.has(delivery.handler)
+    ) {
+      this.#requestClaim();
+    }
+  }
+
+  /**
+   * Asks the loop for a claim. Once a group of slots is free the claim waits only for the deliveries
+   * settling in the same tick, so they are claimed for together; fewer free slots are refilled when no
+   * claim started for a short while. With no free slot the next settlement asks again.
+   */
+  #requestClaim(): void {
+    const free = this.#freeSlots();
+    if (free >= this.#refillThreshold) {
+      if (!this.#refillScheduled) {
+        this.#refillScheduled = true;
+        setImmediate(() => {
+          this.#refillScheduled = false;
+          this.#signal(this.#refillThreshold);
+        });
       }
-      this.#wakeUp = done;
-    });
-    this.#wakeUp = undefined;
-    this.#wakeRequested = false;
+    } else if (free > 0) {
+      this.#quietRefillTimer ??= setTimeout(
+        () => {
+          this.#quietRefillTimer = undefined;
+          this.#signal(1);
+        },
+        Math.max(0, this.#lastClaimStartedAt + QUIET_REFILL_MS - Date.now()),
+      );
+    }
   }
 
   #freeSlots(): number {
     return this.#dependencies.settings.concurrency - this.#inFlight.size;
   }
 
-  async #claimAndStart(): Promise<InFlightDelivery[]> {
+  /** Claims for every handler with room and starts what was claimed. */
+  async #claimAndStart(): Promise<ClaimRound & { readonly started: InFlightDelivery[] }> {
     const { store, registry, clock, settings } = this.#dependencies;
     const started: InFlightDelivery[] = [];
+    let requested = 0;
     for (const request of this.#planClaims(registry.all())) {
       const now = clock.now();
+      const wakeGeneration = this.#wakeGeneration;
+      this.#lastClaimStartedAt = Date.now();
+      clearTimeout(this.#quietRefillTimer);
+      this.#quietRefillTimer = undefined;
+      requested += request.limit;
       const claimed = await store.claim({
         handlers: request.handlers,
         limit: request.limit,
@@ -279,11 +459,19 @@ export class Dispatcher {
         leaseExpiresAt: new Date(now.getTime() + settings.leaseDurationMs),
         now,
       });
+      for (const handler of request.handlers) {
+        // A wake-up that arrived while the claim ran may have brought what this claim could not see.
+        if (claimed.length < request.limit && wakeGeneration === this.#wakeGeneration) {
+          this.#exhaustedHandlers.add(handler);
+        } else {
+          this.#exhaustedHandlers.delete(handler);
+        }
+      }
       for (const delivery of claimed) {
         started.push(this.#start(delivery));
       }
     }
-    return started;
+    return { requested, claimed: started.length, started };
   }
 
   /** One claim for handlers without a concurrency limit, one per limited handler with room. */
@@ -322,23 +510,27 @@ export class Dispatcher {
 
   #start(delivery: ClaimedDelivery): InFlightDelivery {
     const controller = new AbortController();
+    let succeeded = false;
     const entry: InFlightDelivery = {
       handler: delivery.handler,
       controller,
       settled: Promise.resolve()
-        .then(() => this.#execute(delivery, controller))
+        .then(async () => {
+          succeeded = await this.#execute(delivery, controller);
+        })
         // Safety net: #execute handles every expected failure itself.
         .catch((error: unknown) => this.#dependencies.notifier.failure('dispatch', error))
         .finally(() => {
           this.#inFlight.delete(entry);
-          this.wake();
+          this.#onSettled(delivery, succeeded);
         }),
     };
     this.#inFlight.add(entry);
     return entry;
   }
 
-  async #execute(delivery: ClaimedDelivery, controller: AbortController): Promise<void> {
+  /** Runs one delivery. Resolves true when its handler succeeded, so the delivery is done for good. */
+  async #execute(delivery: ClaimedDelivery, controller: AbortController): Promise<boolean> {
     const { registry, notifier, clock } = this.#dependencies;
     const registration = registry.get(delivery.handler)!;
     // A new claim of this delivery makes whatever was pending for its earlier claims moot.
@@ -356,7 +548,7 @@ export class Dispatcher {
           `Delivery reached attempt ${delivery.attempt} of ${registration.retry.attempts} after its lease expired`,
         ),
       );
-      return;
+      return false;
     }
     let stopHeartbeat = (): void => undefined;
     try {
@@ -374,6 +566,7 @@ export class Dispatcher {
           applied: () => notifier.notify('onDeliverySucceeded', { delivery, durationMs }),
         });
       }
+      return true;
     } catch (error) {
       if (error instanceof LeaseLostError) {
         notifier.notify('onLeaseLost', { delivery });
@@ -385,6 +578,7 @@ export class Dispatcher {
       } else {
         await this.#fail(registration, delivery, error);
       }
+      return false;
     } finally {
       stopHeartbeat();
     }

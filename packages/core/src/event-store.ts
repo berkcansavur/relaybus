@@ -197,6 +197,14 @@ export interface EventStore<TTransaction = unknown> {
    * with running deliveries stay leased. Optional.
    */
   relinquish?(leaseOwner: string, now: Date): Promise<void>;
+  /**
+   * Calls `listener` soon after a transaction that added deliveries due at once has committed, in this
+   * process or in any other one, so an idle dispatcher claims them without waiting for its next poll.
+   * A hint, never a guarantee: a report may be late, merged with others, or lost (while a connection
+   * is re-established, for instance), and polling still finds every delivery. Resolves with a function
+   * that stops listening, or with `undefined` when this store cannot listen. Optional.
+   */
+  watchNewDeliveries?(listener: () => void): Promise<(() => Promise<void>) | undefined>;
   /** Releases connections the store opened itself. */
   close?(): Promise<void>;
 }

@@ -698,7 +698,8 @@ export class RelayBus<TTransaction = unknown> {
   }
 
   #scheduleWake(): void {
-    if (this.#state !== 'running') {
+    // A store that reports new deliveries wakes the dispatcher itself, right after the commit.
+    if (this.#state !== 'running' || this.#dispatcher.watchesNewDeliveries) {
       return;
     }
     // The publishing transaction commits after publish returns; claim shortly after.

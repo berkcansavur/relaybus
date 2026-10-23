@@ -104,6 +104,15 @@ Use a database store in production: [`@relaybus/postgres`](../postgres) or
 
 Durations are milliseconds or strings such as `'250ms'`, `'30s'`, `'5m'`, `'1h'`, `'7d'`.
 
+**How the dispatcher schedules claims.** A claim that fills its batch is followed by the next one at once. Otherwise the
+dispatcher sleeps until it is woken: by a publish, by the store reporting new deliveries from any process (the PostgreSQL
+store through `LISTEN/NOTIFY`, the MongoDB store through a change stream), or by settled deliveries once 70% of a batch
+(of `min(concurrency, batchSize)`) is free again, so slots are refilled in groups rather than one by one. A smaller number
+of free slots is refilled after 10 ms without a claim, and the poll interval stays the safety net. Wake-ups within 5 ms
+of a claim are merged into one claim. Settled unkeyed deliveries do not trigger a claim when their handler's last claim
+got less than it asked for (nothing more was due); a settled keyed delivery always may, since it unblocks the next of
+its key.
+
 ## Publishing
 
 `publish(event, options)` and `publishAll(events, options)` write into, in
