@@ -1,7 +1,14 @@
 import { Inject, Injectable, type OnModuleInit } from '@nestjs/common';
 import { DiscoveryService, MetadataScanner } from '@nestjs/core';
 import type { InstanceWrapper } from '@nestjs/core/injector/instance-wrapper.js';
-import { ConfigurationError, RelayBus, type EventHandler } from '@relaybus/core';
+import {
+  ConfigurationError,
+  RelayBus,
+  describeCatalog,
+  type CatalogEntry,
+  type EventHandler,
+} from '@relaybus/core';
+import { readEventConsumerMetadata } from './event-consumer.decorator.js';
 import { readSubscribeMetadata, type SubscribeMetadata } from './subscribe.decorator.js';
 
 interface SubscribedMethod {
@@ -10,10 +17,10 @@ interface SubscribedMethod {
 }
 
 /**
- * Finds every `@Subscribe` method of every singleton provider in the
- * application and registers it on the bus before the bus starts. Providers
- * that are request-scoped or transient, directly or through a dependency, and
- * declare `@Subscribe` methods fail the boot. A request-scoped provider whose
+ * Finds every `@Subscribe` method and every `@EventConsumer` class among the
+ * singleton providers of the application and registers them on the bus before
+ * the bus starts. Providers that are request-scoped or transient, directly or
+ * through a dependency, and use either decorator fail the boot. A request-scoped provider whose
  * token is neither a class nor an instance carrying the decorated prototype
  * (for example a string-token factory) cannot be inspected and is skipped.
  */
@@ -28,6 +35,7 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
   onModuleInit(): void {
     const registeredBy = new Map<string, string>();
     const visited = new Map<object, Set<string>>();
+    const consumers = new WeakSet<object>();
     for (const wrapper of this.discovery.getProviders()) {
       if (wrapper.isTransient || !wrapper.isDependencyTreeStatic()) {
         this.assertNoHandlers(wrapper);
@@ -72,6 +80,55 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
           );
         }
       }
+      if (!consumers.has(instance)) {
+        consumers.add(instance);
+        this.registerEventConsumers(instance, className, registeredBy);
+      }
+    }
+  }
+
+  private registerEventConsumers(
+    instance: object,
+    className: string,
+    registeredBy: Map<string, string>,
+  ): void {
+    const lookup = instance as Record<string, unknown>;
+    for (const { catalog, options, selectedEntries } of readEventConsumerMetadata(
+      instance.constructor,
+    )) {
+      const { name, entries } = describeCatalog(catalog);
+      const label = name ?? 'catalog';
+      const handlers = selectedEntries ?? entries.filter((entry) => isMethod(lookup, entry));
+      const missing = handlers.filter((entry) => !isMethod(lookup, entry));
+      if (missing.length > 0) {
+        throw new ConfigurationError(
+          `${className} uses @EventConsumer(${label}) but lacks the handler methods of events ` +
+            `it consumes: ${missing.map((entry) => entry.handlerName).join(', ')}`,
+        );
+      }
+      if (handlers.length === 0) {
+        throw new ConfigurationError(
+          `${className} uses @EventConsumer(${label}) but defines none of its handler ` +
+            `methods (${entries.map((entry) => entry.handlerName).join(', ')})`,
+        );
+      }
+      for (const entry of handlers) {
+        const id = `${className}.${entry.handlerName}`;
+        const previous = registeredBy.get(id);
+        if (previous !== undefined) {
+          throw new ConfigurationError(
+            `Handler id '${id}' of @EventConsumer(${label}) is already used by ${previous}; ` +
+              `give the @Subscribe a unique { id } or drop it`,
+          );
+        }
+        registeredBy.set(id, `${className}.${entry.handlerName}`);
+        const method = lookup[entry.handlerName] as (...args: Parameters<EventHandler>) => unknown;
+        this.bus.subscribe(
+          entry.eventClass as never,
+          (envelope, context) => method.call(instance, envelope, context),
+          { ...options, id },
+        );
+      }
     }
   }
 
@@ -93,6 +150,12 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
    */
   private assertNoHandlers(wrapper: InstanceWrapper): void {
     const type = (wrapper.isFactory ? wrapper.token : wrapper.metatype) as unknown;
+    if (typeof type === 'function' && readEventConsumerMetadata(type).length > 0) {
+      throw new ConfigurationError(
+        `${type.name} uses @EventConsumer but its provider is request-scoped or transient ` +
+          `(directly or through a dependency); handlers must be singleton providers`,
+      );
+    }
     const prototype = typeof type === 'function' ? (type.prototype as object) : null;
     const [first] = prototype === null ? [] : this.subscribedMethods(prototype);
     if (first !== undefined) {
@@ -103,4 +166,8 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
       );
     }
   }
+}
+
+function isMethod(instance: Record<string, unknown>, entry: CatalogEntry): boolean {
+  return typeof instance[entry.handlerName] === 'function';
 }

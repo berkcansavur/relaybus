@@ -16,6 +16,7 @@ relaybus stores every event in the same database transaction as your business da
 - [Leases and fencing](https://berkcansavur.github.io/relaybus/concepts/leases.md): How competing workers claim deliveries with leases and why a stalled worker cannot overwrite the worker that took over.
 - [Retries and backoff](https://berkcansavur.github.io/relaybus/concepts/retries.md): Capped exponential backoff with full jitter, timeouts and non-retryable errors in relaybus.
 - [Ordering keys](https://berkcansavur.github.io/relaybus/concepts/ordering-keys.md): Per-key ordering in commit order: how the sequence is assigned and what it does and does not promise.
+- [Compile-time safety with event catalogs](https://berkcansavur.github.io/relaybus/concepts/event-catalogs.md): Group events in a catalog so the TypeScript compiler rejects a missing handler, a wrong payload or an event published to the wrong catalog, and a boot check catches the rest.
 - [Dead letters](https://berkcansavur.github.io/relaybus/concepts/dead-letters.md): What happens to events that exhaust their retries, and how to inspect and requeue them.
 
 ## Packages
