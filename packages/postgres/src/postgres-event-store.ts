@@ -28,7 +28,7 @@ import {
   readCount,
   type LaneLease,
 } from './row-mapping.js';
-import { createPostgresSchemaStatements } from './schema.js';
+import { createPostgresSchemaStatements, postgresSchemaMarker } from './schema.js';
 import { PostgresStatements } from './statements.js';
 
 /** Options shared by every way of connecting. */
@@ -153,6 +153,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   readonly #statements: PostgresStatements;
   readonly #schemaStatements: readonly string[];
   readonly #setupLockKey: string;
+  readonly #schemaMarker: string;
   readonly #purgeBatchSize: number;
   readonly #completionHistory: boolean;
   readonly #logger: RelayBusLogger;
@@ -185,6 +186,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     this.#statements = new PostgresStatements(names);
     this.#schemaStatements = createPostgresSchemaStatements(options);
     this.#setupLockKey = this.#statements.setupLockKey;
+    this.#schemaMarker = postgresSchemaMarker(this.#schemaStatements.slice(0, -1));
     this.#purgeBatchSize = purgeBatchSize;
     this.#completionHistory = names.completionHistory;
     this.#logger = options.logger ?? console;
@@ -215,16 +217,35 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
    * Creates the schema, tables and indexes if they do not exist. Safe to call
    * from many processes at once: a transaction-scoped advisory lock serializes
    * the DDL, so racing `CREATE TABLE IF NOT EXISTS` statements cannot collide.
+   * When the lane table already carries the marker of the current statements
+   * ({@link postgresSchemaMarker}) nothing runs and no table is locked, so instances
+   * that start next to running dispatchers cannot deadlock with their claims.
    * Skip it (`setupStore: false`) when a migration tool applies
    * `createPostgresSchemaSql()` instead.
    */
   async setup(): Promise<void> {
+    // DDL on a current schema would still lock the tables, and those locks deadlock with running claims.
+    if (await this.#schemaIsCurrent()) {
+      return;
+    }
     await this.#executor.transaction(async (transaction) => {
       await this.#executor.query(this.#statements.setupLock, [this.#setupLockKey], transaction);
+      if (await this.#schemaIsCurrent(transaction)) {
+        return;
+      }
       for (const statement of this.#schemaStatements) {
         await this.#executor.query(statement, [], transaction);
       }
     });
+  }
+
+  async #schemaIsCurrent(transaction?: TTransaction): Promise<boolean> {
+    const rows = await this.#executor.query(
+      this.#statements.schemaCurrent,
+      [this.#schemaMarker],
+      transaction,
+    );
+    return rows[0]!['current'] === true;
   }
 
   transaction<T>(work: (transaction: TTransaction) => Promise<T>): Promise<T> {

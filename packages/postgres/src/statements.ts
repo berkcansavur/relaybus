@@ -88,6 +88,14 @@ export class PostgresStatements {
     return `relaybus:${this.#names.schema}`;
   }
 
+  /**
+   * Whether the lane table carries `marker` as its comment, that is whether the schema statements
+   * that produce that marker already ran. Takes no table lock. Parameters: `[marker]`.
+   */
+  get schemaCurrent(): string {
+    return `SELECT coalesce(obj_description(to_regclass('${this.#names.lanes}'), 'pg_class') = $1::text, false) AS current`;
+  }
+
   get setupLock(): string {
     return 'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))';
   }

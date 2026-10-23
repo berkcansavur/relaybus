@@ -55,12 +55,21 @@ describe('schema SQL', () => {
     expect(statements.length).toBeGreaterThan(8);
     for (const statement of statements) {
       // Guarded creation, a conditional upgrade block, a drop of an obsolete index, a storage
-      // parameter or an insert that skips existing lanes: running any of them again changes nothing.
+      // parameter, an insert that skips existing lanes or the schema marker: running any of them again changes nothing.
       expect(statement).toMatch(
-        /IF NOT EXISTS|IF EXISTS|ON CONFLICT \(lane\) DO NOTHING|ALTER TABLE .* SET \(autovacuum/,
+        /IF NOT EXISTS|IF EXISTS|ON CONFLICT \(lane\) DO NOTHING|ALTER TABLE .* SET \(autovacuum|COMMENT ON TABLE/,
       );
     }
     expect(statements[0]).not.toMatch(/CREATE SCHEMA/);
+  });
+
+  it('ends with a marker that changes with the statements before it', () => {
+    const plain = createPostgresSchemaStatements();
+    const withHistory = createPostgresSchemaStatements({ completionHistory: true });
+    expect(plain.at(-1)).toMatch(
+      /^COMMENT ON TABLE "public"\."relaybus_lanes" IS 'relaybus schema [0-9a-f]{32}'$/,
+    );
+    expect(withHistory.at(-1)).not.toBe(plain.at(-1));
   });
 
   it('creates a custom schema first', () => {

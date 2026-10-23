@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { LANE_COUNT, resolvePostgresNames, type PostgresSchemaOptions } from './names.js';
 import { laneExpression } from './sql-fragments.js';
 
@@ -100,7 +101,18 @@ export function createPostgresSchemaStatements(options: PostgresSchemaOptions = 
   if (names.schema !== 'public') {
     statements.unshift(`CREATE SCHEMA IF NOT EXISTS ${names.quotedSchema}`);
   }
+  statements.push(`COMMENT ON TABLE ${names.lanes} IS '${postgresSchemaMarker(statements)}'`);
   return statements;
+}
+
+/**
+ * The comment the last schema statement leaves on the lane table: a hash of every statement
+ * before it. {@link PostgresEventStore.setup} reads it to skip the statements when the schema is
+ * already current, because their table locks queue behind running claims and completions and
+ * deadlock with them.
+ */
+export function postgresSchemaMarker(statements: readonly string[]): string {
+  return `relaybus schema ${createHash('sha256').update(statements.join(';')).digest('hex').slice(0, 32)}`;
 }
 
 /**
