@@ -137,4 +137,55 @@ describe('NotificationListener', () => {
     expect(connect).toHaveBeenCalledTimes(1);
     expect(logger.warn).not.toHaveBeenCalled();
   });
+  it('ends a reconnected connection whose LISTEN is still pending when it is closed', async () => {
+    vi.useFakeTimers();
+    const { notifications, connections, connect, listener, logger } = createListener();
+    await notifications.start();
+    connections[0]!.emit('error', new Error('gone'));
+    const stalled = new FakeConnection();
+    // LISTEN hangs until the connection is ended, as a stalled server would.
+    stalled.query.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          stalled.end.mockImplementationOnce(async () => {
+            reject(new Error('Connection terminated'));
+            stalled.emit('end');
+          });
+        }),
+    );
+    connect.mockImplementationOnce(async () => {
+      connections.push(stalled);
+      return stalled;
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(stalled.query).toHaveBeenCalledTimes(1);
+    await notifications.close();
+    expect(stalled.end).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(listener).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+  it('ends a connection whose LISTEN still succeeds after it was closed, without reporting', async () => {
+    const { notifications, connections, connect, listener, logger } = createListener();
+    let answerListen!: () => void;
+    connect.mockImplementationOnce(async () => {
+      const connection = new FakeConnection();
+      // The server answers LISTEN even though the connection is being ended meanwhile.
+      connection.query.mockImplementationOnce(
+        () => new Promise((resolve) => void (answerListen = () => resolve({ rows: [] }))),
+      );
+      connection.end.mockImplementationOnce(async () => undefined);
+      connections.push(connection);
+      return connection;
+    });
+    const starting = notifications.start();
+    await vi.waitFor(() => expect(connections[0]!.query).toHaveBeenCalledTimes(1));
+    await notifications.close();
+    answerListen();
+    await starting;
+    expect(connections[0]!.end).toHaveBeenCalledTimes(1);
+    expect(listener).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
 });

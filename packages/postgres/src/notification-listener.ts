@@ -23,8 +23,8 @@ export class NotificationListener {
   readonly #channel: string;
   readonly #listener: () => void;
   readonly #logger: RelayBusLogger;
-  /** Ends the current listening connection; undefined while there is none. */
-  #drop: (() => void) | undefined;
+  /** Ends the current connection, listening or still starting; undefined while there is none. */
+  #drop: (() => Promise<void>) | undefined;
   #reconnectTimer: NodeJS.Timeout | undefined;
   #closed = false;
 
@@ -44,19 +44,30 @@ export class NotificationListener {
   async start(): Promise<void> {
     const connection = await this.#connect();
     let ended = false;
-    // Called at most once: a loss is handled once (`ended`), and closing or a failed start end what was not lost.
-    const end = (): void => {
-      ended = true;
-      connection.end().catch(() => undefined);
+    let ending: Promise<void> = Promise.resolve();
+    // Idempotent: a loss, a failed start and closing may all end the same connection. `ended` is set
+    // first because ending can report the end synchronously, which calls back into `onLost`.
+    const end = (): Promise<void> => {
+      if (!ended) {
+        ended = true;
+        ending = connection.end().catch(() => undefined);
+      }
+      return ending;
     };
+    if (this.#closed) {
+      await end();
+      return;
+    }
+    // Registered before LISTEN, so closing ends a connection whose LISTEN has not answered yet.
+    this.#drop = end;
     let listening = false;
     const onLost = (error?: Error): void => {
       if (!listening || ended) {
         // While starting, a failure surfaces as the rejection of LISTEN, which ends the connection.
         return;
       }
-      // Closing ends the connection first, so a loss reported here is never one of a closed listener.
-      end();
+      void end();
+      // Only a listening connection gets here, and it is always the current one.
       this.#drop = undefined;
       this.#logger.warn(
         `[NotificationListener](start) Listening connection lost, opening another | channel=${this.#channel} | error=${error?.message ?? 'connection ended'}`,
@@ -69,15 +80,21 @@ export class NotificationListener {
     try {
       await connection.query(`LISTEN "${this.#channel}"`);
     } catch (error) {
-      end();
+      if (this.#drop === end) {
+        this.#drop = undefined;
+      }
+      await end();
+      if (this.#closed) {
+        // Closing ended the connection while LISTEN was pending: not a failure to report.
+        return;
+      }
       throw error;
     }
     if (this.#closed) {
-      end();
+      await end();
       return;
     }
     listening = true;
-    this.#drop = end;
   }
 
   #scheduleReconnect(): void {
@@ -108,6 +125,6 @@ export class NotificationListener {
     clearTimeout(this.#reconnectTimer);
     const drop = this.#drop;
     this.#drop = undefined;
-    drop?.();
+    await drop?.();
   }
 }
