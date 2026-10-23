@@ -222,7 +222,7 @@ tool, run it as one transaction with the workers stopped. Running 0.1.0 and the 
   created with `autovacuum_vacuum_scale_factor = 0.02`; for sustained throughput above a few thousand deliveries per
   second also lower `autovacuum_vacuum_cost_delay` for this table (or run a periodic `VACUUM`), and watch
   `pg_stat_user_tables.n_dead_tup`. The lane table is vacuumed by HOT pruning alone.
-- **Lost answers and stale reads.** A claim from held lanes is one statement. If the connection fails after the database recorded the
+- **Lost answers and stale reads.** A claim is one statement. If the connection fails after the database recorded the
   batch but before the answer arrived, the store gives back every delivery of its own lanes that it never handed out (it remembers what it
   handed out until the dispatcher settled it). A claim that waited for a lane lock re-runs itself when the lane changed meanwhile, so it
   never claims from a snapshot older than the lane it got. The dispatcher retries a completion, reschedule, bury or release that the store
@@ -232,8 +232,21 @@ tool, run it as one transaction with the workers stopped. Running 0.1.0 and the 
   (`dispatcher.leaseDuration`); a worker that stops gracefully gives them back immediately. Lanes are chosen
   per claim, so a busy backlog spreads over workers; a few hot keys live in few lanes and run on few workers by
   design (they are ordered).
+- **Round trips.** A claim is normally one statement: it claims from the lanes the worker holds and takes free lanes in
+  the same statement. Only taking over a lane whose previous holder died with deliveries running (their lost attempts
+  are charged first) continues in a short transaction. Publishing new events is one statement per `append`, whatever
+  the batch size; adding a handler to an event that already exists costs two more.
+- **Wake-ups.** `append` sends one `pg_notify` per call when it inserted a delivery that is due now (none for delayed
+  deliveries; PostgreSQL merges repeats within a transaction and drops them on rollback). A dispatcher on a store built
+  from `pool` or `connectionString` listens on that channel (`<schema>.<prefix>deliveries`, hashed when longer than 63
+  characters) on one connection of its own, opened with the pool's settings outside the pool, so an event published by any process runs within
+  milliseconds instead of at the next poll. A lost listening connection is replaced after a second; polling remains the
+  safety net, so a missed notification only costs latency. A store built on an `executor` cannot listen and relies on
+  polling (and on the wake-up of its own process after a publish). Notifications are sent from the publishing
+  transaction whatever the store, and commits that notify are serialized by PostgreSQL's notification queue lock.
 - **Pooling.** Claim, complete, extend and purge need a free connection besides your transactions; size the pool for
-  `dispatcher.concurrency` plus publishers. With PgBouncer use session or transaction pooling; no session state is used.
+  `dispatcher.concurrency` plus publishers; the listening connection comes on top of the pool's `max`. Listening needs a
+  session: with PgBouncer in transaction pooling, notifications are not delivered and dispatchers fall back to polling.
 - **Handlers added later.** A delivery added to an old event (new handler, republish with the same id) keeps the
   event's position in its key; if later events of that handler already finished, it runs after them.
 - **Listing completed deliveries.** Without `completionHistory`, `listDeliveries({ status: 'completed' })` is empty and

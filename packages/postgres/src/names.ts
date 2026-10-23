@@ -1,4 +1,5 @@
 import { ConfigurationError } from '@relaybus/core';
+import { createHash } from 'node:crypto';
 import { assertIdentifier, quoteIdentifier } from './identifiers.js';
 
 /** Where relaybus keeps its tables. */
@@ -35,6 +36,11 @@ export interface PostgresNames {
   /** Completion history, present only with `completionHistory`. */
   readonly completions: string;
   readonly completionHistory: boolean;
+  /**
+   * Channel of the notifications that wake dispatchers when deliveries were published:
+   * `<schema>.<prefix>deliveries`, or a hash of it when that is longer than a channel name may be.
+   */
+  readonly notificationChannel: string;
   /** Index names, quoted but not schema-qualified (an index lives in its table's schema). */
   readonly indexes: {
     readonly deliveryEventHandler: string;
@@ -59,6 +65,7 @@ export interface PostgresNames {
 export const LANE_COUNT = 256;
 
 const DEFAULT_SCHEMA = 'public';
+const MAXIMUM_CHANNEL_LENGTH = 63;
 const DEFAULT_TABLE_PREFIX = 'relaybus_';
 const TABLE_PREFIX_PATTERN = /^[a-z0-9_]*$/;
 
@@ -95,6 +102,7 @@ export function resolvePostgresNames(options: PostgresSchemaOptions = {}): Postg
     eventCompletions: table('event_completions'),
     completions: table('completed_deliveries'),
     completionHistory: options.completionHistory ?? false,
+    notificationChannel: channelName(`${schema}.${tablePrefix}deliveries`),
     indexes: {
       deliveryEventHandler: index('deliveries_event_handler_unique'),
       deliveryLaneDue: index('deliveries_lane_due_idx'),
@@ -114,4 +122,11 @@ export function resolvePostgresNames(options: PostgresSchemaOptions = {}): Postg
       ],
     },
   };
+}
+
+/** PostgreSQL truncates names longer than 63 bytes, which could merge channels: those are hashed instead. */
+function channelName(readable: string): string {
+  return readable.length <= MAXIMUM_CHANNEL_LENGTH
+    ? readable
+    : `relaybus_${createHash('sha256').update(readable).digest('hex').slice(0, 32)}`;
 }

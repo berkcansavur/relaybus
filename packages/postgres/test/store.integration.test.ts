@@ -237,3 +237,114 @@ describe('append edge cases', () => {
     expect(result.rows.map((row) => row.sequence)).toEqual(['1', '2', '3']);
   });
 });
+
+describe('reports of new deliveries', () => {
+  async function publish(store: PostgresEventStore, availableAt: Date): Promise<void> {
+    await store.transaction((transaction) =>
+      store.append(
+        transaction,
+        [{ event: envelope(), deliveries: [{ id: createUuidV7(), handler: 'h', availableAt }] }],
+        NOW,
+      ),
+    );
+  }
+
+  async function settle(): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+
+  it('reports a committed publish of due deliveries once, and neither delayed nor rolled back ones', async () => {
+    const schema = uniqueSchema();
+    const store = new PostgresEventStore({ pool: database.pool, schema });
+    await store.setup();
+    const peer = new PostgresEventStore({ pool: database.pool, schema });
+    let reports = 0;
+    const unwatch = await peer.watchNewDeliveries(() => void (reports += 1));
+    try {
+      await publish(store, NOW);
+      await settle();
+      expect(reports).toBe(1);
+      // Two publish calls of one transaction are one notification.
+      await store.transaction(async (transaction) => {
+        for (let index = 0; index < 2; index += 1) {
+          await store.append(
+            transaction,
+            [
+              {
+                event: envelope(),
+                deliveries: [{ id: createUuidV7(), handler: 'h', availableAt: NOW }],
+              },
+            ],
+            NOW,
+          );
+        }
+      });
+      await settle();
+      expect(reports).toBe(2);
+      await publish(store, new Date(NOW.getTime() + 60_000));
+      await expect(
+        store.transaction(async (transaction) => {
+          await store.append(
+            transaction,
+            [
+              {
+                event: envelope(),
+                deliveries: [{ id: createUuidV7(), handler: 'h', availableAt: NOW }],
+              },
+            ],
+            NOW,
+          );
+          throw new Error('rolled back');
+        }),
+      ).rejects.toThrow('rolled back');
+      await settle();
+      expect(reports).toBe(2);
+      // A handler added to an existing event is reported too.
+      const existing = envelope();
+      await store.transaction((transaction) =>
+        store.append(transaction, [{ event: existing, deliveries: [] }], NOW),
+      );
+      await store.transaction((transaction) =>
+        store.append(
+          transaction,
+          [
+            {
+              event: existing,
+              deliveries: [{ id: createUuidV7(), handler: 'late', availableAt: NOW }],
+            },
+          ],
+          NOW,
+        ),
+      );
+      await settle();
+      expect(reports).toBe(3);
+    } finally {
+      await unwatch!();
+    }
+    await publish(store, NOW);
+    await settle();
+    expect(reports).toBe(3);
+  });
+
+  it('cannot listen through an executor, which has no connection of its own', async () => {
+    const store = new PostgresEventStore({
+      executor: { transaction: (work) => work(null as never), query: async () => [] },
+      schema: uniqueSchema(),
+    });
+    expect(await store.watchNewDeliveries(() => undefined)).toBeUndefined();
+  });
+
+  it('uses a hashed channel when the readable one would be too long', async () => {
+    const schema = `s${'x'.repeat(60)}`;
+    const pool = createTestPool(database.connectionString, 2);
+    const store = new PostgresEventStore({ pool, schema });
+    await store.setup();
+    let reports = 0;
+    const unwatch = await store.watchNewDeliveries(() => void (reports += 1));
+    await publish(store, NOW);
+    await settle();
+    await unwatch!();
+    await pool.end();
+    expect(reports).toBe(1);
+  });
+});

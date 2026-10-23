@@ -15,9 +15,10 @@ import {
   type PurgeResult,
   type RelayBusLogger,
 } from '@relaybus/core';
-import { Pool, type PoolClient, type PoolConfig } from 'pg';
+import { Client, Pool, type PoolClient, type PoolConfig } from 'pg';
 import type { PostgresExecutor, PostgresParameter, PostgresRow } from './executor.js';
 import { resolvePostgresNames, type PostgresSchemaOptions } from './names.js';
+import { NotificationListener } from './notification-listener.js';
 import { PgExecutor } from './pg-executor.js';
 import {
   mapClaimedDelivery,
@@ -161,6 +162,9 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   readonly #generations = new Map<string, bigint>();
   readonly #ownerQueues = new Map<string, Promise<void>>();
   #ownedPool: Pool | undefined;
+  /** The `pg` pool behind the store, when it has one: listening for notifications needs a connection of its own. */
+  readonly #pool: Pool | undefined;
+  readonly #notificationChannel: string;
 
   constructor(options: PostgresEventStoreOptions<TTransaction>) {
     const sources = [options.pool, options.connectionString, options.executor].filter(
@@ -184,8 +188,10 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     this.#purgeBatchSize = purgeBatchSize;
     this.#completionHistory = names.completionHistory;
     this.#logger = options.logger ?? console;
+    this.#notificationChannel = names.notificationChannel;
     if (options.executor !== undefined) {
       this.#executor = options.executor;
+      this.#pool = undefined;
     } else {
       const pool =
         options.pool ??
@@ -199,6 +205,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
         });
         this.#ownedPool = pool;
       }
+      this.#pool = pool;
       // Without an executor the transaction type is PoolClient, as the default type argument states.
       this.#executor = new PgExecutor(pool) as unknown as PostgresExecutor<TTransaction>;
     }
@@ -225,12 +232,13 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   }
 
   /**
-   * Writes the entries in `transaction`. Keyed events reserve their sequence
-   * numbers first (locking the key rows in sorted order, so publishers cannot
-   * deadlock inside one call), then events, then deliveries, each in a single
-   * multi-row statement ordered by primary key. Two transactions that append
-   * keys in opposite order across several calls can still deadlock (40P01);
-   * the database rolls one back and the caller retries.
+   * Writes the entries in `transaction`, normally with one statement
+   * ({@link PostgresStatements.insertFreshEvents}): keyed events reserve their sequence numbers (locking
+   * the key rows in sorted order, so publishers cannot deadlock inside one call), then the new events and
+   * their deliveries are inserted, ordered by primary key, and one notification wakes the dispatchers
+   * when a delivery is due now. Events that already existed get their missing handlers' deliveries in
+   * two more statements. Two transactions that append keys in opposite order across several calls can
+   * still deadlock (40P01); the database rolls one back and the caller retries.
    * A duplicate event id still consumes a sequence number; gaps are harmless
    * because only the order of sequences matters.
    */
@@ -240,50 +248,57 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     now: Date,
   ): Promise<AppendResult> {
     const plan = planAppend(entries);
-    const createdAt = now.toISOString();
-    const sequences = await this.#reserveSequences(plan.events, transaction);
-    const eventRows = toEventRows(plan, sequences);
-    const insertEvents = async (rows: readonly EventRow[]): Promise<string[]> =>
-      rows.length === 0
-        ? []
-        : (
-            await this.#executor.query(
-              this.#statements.insertEvents,
-              [JSON.stringify(rows), createdAt],
-              transaction,
-            )
-          ).map((row) => row['id'] as string);
-    const insertedEventIds = new Set(await insertEvents(eventRows));
-    // An event that already exists may be getting the same new handler from another transaction
-    // at this very moment. Whoever holds the event decides, so the freshness check of the insert
-    // below sees what the other transaction committed, even if its delivery has completed since.
-    // An existing event that a purge removed meanwhile is inserted again instead of being skipped.
-    let existingRows = eventRows.filter((row) => !insertedEventIds.has(row.id));
-    while (existingRows.length > 0 && plan.deliveries.length > 0) {
-      const locked = new Set(
-        (
-          await this.#executor.query(
-            this.#statements.lockExistingEvents,
-            [JSON.stringify(existingRows.map((row) => row.id).sort())],
-            transaction,
-          )
-        ).map((row) => row['id'] as string),
-      );
-      const gone = existingRows.filter((row) => !locked.has(row.id));
-      const reinserted = await insertEvents(gone);
-      for (const eventId of reinserted) {
-        insertedEventIds.add(eventId);
-      }
-      existingRows = gone.filter((row) => !insertedEventIds.has(row.id));
+    if (plan.events.length === 0) {
+      return { appendedEventIds: [], duplicateEventIds: [], appendedDeliveryCount: 0 };
     }
-    const insertedDeliveries =
-      plan.deliveries.length === 0
-        ? []
-        : await this.#executor.query(
-            this.#statements.insertDeliveries,
-            [JSON.stringify(plan.deliveries), createdAt, JSON.stringify([...insertedEventIds])],
-            transaction,
-          );
+    const createdAt = now.toISOString();
+    const handlersByEvent = new Map<string, string[]>();
+    for (const delivery of plan.deliveries) {
+      handlersByEvent.set(delivery.event_id, [
+        ...(handlersByEvent.get(delivery.event_id) ?? []),
+        delivery.handler,
+      ]);
+    }
+    const keyCounts = new Map<string, number>();
+    for (const event of plan.events) {
+      if (event.key !== null) {
+        keyCounts.set(event.key, (keyCounts.get(event.key) ?? 0) + 1);
+      }
+    }
+    const fresh = await this.#executor.query(
+      this.#statements.insertFreshEvents,
+      [
+        JSON.stringify(
+          plan.events.map((event, ordinal) => ({
+            ordinal,
+            ...toEventRow(event, null, handlersByEvent.get(event.id) ?? []),
+          })),
+        ),
+        createdAt,
+        JSON.stringify(plan.deliveries),
+        JSON.stringify([...keyCounts].map(([key, count]) => ({ key, count }))),
+        createdAt,
+      ],
+      transaction,
+    );
+    const insertedEventIds = new Set(
+      fresh.filter((row) => row['inserted'] === true).map((row) => row['id'] as string),
+    );
+    let appendedDeliveryCount = readCount(fresh[0]!, 'deliveries');
+    const remaining = plan.deliveries.filter(
+      (delivery) => !insertedEventIds.has(delivery.event_id),
+    );
+    if (remaining.length > 0) {
+      appendedDeliveryCount += await this.#appendToExistingEvents(
+        transaction,
+        plan,
+        fresh,
+        remaining,
+        handlersByEvent,
+        insertedEventIds,
+        createdAt,
+      );
+    }
     const appendedEventIds: string[] = [];
     const duplicateEventIds: string[] = [];
     for (const { eventId, repeated } of plan.outcomes) {
@@ -291,26 +306,78 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
         eventId,
       );
     }
-    return {
-      appendedEventIds,
-      duplicateEventIds,
-      appendedDeliveryCount: insertedDeliveries.length,
-    };
+    return { appendedEventIds, duplicateEventIds, appendedDeliveryCount };
   }
 
   /**
-   * Claims up to `limit` due deliveries in two steps. The first is one
-   * statement on the lanes this owner already holds ({@link PostgresStatements.claimHeld}):
-   * a backlog that fills the batch costs one round trip. When it does not, a
-   * transaction continues: the slow claim on held lanes whose scan window was
-   * full of blocked followers, then free lanes with due work, taken a few at
-   * a time (4, 8, 16, ...) so a worker holds only as many lanes as it needs,
-   * and the batch is recorded in the lane rows. Lanes taken for nothing
-   * (everything in them is blocked or not yet due) are handed back. The step
-   * that fails after the first one has recorded deliveries returns those
-   * instead of failing: a recorded delivery nobody received would be held
-   * for a whole lease. See {@link PostgresStatements.claim} for the rules a
-   * delivery must satisfy.
+   * Adds the deliveries of events the publishing statement found already stored. An event that already
+   * exists may be getting the same new handler from another transaction at this very moment. Whoever
+   * holds the event decides, so the freshness check of the insert sees what the other transaction
+   * committed, even if its delivery has completed since. An existing event that a purge removed
+   * meanwhile is inserted again (with the sequence reserved for it) instead of being skipped; its id is
+   * added to `insertedEventIds`. Returns how many deliveries were inserted.
+   */
+  async #appendToExistingEvents(
+    transaction: TTransaction,
+    plan: AppendPlan,
+    fresh: readonly PostgresRow[],
+    deliveries: readonly DeliveryRow[],
+    handlersByEvent: ReadonlyMap<string, string[]>,
+    insertedEventIds: Set<string>,
+    createdAt: string,
+  ): Promise<number> {
+    const sequences = new Map(
+      fresh.map((row) => [row['id'] as string, row['sequence'] as string | null]),
+    );
+    const reinserted: string[] = [];
+    let existing = plan.events
+      .filter((event) => !insertedEventIds.has(event.id))
+      .map((event) =>
+        toEventRow(event, sequences.get(event.id)!, handlersByEvent.get(event.id) ?? []),
+      );
+    while (existing.length > 0) {
+      const locked = new Set(
+        (
+          await this.#executor.query(
+            this.#statements.lockExistingEvents,
+            [JSON.stringify(existing.map((row) => row.id).sort())],
+            transaction,
+          )
+        ).map((row) => row['id'] as string),
+      );
+      const gone = existing.filter((row) => !locked.has(row.id));
+      if (gone.length > 0) {
+        const inserted = await this.#executor.query(
+          this.#statements.insertEvents,
+          [JSON.stringify(gone), createdAt],
+          transaction,
+        );
+        for (const row of inserted) {
+          insertedEventIds.add(row['id'] as string);
+          reinserted.push(row['id'] as string);
+        }
+      }
+      existing = gone.filter((row) => !insertedEventIds.has(row.id));
+    }
+    const inserted = await this.#executor.query(
+      this.#statements.insertDeliveries,
+      [JSON.stringify(deliveries), createdAt, JSON.stringify(reinserted), createdAt],
+      transaction,
+    );
+    return inserted.length;
+  }
+
+  /**
+   * Claims up to `limit` due deliveries, normally with one statement
+   * ({@link PostgresStatements.claimLanes}): from the lanes this owner already holds, then from free lanes
+   * it takes in the same statement, recording the batch in the lane rows. A claim that would have to take
+   * over a lane whose previous holder still runs deliveries under an expired lease continues in a
+   * transaction that charges their lost attempts first, taking free lanes a few at a time (4, 8, 16, ...);
+   * so does a claim whose statement kept seeing a lane it holds change under it, and one that came up
+   * short with more free lanes left than it looked at. The step that fails after
+   * the first one has recorded deliveries returns those instead of failing: a recorded delivery nobody
+   * received would be held for a whole lease. See {@link PostgresStatements.claim} for the rules a delivery
+   * must satisfy.
    */
   claim(request: ClaimRequest): Promise<ClaimedDelivery[]> {
     if (request.handlers.length === 0 || !(request.limit > 0)) {
@@ -351,23 +418,24 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
         `[PostgresEventStore](claim) Giving back unreturned deliveries still fails, so no claim is made | owner=${request.leaseOwner}`,
       );
     }
-    let heldRows: readonly PostgresRow[];
+    let rows: readonly PostgresRow[];
     try {
-      heldRows = await this.#claimHeldLanes(request);
+      rows = await this.#claimInOneStatement(request);
     } catch (error) {
       await this.#reconcile(request.leaseOwner);
       throw error;
     }
-    const claimed = heldRows.filter((row) => row['delivery_id'] !== null);
-    this.#forgetFinished(heldRows[0]!, request.leaseOwner, claimed);
+    const claimed = rows.filter((row) => row['delivery_id'] !== null);
+    this.#forgetFinished(rows[0]!, request.leaseOwner, claimed);
     this.#handOut(claimed, request.leaseOwner);
-    if (claimed.length < request.limit) {
-      const blockedLanes =
-        heldRows[0]!['window_saturated'] === true
-          ? (JSON.parse(heldRows[0]!['held_lanes'] as string) as number[])
-          : [];
+    if (
+      claimed.length < request.limit &&
+      (rows[0]!['takeover_waiting'] === true ||
+        rows[0]!['unexamined_free_lanes'] === true ||
+        rows[0]!['stale'] === true)
+    ) {
       try {
-        const more = await this.#claimMore(request, claimed.length, blockedLanes);
+        const more = await this.#claimMore(request, claimed.length);
         this.#handOut(more, request.leaseOwner);
         claimed.push(...more);
       } catch (error) {
@@ -386,11 +454,11 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   }
 
   /**
-   * Runs the one-statement claim of the held lanes, again when it reports that it waited for a lane lock
-   * and read deliveries with an older snapshot than the lane it got. A lane is only locked by an operation
-   * of its own owner (another claim, a reschedule), so a few attempts are enough.
+   * Runs {@link PostgresStatements.claimLanes}, again when it reports that it waited for a lane lock and
+   * read deliveries with an older snapshot than the lane it got. A held lane is only locked by an
+   * operation of its own owner (another claim, a reschedule), so a few attempts are enough.
    */
-  async #claimHeldLanes(request: ClaimRequest): Promise<readonly PostgresRow[]> {
+  async #claimInOneStatement(request: ClaimRequest): Promise<readonly PostgresRow[]> {
     const parameters = [
       request.now.toISOString(),
       JSON.stringify(request.handlers),
@@ -399,27 +467,23 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       request.leaseExpiresAt.toISOString(),
       this.#generation(request.leaseOwner).toString(),
     ];
-    let rows = await this.#executor.query(this.#statements.claimHeld, parameters);
+    let rows = await this.#executor.query(this.#statements.claimLanes, parameters);
     for (
       let attempt = 1;
       attempt < MAXIMUM_STALE_CLAIM_ATTEMPTS && rows[0]!['stale'] === true;
       attempt += 1
     ) {
-      rows = await this.#executor.query(this.#statements.claimHeld, parameters);
+      rows = await this.#executor.query(this.#statements.claimLanes, parameters);
     }
     return rows;
   }
 
   /**
-   * Second step of {@link PostgresEventStore.claim}, in one transaction: the slow
-   * claim on the held lanes in `blockedLanes`, then free lanes. `alreadyClaimed`
-   * deliveries of the first step are in flight, so they are not picked again.
+   * Second step of {@link PostgresEventStore.claim}, in one transaction: takes free lanes a few at a
+   * time, lanes to take over included (their lost attempts are charged first), and records the batch.
+   * `alreadyClaimed` deliveries of the first step are in flight, so they are not picked again.
    */
-  async #claimMore(
-    request: ClaimRequest,
-    alreadyClaimed: number,
-    blockedLanes: readonly number[],
-  ): Promise<PostgresRow[]> {
+  async #claimMore(request: ClaimRequest, alreadyClaimed: number): Promise<PostgresRow[]> {
     const now = request.now.toISOString();
     const leaseExpiresAt = request.leaseExpiresAt.toISOString();
     const handlers = JSON.stringify(request.handlers);
@@ -429,19 +493,6 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       const claimed: PostgresRow[] = [];
       const remaining = (): number => request.limit - alreadyClaimed - claimed.length;
       const takenLanes = new Set<number>();
-      if (blockedLanes.length > 0) {
-        const locked = await this.#executor.query(
-          this.#statements.lockHeldLanes,
-          [request.leaseOwner, now, generation],
-          transaction,
-        );
-        const slowRows = await this.#executor.query(
-          this.#statements.claimBehindBlockedKeys,
-          [now, handlers, remaining(), JSON.stringify(locked.map((row) => readCount(row, 'lane')))],
-          transaction,
-        );
-        claimed.push(...slowRows.filter((row) => row['delivery_id'] !== null));
-      }
       for (let laneCount = INITIAL_LANES_PER_ROUND; remaining() > 0;) {
         const taken = await this.#executor.query(
           this.#statements.takeFreeLanes,
@@ -696,6 +747,34 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     );
   }
 
+  /**
+   * Calls `listener` soon after a transaction that published deliveries due at once commits, in any
+   * process: `append` sends one `pg_notify` per call (merged per transaction, none for delayed
+   * deliveries), and this listens with `LISTEN` on a connection of its own, opened with the settings of
+   * the store's pool (one connection more than the pool's `max`). A lost connection is replaced after a
+   * second. Resolves with `undefined` for a store built on an `executor`, which has no connection of its
+   * own to listen on: polling then finds new deliveries (and the bus still wakes its own dispatcher).
+   */
+  async watchNewDeliveries(listener: () => void): Promise<(() => Promise<void>) | undefined> {
+    if (this.#pool === undefined) {
+      return undefined;
+    }
+    const options = this.#pool.options;
+    const watcher = new NotificationListener(
+      async () => {
+        // A client of its own, with the pool's connection settings: the pool keeps all its connections.
+        const client = new Client(options);
+        await client.connect();
+        return client;
+      },
+      this.#notificationChannel,
+      listener,
+      this.#logger,
+    );
+    await watcher.start();
+    return () => watcher.close();
+  }
+
   /** Frees the lanes `leaseOwner` holds that run no delivery, so other workers need not wait for the lease to expire. */
   async relinquish(leaseOwner: string): Promise<void> {
     await this.#executor.query(this.#statements.relinquish, [leaseOwner]);
@@ -864,33 +943,6 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     return leases.map((_, ord) => completed.has(ord));
   }
 
-  async #reserveSequences(
-    events: readonly EventEnvelope[],
-    transaction: TTransaction,
-  ): Promise<Map<string, bigint>> {
-    const counts = new Map<string, number>();
-    for (const event of events) {
-      if (event.key !== null) {
-        counts.set(event.key, (counts.get(event.key) ?? 0) + 1);
-      }
-    }
-    const firstSequences = new Map<string, bigint>();
-    if (counts.size === 0) {
-      return firstSequences;
-    }
-    const requested = [...counts].map(([key, count]) => ({ key, count }));
-    const rows = await this.#executor.query(
-      this.#statements.reserveSequences,
-      [JSON.stringify(requested)],
-      transaction,
-    );
-    for (const row of rows) {
-      const key = row['key'] as string;
-      firstSequences.set(key, BigInt(row['sequence'] as string) - BigInt(counts.get(key)!) + 1n);
-    }
-    return firstSequences;
-  }
-
   async #purgeOrphanEvents(
     lockStatement: string,
     deleteStatement: string,
@@ -988,36 +1040,24 @@ function planAppend(entries: readonly AppendEntry[]): AppendPlan {
   return { events, deliveries, outcomes };
 }
 
-function toEventRows(plan: AppendPlan, firstSequences: ReadonlyMap<string, bigint>): EventRow[] {
-  const nextSequences = new Map(firstSequences);
-  const handlersByEvent = new Map<string, string[]>();
-  for (const delivery of plan.deliveries) {
-    handlersByEvent.set(delivery.event_id, [
-      ...(handlersByEvent.get(delivery.event_id) ?? []),
-      delivery.handler,
-    ]);
-  }
-  return plan.events.map((event) => {
-    let sequence: string | null = null;
-    if (event.key !== null) {
-      const next = nextSequences.get(event.key)!;
-      nextSequences.set(event.key, next + 1n);
-      sequence = next.toString();
-    }
-    return {
-      id: event.id,
-      type: event.type,
-      source: event.source,
-      key: event.key,
-      sequence,
-      payload: event.payload,
-      headers: event.headers,
-      correlation_id: event.correlationId,
-      causation_id: event.causationId,
-      occurred_at: event.occurredAt.toISOString(),
-      handlers: handlersByEvent.get(event.id) ?? [],
-    };
-  });
+function toEventRow(
+  event: EventEnvelope,
+  sequence: string | null,
+  handlers: readonly string[],
+): EventRow {
+  return {
+    id: event.id,
+    type: event.type,
+    source: event.source,
+    key: event.key,
+    sequence,
+    payload: event.payload,
+    headers: event.headers,
+    correlation_id: event.correlationId,
+    causation_id: event.causationId,
+    occurred_at: event.occurredAt.toISOString(),
+    handlers,
+  };
 }
 
 function compareSequence(left: PostgresRow, right: PostgresRow): number {

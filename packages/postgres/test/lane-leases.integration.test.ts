@@ -527,6 +527,108 @@ describe('upgrade from 0.1.0', () => {
   });
 });
 
+describe('a claim that takes free lanes', () => {
+  async function laneOfKey(key: string): Promise<number> {
+    const result = await database.pool.query<{ lane: number }>(
+      `SELECT (hashtextextended($1::text, 0) & 255)::int AS lane`,
+      [key],
+    );
+    return result.rows[0]!.lane;
+  }
+
+  it('claims the earliest due deliveries across lanes, also when an early lane holds a late one too', async () => {
+    const { store } = await createStore();
+    const sharedLane = await laneOfKey('early');
+    let late = 'late-0';
+    for (let index = 1; (await laneOfKey(late)) !== sharedLane; index += 1) {
+      late = `late-${index}`;
+    }
+    let middle = 'middle-0';
+    for (let index = 1; (await laneOfKey(middle)) === sharedLane; index += 1) {
+      middle = `middle-${index}`;
+    }
+    const events = {
+      late: createEnvelope({ key: late }),
+      early: createEnvelope({ key: 'early' }),
+      middle: createEnvelope({ key: middle }),
+    };
+    await store.transaction((transaction) =>
+      store.append(
+        transaction,
+        [
+          { event: events.late, deliveries: [createDelivery('h', at(300))] },
+          { event: events.early, deliveries: [createDelivery('h', at(100))] },
+          { event: events.middle, deliveries: [createDelivery('h', at(200))] },
+        ],
+        at(0),
+      ),
+    );
+    const first = await claim(store, ['h'], 'worker-1', at(1_000), 2);
+    expect(first.map((delivery) => delivery.event.id)).toEqual([events.early.id, events.middle.id]);
+  });
+});
+
+describe('free lanes whose due deliveries all wait behind a later head', () => {
+  async function laneOfKey(key: string): Promise<number> {
+    const result = await database.pool.query<{ lane: number }>(
+      `SELECT (hashtextextended($1::text, 0) & 255)::int AS lane`,
+      [key],
+    );
+    return result.rows[0]!.lane;
+  }
+
+  /** Keys in distinct lanes whose heads were retried an hour later, so their due followers are blocked. */
+  async function blockLanes(store: PostgresEventStore, count: number): Promise<Set<number>> {
+    const lanes = new Set<number>();
+    const keys: string[] = [];
+    for (let index = 0; keys.length < count; index += 1) {
+      const lane = await laneOfKey(`blocked-${index}`);
+      if (!lanes.has(lane)) {
+        lanes.add(lane);
+        keys.push(`blocked-${index}`);
+      }
+    }
+    for (const key of keys) {
+      await append(store, [
+        { event: createEnvelope({ key }), handlers: ['h'] },
+        { event: createEnvelope({ key }), handlers: ['h'] },
+      ]);
+    }
+    const heads = await claim(store, ['h'], 'worker-0', at(0), 100);
+    expect(heads).toHaveLength(count);
+    for (const head of heads) {
+      expect(await store.reschedule(head, at(3_600_000), error, at(0))).toBe(true);
+    }
+    return lanes;
+  }
+
+  async function runnableKey(blocked: Set<number>): Promise<string> {
+    let key = 'runnable-0';
+    for (let index = 1; blocked.has(await laneOfKey(key)); index += 1) {
+      key = `runnable-${index}`;
+    }
+    return key;
+  }
+
+  it('passes over a free lane whose due deliveries are all blocked', async () => {
+    const { store } = await createStore();
+    const blocked = await blockLanes(store, 1);
+    const event = createEnvelope({ key: await runnableKey(blocked) });
+    await append(store, [{ event, handlers: ['h'] }]);
+    const claimed = await claim(store, ['h'], 'worker-1', at(LEASE_MS + 1), 1);
+    expect(claimed.map((delivery) => delivery.event.id)).toEqual([event.id]);
+  });
+
+  it('keeps looking when more blocked lanes come first than one statement examines', async () => {
+    const { store } = await createStore();
+    const blocked = await blockLanes(store, 17);
+    const event = createEnvelope({ key: await runnableKey(blocked) });
+    await append(store, [{ event, handlers: ['h'] }]);
+    const claimed = await claim(store, ['h'], 'worker-1', at(LEASE_MS + 1), 1);
+    expect(claimed.map((delivery) => delivery.event.id)).toEqual([event.id]);
+  });
+});
+
 describe('a claim that needs more than the lanes it holds', () => {
   /** A store whose statements that take free lanes fail while `failing.on` is set. */
   async function createFailingStore(logger: { error: (message: string) => void }) {
@@ -557,6 +659,18 @@ describe('a claim that needs more than the lanes it holds', () => {
       { event: createEnvelope({ key: 'shared' }), handlers: ['h1', 'h2', 'h3'] },
     ]);
     expect(await claim(store, ['h1'], 'worker-1')).toHaveLength(1);
+    // A worker that crashed with deliveries running: taking its lane over is the transaction that fails.
+    await append(store, [
+      { event: createEnvelope({ key: 'crashed' }), handlers: ['h1', 'h2', 'h3'] },
+    ]);
+    const crashed = await store.claim({
+      handlers: ['h1', 'h2', 'h3'],
+      limit: 10,
+      leaseOwner: 'crashed-worker',
+      leaseExpiresAt: at(1),
+      now: at(0),
+    });
+    expect(crashed).toHaveLength(3);
     failing.error = new Error('take failed');
     const claimed = await claim(store, ['h2', 'h3'], 'worker-1', at(1), 10);
     expect(claimed.map((delivery) => delivery.handler).sort()).toEqual(['h2', 'h3']);
@@ -565,11 +679,23 @@ describe('a claim that needs more than the lanes it holds', () => {
     ]);
     await expect(claim(store, ['h1'], 'worker-2', at(2), 10)).rejects.toThrow('take failed');
     // A failure that is not an Error is reported by its text.
-    await append(store, [{ event: createEnvelope({ key: 'again' }), handlers: ['h1', 'h2'] }]);
     failing.error = undefined;
-    expect(await claim(store, ['h1'], 'worker-3', at(3))).toHaveLength(1);
+    const rescued = await claim(store, ['h1', 'h2', 'h3'], 'rescuer', at(3), 10);
+    expect(rescued.map((delivery) => delivery.attempt)).toEqual([2, 2, 2]);
+    expect(await store.completeMany(rescued, at(3))).toEqual([true, true, true]);
+    await append(store, [{ event: createEnvelope({ key: 'crashed-again' }), handlers: ['h2'] }]);
+    const crashedAgain = await store.claim({
+      handlers: ['h2'],
+      limit: 1,
+      leaseOwner: 'crashed-worker-2',
+      leaseExpiresAt: at(4),
+      now: at(0),
+    });
+    expect(crashedAgain.map((delivery) => delivery.event.key)).toEqual(['crashed-again']);
+    await append(store, [{ event: createEnvelope({ key: 'again' }), handlers: ['h1', 'h2'] }]);
+    expect(await claim(store, ['h1'], 'worker-3', at(5))).toHaveLength(1);
     failing.error = 'plain text failure';
-    expect(await claim(store, ['h2'], 'worker-3', at(4), 10)).toHaveLength(1);
+    expect(await claim(store, ['h2'], 'worker-3', at(6), 10)).toHaveLength(1);
     expect(errors[1]).toContain('error=plain text failure');
   });
 
@@ -991,7 +1117,8 @@ describe('a claim whose response was lost', () => {
   it('ignores the lane a free-lane claim takes when it reaches the server after its caller gave up', async () => {
     const { store, lossy } = await createLossyStore();
     await append(store, [{ event: createEnvelope({ key: 'one-lane' }), handlers: ['h'] }]);
-    lossy.delayTransaction = true;
+    // The claim statement takes the free lane; it is what reaches the server late.
+    lossy.delayNext = true;
     await expect(claim(store, ['h'], 'worker-1')).rejects.toThrow('query timeout');
     // The abandoned transaction takes the lane and records the delivery after the owner reconciled.
     await lossy.late!();
@@ -1036,7 +1163,8 @@ describe('a claim whose response was lost', () => {
   it('does not retake a live lane of a newer generation when a free-lane claim arrives late', async () => {
     const { store, lossy } = await createLossyStore();
     await append(store, [{ event: createEnvelope({ key: 'one-lane' }), handlers: ['h'] }]);
-    lossy.delayTransaction = true;
+    // The claim statement takes the free lane; it is what reaches the server late.
+    lossy.delayNext = true;
     await expect(claim(store, ['h'], 'worker-1')).rejects.toThrow('query timeout');
     // The owner reconciled and claims again; the abandoned transaction arrives while that delivery runs.
     const [running] = await claim(store, ['h'], 'worker-1', at(1));
@@ -1155,6 +1283,62 @@ describe('takeover of a lane that changed while the statement waited', () => {
   });
 });
 
+describe('claim behind a saturated fast window', () => {
+  it('claims the head of every key of a lane whose front is full of followers, one per key, in commit order', async () => {
+    const { store, schema } = await createStore();
+    const head = createEnvelope({ key: 'blocked' });
+    await append(store, [{ event: head, handlers: ['h'] }], at(0));
+    const [running] = await claim(store, ['h'], 'worker-0', at(0), 1);
+    expect(running!.event.id).toBe(head.id);
+    // More due followers of the key than one lane window reads, so they fill the front of the lane.
+    for (let index = 0; index < 80; index += 1) {
+      await append(store, [{ event: createEnvelope({ key: 'blocked' }), handlers: ['h'] }], at(2));
+    }
+    // Probe keys until two other keys hash into the lane of 'blocked'.
+    const probes = new Map<string, string>();
+    for (let index = 0; index < 600; index += 1) {
+      const event = createEnvelope({ key: `probe-${index}` });
+      probes.set(event.id, `probe-${index}`);
+      await append(store, [{ event, handlers: ['h'] }], at(100));
+    }
+    const lane = await database.pool.query(
+      `SELECT lane FROM "${schema}".relaybus_deliveries WHERE id = $1`,
+      [running!.deliveryId],
+    );
+    const sameLane = await database.pool.query<{ event_id: string }>(
+      `SELECT event_id FROM "${schema}".relaybus_deliveries WHERE lane = $1 AND key LIKE 'probe-%' ORDER BY sequence`,
+      [lane.rows[0]!.lane],
+    );
+    const [first, second] = sameLane.rows.map((row) => row.event_id);
+    expect(second).toBeDefined();
+    // And unkeyed deliveries, which have no ordering to keep.
+    const unkeyed = Array.from({ length: 1_000 }, () => createEnvelope());
+    await append(
+      store,
+      unkeyed.map((event) => ({ event, handlers: ['h'] })),
+      at(100),
+    );
+    const unkeyedInLane = await database.pool.query<{ event_id: string }>(
+      `SELECT event_id FROM "${schema}".relaybus_deliveries WHERE lane = $1 AND key IS NULL`,
+      [lane.rows[0]!.lane],
+    );
+    const laneUnkeyed = new Set(unkeyedInLane.rows.map((row) => row.event_id));
+    expect(laneUnkeyed.size).toBeGreaterThan(0);
+    const firstFollower = createEnvelope({ key: probes.get(first!)! });
+    await append(store, [{ event: firstFollower, handlers: ['h'] }], at(101));
+    // The first worker lost its lease: the lane has to be taken over, in the second step of the claim.
+    const claimed = await claim(store, ['h'], 'worker-1', at(LEASE_MS + 1), 5_000);
+    const inLane = claimed
+      .map((delivery) => delivery.event.id)
+      .filter((id) => id === head.id || id === first || id === second || id === firstFollower.id);
+    expect(inLane).toEqual([head.id, first, second]);
+    expect(claimed.filter((delivery) => delivery.event.key === 'blocked')).toHaveLength(1);
+    expect(claimed.filter((delivery) => laneUnkeyed.has(delivery.event.id))).toHaveLength(
+      laneUnkeyed.size,
+    );
+  });
+});
+
 describe('interleavings of two statements of one call', () => {
   async function hookedStore(
     hook: (sql: string, schema: string) => Promise<void>,
@@ -1174,14 +1358,10 @@ describe('interleavings of two statements of one call', () => {
     return { store, schema };
   }
 
-  it('hands out only the lowest delivery of a key when a dead letter is requeued between the fast and the slow claim', async () => {
+  it('hands out only one delivery of a key when a dead letter is requeued while the claim runs', async () => {
     let requeue: (() => Promise<void>) | undefined;
     const { store, schema } = await hookedStore(async (sql) => {
-      if (
-        requeue !== undefined &&
-        sql.includes('due_window AS MATERIALIZED') &&
-        !sql.includes('held AS')
-      ) {
+      if (requeue !== undefined && sql.includes('held AS MATERIALIZED')) {
         const run = requeue;
         requeue = undefined;
         await run();
@@ -1201,7 +1381,10 @@ describe('interleavings of two statements of one call', () => {
       );
     };
     const claimed = await claim(store, ['h'], 'worker-1', at(LEASE_MS + 2), 200);
-    expect(claimed.map((delivery) => delivery.event.id)).toEqual([events[0]!.id]);
+    // The claim is one statement with one snapshot: the dead letter requeued after it took the snapshot
+    // is not seen, so exactly one delivery of the key runs, and the requeued one waits behind it.
+    expect(claimed.map((delivery) => delivery.event.id)).toEqual([events[1]!.id]);
+    expect(await claim(store, ['h'], 'worker-1', at(LEASE_MS + 3), 200)).toEqual([]);
   });
 
   it('keeps an event whose completion time moved after the purge selected it', async () => {
@@ -1226,6 +1409,26 @@ describe('interleavings of two statements of one call', () => {
     };
     expect(await store.purge({ completedBefore: at(100) })).toMatchObject({ deletedEvents: 0 });
     expect(await store.purge({ completedBefore: at(2_000) })).toMatchObject({ deletedEvents: 1 });
+  });
+
+  it('appends deliveries of an existing event next to an existing event without deliveries', async () => {
+    const { store } = await createStore();
+    const first = createEnvelope();
+    const second = createEnvelope();
+    await append(store, [
+      { event: first, handlers: [] },
+      { event: second, handlers: [] },
+    ]);
+    await append(
+      store,
+      [
+        { event: first, handlers: ['h'] },
+        { event: second, handlers: [] },
+      ],
+      at(1),
+    );
+    expect(await store.listDeliveries({ eventId: first.id })).toHaveLength(1);
+    expect(await store.listDeliveries({ eventId: second.id })).toHaveLength(0);
   });
 
   it('keeps an event that a purge removed between the insert and the lock of an append', async () => {
