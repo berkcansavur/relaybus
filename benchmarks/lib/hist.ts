@@ -1,7 +1,12 @@
 // Mergeable log-bucket histogram (1% relative error), values in milliseconds.
 const LOG = Math.log(1.01);
 
-export type SerializedHist = { counts: Record<string, number>; n: number; sum: number; max: number };
+export type SerializedHist = {
+  counts: Record<string, number>;
+  n: number;
+  sum: number;
+  max: number;
+};
 
 export class Hist {
   counts = new Map<number, number>();

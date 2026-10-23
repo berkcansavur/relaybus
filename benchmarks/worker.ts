@@ -1,134 +1,215 @@
 // One benchmark process: a publisher / loader or a dispatcher instance with its own pool and RelayBus.
-import { monitorEventLoopDelay } from 'node:perf_hooks';
-import { core, pg, postgresPkg, mongodb, mongoPkg } from './lib/deps.ts';
+// It loads the packages of the side named by BENCH_SIDE_ROOT, so a base and a candidate checkout run the same worker code.
+import { monitorEventLoopDelay, type IntervalHistogram } from 'node:perf_hooks';
+import type { EventStore, RelayBus, RelayBusObserver } from '@relaybus/core';
+import type { Pool } from 'pg';
+import type { MongoClient } from 'mongodb';
+import { loadSide } from './lib/deps.ts';
 import { Hist } from './lib/hist.ts';
+import type { CommitItem, FromWorker, HandledItem, ToWorker, WorkerInit } from './lib/protocol.ts';
 
 const nowMs = (): number => performance.timeOrigin + performance.now();
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-const send = (message: unknown): void => void process.send!(message);
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+const send = (message: FromWorker): void => void process.send?.(message);
 
-type Payload = { w: number; n: number; orderId: string; customerId: string; amount: number; note: string };
-class Bench extends core.defineEvent<Payload>('bench.order.placed.v1') {}
+const sideRoot = process.env['BENCH_SIDE_ROOT'];
+if (sideRoot === undefined) throw new Error('[worker](startup) BENCH_SIDE_ROOT is not set');
+const side = await loadSide(sideRoot);
+
+interface Payload {
+  w: number;
+  n: number;
+  orderId: string;
+  customerId: string;
+  amount: number;
+  note: string;
+}
+class Bench extends side.core.defineEvent<Payload>('bench.order.placed.v1') {}
 
 const PAD = 'x'.repeat(160);
-let init: any;
-let bus: any;
-let pool: any;
-let client: any;
-let loopDelay: any;
-let stopping = false;
 
-process.on('message', (message: any) => {
+/** The part of RelayBus the worker uses, independent of the store's transaction type. */
+interface BenchBus {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  subscribe(id: string, handler: (event: Bench) => void): void;
+  /** Publishes the events in one transaction and returns the time the publish call took inside it. */
+  publishInTransaction(events: readonly Bench[], key: string | undefined): Promise<number>;
+}
+
+function adapt<TTransaction>(
+  store: EventStore<TTransaction>,
+  options: {
+    dispatcher: {
+      enabled: boolean;
+      concurrency?: number;
+      batchSize?: number;
+      pollInterval?: number;
+    };
+    observer: RelayBusObserver;
+  },
+): BenchBus {
+  const silent = { log: () => undefined, warn: () => undefined, error: () => undefined };
+  const bus: RelayBus<TTransaction> = new side.core.RelayBus({
+    store,
+    source: 'bench',
+    dispatcher: options.dispatcher,
+    retention: { completed: false, dead: false },
+    observers: [options.observer],
+    logger: silent,
+  });
+  return {
+    start: () => bus.start(),
+    stop: () => bus.stop(),
+    subscribe: (id, handler) => void bus.subscribe(Bench, handler, { id }),
+    publishInTransaction: (events, key) =>
+      bus.transaction(async (transaction) => {
+        const started = nowMs();
+        const keyOption = key === undefined ? {} : { key };
+        const first = events[0];
+        if (events.length === 1 && first !== undefined)
+          await bus.publish(first, { transaction, ...keyOption });
+        else await bus.publishAll([...events], { transaction, ...keyOption });
+        return nowMs() - started;
+      }),
+  };
+}
+
+let init: WorkerInit | undefined;
+let bus: BenchBus | undefined;
+let pool: Pool | undefined;
+let client: MongoClient | undefined;
+let loopDelay: IntervalHistogram | undefined;
+let stopping = false;
+let handledCount = 0;
+let lastHandledAt = 0;
+let leaseLost = 0;
+const failures: string[] = [];
+const tracked: HandledItem[] = [];
+
+process.on('message', (message: ToWorker) => {
   if (message.cmd === 'init') void setup(message).catch(fail);
   else if (message.cmd === 'go') void run(message.startAt).catch(fail);
-  else if (message.cmd === 'stop') stopping = true;
+  else stopping = true;
 });
 
 function fail(error: unknown): void {
-  send({ t: 'error', message: error instanceof Error ? (error.stack ?? error.message) : String(error) });
+  send({
+    t: 'error',
+    message: error instanceof Error ? (error.stack ?? error.message) : String(error),
+  });
 }
 
-async function setup(message: any): Promise<void> {
+async function setup(message: WorkerInit): Promise<void> {
   init = message;
-  const { backend, url, database, cfg } = init;
-  let store: any;
-  if (backend === 'pg') {
-    pool = new pg.Pool({ connectionString: url, max: cfg.pool ?? 10 });
-    pool.on('error', () => undefined);
-    store = new postgresPkg.PostgresEventStore({ pool });
-  } else {
-    client = await new mongodb.MongoClient(url, {
-      directConnection: true,
-      maxPoolSize: cfg.pool ?? 100,
-    }).connect();
-    store = new mongoPkg.MongoEventStore({ client, database });
-  }
-  const failures: string[] = [];
-  init.failures = failures;
-  const observer = {
-    onDeliverySucceeded: () => void (init.handled = (init.handled ?? 0) + 1, (init.lastAt = nowMs())),
-    onFailure: ({ stage, error }: any) => void failures.push(`${stage}:${error.name}:${error.message}`.slice(0, 200)),
-    onLeaseLost: () => void (failures.push('lease-lost'), (init.leaseLost = (init.leaseLost ?? 0) + 1)),
+  const { backend, url, database, cfg } = message;
+  const observer: RelayBusObserver = {
+    onDeliverySucceeded: () => {
+      handledCount += 1;
+      lastHandledAt = nowMs();
+    },
+    onFailure: ({ stage, error }) =>
+      void failures.push(`${stage}:${error.name}:${error.message}`.slice(0, 200)),
+    onLeaseLost: () => {
+      failures.push('lease-lost');
+      leaseLost += 1;
+    },
   };
-  const silent = { log: () => undefined, warn: () => undefined, error: () => undefined };
-  const isDispatcher = init.role === 'dispatcher';
-  bus = new core.RelayBus({
-    store,
-    source: 'bench',
-    dispatcher: isDispatcher
+  const dispatcher =
+    message.role === 'dispatcher'
       ? {
           enabled: true,
-          ...(cfg.concurrency === undefined ? {} : { concurrency: cfg.concurrency }),
-          ...(cfg.batchSize === undefined ? {} : { batchSize: cfg.batchSize }),
-          ...(cfg.pollMs === undefined ? {} : { pollInterval: cfg.pollMs }),
+          concurrency: message.cfg.concurrency,
+          batchSize: message.cfg.batchSize,
+          pollInterval: message.cfg.pollMs,
         }
-      : { enabled: false },
-    retention: { completed: false, dead: false },
-    observers: [observer],
-    logger: silent,
-  });
-  const tracked: Array<[number, number, number]> = [];
-  init.tracked = tracked;
-  for (let index = 1; index <= cfg.handlers; index += 1) {
-    const handlerNumber = index;
-    bus.subscribe(
-      Bench,
-      cfg.trackHandled
-        ? (event: any) => void tracked.push([event.payload.w, event.payload.n * 16 + handlerNumber, nowMs()])
-        : () => undefined,
-      { id: `h${index}` },
-    );
+      : { enabled: false };
+  if (backend === 'pg') {
+    pool = new side.pg.Pool({ connectionString: url, max: cfg.pool });
+    pool.on('error', () => undefined);
+    bus = adapt(new side.postgres.PostgresEventStore({ pool }), { dispatcher, observer });
+  } else {
+    client = await new side.mongoDriver.MongoClient(url, {
+      directConnection: true,
+      maxPoolSize: cfg.pool,
+    }).connect();
+    bus = adapt(new side.mongoPackage.MongoEventStore({ client, database }), {
+      dispatcher,
+      observer,
+    });
+  }
+  // Publishers register the handlers too, so that the store writes one delivery per handler.
+  const trackHandled = message.role === 'dispatcher' && message.cfg.trackHandled;
+  for (let handlerNumber = 1; handlerNumber <= cfg.handlers; handlerNumber += 1) {
+    bus.subscribe(`h${handlerNumber}`, (event) => {
+      if (trackHandled)
+        tracked.push([event.payload.w, event.payload.n * 16 + handlerNumber, nowMs()]);
+    });
   }
   loopDelay = monitorEventLoopDelay({ resolution: 5 });
   send({ t: 'ready' });
 }
 
+async function closeClients(): Promise<void> {
+  await pool?.end().catch(() => undefined);
+  await client?.close().catch(() => undefined);
+}
+
 async function run(startAt: number): Promise<void> {
-  if (init.role === 'dispatcher') await runDispatcher(startAt);
-  else await runPublisher(startAt);
+  if (init?.role === 'dispatcher') await runDispatcher(startAt);
+  else if (init?.role === 'publisher') await runPublisher(startAt, init.cfg);
 }
 
 async function runDispatcher(startAt: number): Promise<void> {
-  const { cfg } = init;
+  const activeBus = bus;
+  const activeLoopDelay = loopDelay;
+  if (activeBus === undefined || activeLoopDelay === undefined || init?.role !== 'dispatcher')
+    return;
+  const { trackHandled } = init.cfg;
   await sleep(Math.max(0, startAt - nowMs()));
-  const cpu0 = process.cpuUsage();
-  loopDelay.enable();
+  const cpuStart = process.cpuUsage();
+  activeLoopDelay.enable();
   const began = nowMs();
-  await bus.start();
+  await activeBus.start();
   const flush = setInterval(() => {
-    send({ t: 'progress', handled: init.handled ?? 0 });
-    if (cfg.trackHandled && init.tracked.length > 0) send({ t: 'handled', items: init.tracked.splice(0) });
+    send({ t: 'progress', handled: handledCount });
+    if (trackHandled && tracked.length > 0) send({ t: 'handled', items: tracked.splice(0) });
   }, 200);
   while (!stopping) await sleep(50);
   clearInterval(flush);
-  loopDelay.disable();
-  const cpu = process.cpuUsage(cpu0);
-  await bus.stop();
+  activeLoopDelay.disable();
+  const cpu = process.cpuUsage(cpuStart);
+  await activeBus.stop();
   // Handlers that finished during the shutdown wait must be reported too, or the exactness check would count them as lost.
-  if (cfg.trackHandled && init.tracked.length > 0) send({ t: 'handled', items: init.tracked.splice(0) });
+  if (trackHandled && tracked.length > 0) send({ t: 'handled', items: tracked.splice(0) });
+  await closeClients();
   send({
     t: 'done',
     result: {
-      handled: init.handled ?? 0,
-      began,
-      lastAt: init.lastAt ?? began,
+      kind: 'dispatcher',
+      handled: handledCount,
+      lastAt: handledCount > 0 ? lastHandledAt : began,
       cpuMs: (cpu.user + cpu.system) / 1000,
-      loopDelayP99: loopDelay.percentile(99) / 1e6,
-      failures: init.failures.slice(0, 5),
-      failureCount: init.failures.length,
-      leaseLost: init.leaseLost ?? 0,
+      loopDelayP99: activeLoopDelay.percentile(99) / 1e6,
+      failures: failures.slice(0, 5),
+      failureCount: failures.length,
+      leaseLost,
     },
   });
-  await closeClients();
 }
 
-async function runPublisher(startAt: number): Promise<void> {
-  const { cfg } = init;
+async function runPublisher(
+  startAt: number,
+  cfg: Extract<WorkerInit, { role: 'publisher' }>['cfg'],
+): Promise<void> {
+  const activeBus = bus;
+  const activeLoopDelay = loopDelay;
+  if (activeBus === undefined || activeLoopDelay === undefined) return;
   const measureStart = startAt + cfg.warmupMs;
   const measureEnd = measureStart + cfg.durationMs;
   const pubHist = new Hist();
   const txHist = new Hist();
-  const commits: Array<[number, number]> = [];
+  const commits: CommitItem[] = [];
   let counter = 0;
   let events = 0;
   let txs = 0;
@@ -141,49 +222,55 @@ async function runPublisher(startAt: number): Promise<void> {
   const pickKey = (): string | undefined =>
     cfg.keys.mode === 'none' ? undefined : `k${Math.floor(Math.random() * cfg.keys.count)}`;
 
-  async function publishOnce(): Promise<void> {
-    const batch: number = cfg.batch;
-    const batchEvents = [];
+  const publishOnce = async (): Promise<void> => {
+    const batchEvents: Bench[] = [];
     const firstN = counter;
-    for (let i = 0; i < batch; i += 1) {
+    for (let index = 0; index < cfg.batch; index += 1) {
       const n = counter++;
       batchEvents.push(
-        new Bench({ w: cfg.w, n, orderId: `o-${cfg.w}-${n}`, customerId: `c-${n % 5000}`, amount: n % 997, note: PAD }),
+        new Bench({
+          w: cfg.w,
+          n,
+          orderId: `o-${cfg.w}-${n}`,
+          customerId: `c-${n % 5000}`,
+          amount: n % 997,
+          note: PAD,
+        }),
       );
     }
-    const key = pickKey();
-    const t0 = nowMs();
+    const startedAt = nowMs();
     let publishMs = 0;
     try {
-      await bus.transaction(async (transaction: unknown) => {
-        const t1 = nowMs();
-        if (batch === 1) await bus.publish(batchEvents[0], { transaction, ...(key === undefined ? {} : { key }) });
-        else await bus.publishAll(batchEvents, { transaction });
-        publishMs = nowMs() - t1;
-      });
+      publishMs = await activeBus.publishInTransaction(batchEvents, pickKey());
     } catch (error) {
       errors += 1;
-      if (errorSamples.length < 3) errorSamples.push(String((error as Error)?.message ?? error).slice(0, 200));
+      if (errorSamples.length < 3)
+        errorSamples.push((error instanceof Error ? error.message : String(error)).slice(0, 200));
       return;
     }
-    const t2 = nowMs();
-    if (cfg.trackCommits) for (let i = 0; i < batch; i += 1) commits.push([firstN + i, t2]);
-    if (t2 >= measureStart && t2 < measureEnd) {
+    const committedAt = nowMs();
+    if (cfg.trackCommits)
+      for (let index = 0; index < cfg.batch; index += 1)
+        commits.push([firstN + index, committedAt]);
+    if (committedAt >= measureStart && committedAt < measureEnd) {
       pubHist.add(publishMs);
-      txHist.add(t2 - t0);
-      events += batch;
+      txHist.add(committedAt - startedAt);
+      events += cfg.batch;
       txs += 1;
     }
-  }
+  };
 
   const flush = setInterval(() => {
     if (commits.length > 0) send({ t: 'commits', w: cfg.w, items: commits.splice(0) });
   }, 200);
 
   await sleep(Math.max(0, startAt - nowMs()));
-  loopDelay.enable();
-  let cpu0 = process.cpuUsage();
-  const cpuTimer = setTimeout(() => (cpu0 = process.cpuUsage()), Math.max(0, measureStart - nowMs()));
+  activeLoopDelay.enable();
+  let cpuStart = process.cpuUsage();
+  const cpuTimer = setTimeout(
+    () => (cpuStart = process.cpuUsage()),
+    Math.max(0, measureStart - nowMs()),
+  );
   const finished = (): boolean => stopping || nowMs() >= measureEnd;
 
   if (cfg.rate > 0) {
@@ -220,29 +307,24 @@ async function runPublisher(startAt: number): Promise<void> {
   }
   clearTimeout(cpuTimer);
   clearInterval(flush);
-  loopDelay.disable();
-  const cpu = process.cpuUsage(cpu0);
+  activeLoopDelay.disable();
+  const cpu = process.cpuUsage(cpuStart);
   if (commits.length > 0) send({ t: 'commits', w: cfg.w, items: commits.splice(0) });
-  await bus.stop();
+  await activeBus.stop();
+  await closeClients();
   send({
     t: 'done',
     result: {
+      kind: 'publisher',
       events,
       txs,
       errors,
       dropped,
       errorSamples,
-      totalPublished: counter,
       pubHist: pubHist.toJSON(),
       txHist: txHist.toJSON(),
       cpuMs: (cpu.user + cpu.system) / 1000,
-      loopDelayP99: loopDelay.percentile(99) / 1e6,
+      loopDelayP99: activeLoopDelay.percentile(99) / 1e6,
     },
   });
-  await closeClients();
-}
-
-async function closeClients(): Promise<void> {
-  await pool?.end().catch(() => undefined);
-  await client?.close().catch(() => undefined);
 }

@@ -33,7 +33,7 @@ export default defineConfig({
         resolve: { alias },
         test: {
           name: 'unit',
-          include: ['packages/*/test/**/*.test.ts'],
+          include: ['packages/*/test/**/*.test.ts', 'benchmarks/test/**/*.test.ts'],
           exclude: ['packages/*/test/**/*.integration.test.ts'],
           environment: 'node',
         },
