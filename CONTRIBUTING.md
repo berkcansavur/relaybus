@@ -62,7 +62,27 @@ Coverage is 100% for statements, branches, functions and lines, enforced in `vit
 
 ## Mutation testing
 
-Stryker checks that tests fail when the code changes (`pnpm mutation`, config in `stryker.config.json`). It runs weekly in CI and on demand. Current thresholds: break 75, low 80, high 90. Surviving mutants in code you touched are worth killing with a sharper assertion. The HTML report is written to `reports/mutation/mutation.html`.
+Stryker checks that tests fail when the code changes (`pnpm mutation`, config in `stryker.config.json` and `vitest.stryker.config.ts`). It runs weekly in CI and on demand, against the Docker-free unit tests only. Surviving mutants in code you touched are worth killing with a sharper assertion. The HTML report is written to `reports/mutation/mutation.html`.
+
+Stryker runs **in place** (`inPlace: true`): it rewrites the source files of the checkout it runs in and restores them afterwards. This is required so that tests importing `@relaybus/*` see the mutants. It also means you must **not run it in a dirty or busy working copy**: an interrupted run can leave mutated files behind, and file modes (such as the executable bit on scripts) are not preserved on restore. Run it in a clean checkout or a throwaway worktree:
+
+```bash
+git worktree add ../relaybus-mutation HEAD
+cd ../relaybus-mutation
+pnpm install --frozen-lockfile
+pnpm mutation                                   # whole repo
+pnpm mutation --mutate "packages/core/src/duration.ts"   # one file
+cd - && git worktree remove --force ../relaybus-mutation
+```
+
+`@stryker-mutator/vitest-runner` 10.0.0 builds its per-test filter with space-separated test names, but Vitest 5 joins suite and test names with `>`, so no test would run for most mutants and they would all survive. `patches/@stryker-mutator__vitest-runner@10.0.0.patch` (applied by pnpm through `patchedDependencies`) makes the filter accept both separators. Drop the patch once a Stryker release supports Vitest 5.
+
+Scope: `core`, `nestjs`, `kafka`, `rabbitmq` and the `testing` helpers (`fake-clock`, `in-memory-transport`). Three things are deliberately left out of `mutate`, because the unit project cannot measure them fairly:
+
+- `packages/postgres/src` and `packages/mongodb/src`: the stores are covered by the Docker-based integration tests, so a unit-only run reports most of their mutants as uncovered (postgres about 25%, mongodb about 14%).
+- `packages/testing/src/event-store-contract.ts`: it is a test suite, and most of its mutants are test titles and fixture data that no assertion can distinguish.
+
+Thresholds (break, low, high) are in `stryker.config.json`. The break threshold sits a few points under the score the current tests achieve (about 90) and must never drop below 75; raise it when the score improves.
 
 ## Commit and PR conventions
 

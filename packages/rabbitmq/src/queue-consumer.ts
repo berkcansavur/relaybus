@@ -13,13 +13,15 @@ import { RabbitMqUnavailableError } from './errors.js';
 import {
   DEAD_LETTER_REASON_HEADER,
   FIRST_FAILURE_HEADER,
+  ORIGINAL_ROUTING_KEY_HEADER,
   REDELIVERIES_HEADER,
   chooseRetryTier,
   copyForRepublish,
+  originalRoutingKey,
   readCounterHeader,
+  withOriginalRoutingKey,
 } from './redelivery.js';
 import { retryQueueName } from './topology.js';
-import { decodeEnvelope } from './wire-format.js';
 
 /** Publishes a message and resolves only after the broker confirmed it was routed to a queue. */
 export type ConfirmedRepublish = (
@@ -44,6 +46,8 @@ export interface QueueConsumerSettings {
   readonly deadLetterExchange: string;
   readonly shutdownTimeoutMs: number;
   readonly onMessage: TransportMessageHandler;
+  /** Turns a message into an envelope; anything it throws dead-letters the message as malformed. */
+  readonly decode: (message: AmqpMessage) => EventEnvelope;
   /** The consumer's channel closed or the broker cancelled the consumer. */
   readonly onConsumerLost: (reason: string) => void;
   /** Publishes to another queue on a confirm channel; rejects when the copy is not confirmed. */
@@ -179,7 +183,7 @@ export class QueueConsumer {
     const { queue, handlerRetry } = this.#settings;
     let envelope: EventEnvelope;
     try {
-      envelope = decodeEnvelope(message);
+      envelope = this.#settings.decode(withOriginalRoutingKey(message));
     } catch (error) {
       this.#settings.logger.error(
         `[QueueConsumer](process) Dead-lettering malformed message | queue=${queue} routingKey=${message.fields.routingKey} error=${toErrorInfo(error).message}`,
@@ -269,6 +273,7 @@ export class QueueConsumer {
     const { content, options } = copyForRepublish(message, {
       [REDELIVERIES_HEADER]: String(redeliveries),
       [FIRST_FAILURE_HEADER]: String(firstFailureAt),
+      [ORIGINAL_ROUTING_KEY_HEADER]: originalRoutingKey(message),
     });
     try {
       await this.#settings.republish(

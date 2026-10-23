@@ -1,0 +1,53 @@
+# relaybus
+
+> relaybus is a reliable, storage-agnostic event bus for NestJS and Node.js: a transactional outbox with per-handler retries, leases, dead letters and ordering keys for PostgreSQL and MongoDB, with Kafka and RabbitMQ transports.
+
+relaybus stores every event in the same database transaction as your business data (the transactional outbox pattern), then delivers it to each handler and broker with independent retries, leases and dead letters. Packages: @relaybus/core, @relaybus/nestjs, @relaybus/postgres, @relaybus/mongodb, @relaybus/kafka, @relaybus/rabbitmq, @relaybus/testing. Requires Node.js 22.12 or newer; NestJS 11 or 12 for the NestJS module.
+
+## Start here
+
+- [Getting started](https://berkcansavur.github.io/relaybus/getting-started.md): Add a reliable transactional outbox event bus to a NestJS and PostgreSQL service in five minutes.
+- [Guarantees](https://berkcansavur.github.io/relaybus/guarantees.md): Exactly what relaybus guarantees (atomic publish, at-least-once delivery, per-key ordering, fencing) and what it does not.
+
+## Concepts
+
+- [Transactional outbox](https://berkcansavur.github.io/relaybus/concepts/outbox.md): How the transactional outbox pattern avoids dual writes, and how relaybus implements it with deliveries per handler.
+- [Deliveries](https://berkcansavur.github.io/relaybus/concepts/deliveries.md): A delivery is one event for one handler or route, with its own status, attempts and retry schedule.
+- [Leases and fencing](https://berkcansavur.github.io/relaybus/concepts/leases.md): How competing workers claim deliveries with leases and why a stalled worker cannot overwrite the worker that took over.
+- [Retries and backoff](https://berkcansavur.github.io/relaybus/concepts/retries.md): Capped exponential backoff with full jitter, timeouts and non-retryable errors in relaybus.
+- [Ordering keys](https://berkcansavur.github.io/relaybus/concepts/ordering-keys.md): Per-key ordering in commit order: how the sequence is assigned and what it does and does not promise.
+- [Dead letters](https://berkcansavur.github.io/relaybus/concepts/dead-letters.md): What happens to events that exhaust their retries, and how to inspect and requeue them.
+
+## Packages
+
+- [All packages](https://berkcansavur.github.io/relaybus/packages/index.md): The seven @relaybus packages: core, nestjs, postgres, mongodb, kafka, rabbitmq and testing.
+- [@relaybus/core](https://berkcansavur.github.io/relaybus/packages/core.md): Reliable event bus for Node.js: a transactional outbox with per-handler deliveries, retries with jitter, dead letters and per-key ordering on top of your own database.
+- [@relaybus/nestjs](https://berkcansavur.github.io/relaybus/packages/nestjs.md): NestJS event bus module for relaybus: @Subscribe handlers on a transactional outbox, with retries, dead letters and graceful shutdown, so events are never lost between your database and your handlers.
+- [@relaybus/postgres](https://berkcansavur.github.io/relaybus/packages/postgres.md): PostgreSQL event store for relaybus: a transactional outbox written in your own transaction (pg, Prisma, TypeORM, Drizzle, Knex, Kysely) with SKIP LOCKED leasing and per-key ordering.
+- [@relaybus/mongodb](https://berkcansavur.github.io/relaybus/packages/mongodb.md): MongoDB event store for relaybus: a transactional outbox on multi-document transactions (driver or Mongoose sessions) with atomic leasing and per-key ordering.
+- [@relaybus/kafka](https://berkcansavur.github.io/relaybus/packages/kafka.md): Kafka transport for relaybus: forwards committed outbox events to Kafka topics (CloudEvents binding) and consumes them with an idempotent inbox, so events are not lost between database and Kafka.
+- [@relaybus/rabbitmq](https://berkcansavur.github.io/relaybus/packages/rabbitmq.md): RabbitMQ transport for relaybus: publisher-confirmed publishing from the transactional outbox and acknowledged, idempotent consumption with retry queues and dead-letter queues.
+- [@relaybus/testing](https://berkcansavur.github.io/relaybus/packages/testing.md): Testing utilities for relaybus: the EventStore contract suite, a FakeClock and an in-memory transport for deterministic tests of retries, delays and dead letters.
+
+## Recipes
+
+- [Prisma](https://berkcansavur.github.io/relaybus/recipes/prisma.md): Publish transactional outbox events from a Prisma interactive transaction with @relaybus/postgres.
+- [TypeORM](https://berkcansavur.github.io/relaybus/recipes/typeorm.md): Publish events in the same TypeORM transaction as your entities using the TypeORM executor.
+- [Mongoose](https://berkcansavur.github.io/relaybus/recipes/mongoose.md): Use the MongoDB transactional outbox with Mongoose sessions and replica sets.
+- [Kafka between services](https://berkcansavur.github.io/relaybus/recipes/kafka-between-services.md): Send events from one service to another through Kafka without losing events between the database and the broker.
+- [RabbitMQ](https://berkcansavur.github.io/relaybus/recipes/rabbitmq.md): Publish outbox events to RabbitMQ with publisher confirms and consume them with an idempotent inbox.
+- [Interoperating with non-relaybus services](https://berkcansavur.github.io/relaybus/recipes/interoperating-with-other-services.md): Exchange events with services that do not use relaybus over Kafka and RabbitMQ: the wire format, and decoding plain JSON and structured CloudEvents with exactly-once handling.
+- [Testing with FakeClock](https://berkcansavur.github.io/relaybus/recipes/testing-with-fakeclock.md): Test retries, delays and dead letters deterministically with FakeClock and the in-memory store.
+
+## Reference
+
+- [relaybus vs alternatives](https://berkcansavur.github.io/relaybus/comparison.md): How relaybus compares with @nestjs/event-emitter, @nestjs/cqrs, @nestjs/outbox, BullMQ, pg-boss and using Kafka directly.
+- [FAQ](https://berkcansavur.github.io/relaybus/faq.md): Answers to common questions: publishing events reliably in NestJS, the transactional outbox pattern and avoiding lost events between a database and Kafka.
+- [Releases](https://berkcansavur.github.io/relaybus/releases.md): How relaybus is versioned and released, and where to find the changelog.
+
+## Optional
+
+- [Full documentation in one file](https://berkcansavur.github.io/relaybus/llms-full.txt): every page above concatenated as Markdown
+- [Documentation website](https://berkcansavur.github.io/relaybus/): the same content as HTML
+- [Source repository](https://github.com/berkcansavur/relaybus): code, issues and GitHub Releases (the changelog)
+- [npm: @relaybus/core](https://www.npmjs.com/package/@relaybus/core): the engine package

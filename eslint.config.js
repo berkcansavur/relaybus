@@ -9,6 +9,7 @@ export default tseslint.config(
       'reports/**',
       '.stryker-tmp/**',
       'benchmarks/.cache/**',
+      'docs-site/.vitepress/cache/**',
     ],
   },
   js.configs.recommended,
@@ -45,7 +46,16 @@ export default tseslint.config(
   },
   {
     // Release tooling: plain Node ESM, outside the TypeScript project.
-    files: ['*.mjs', 'scripts/**/*.mjs'],
+    files: ['*.mjs', 'scripts/**/*.mjs', 'docs-site/**/*.mjs'],
+    ...tseslint.configs.disableTypeChecked,
+    languageOptions: {
+      ...tseslint.configs.disableTypeChecked.languageOptions,
+      globals: { process: 'readonly', console: 'readonly' },
+    },
+  },
+  {
+    // Documentation site configuration: VitePress runs it on Node, outside the TypeScript project.
+    files: ['docs-site/.vitepress/config.ts'],
     ...tseslint.configs.disableTypeChecked,
     languageOptions: {
       ...tseslint.configs.disableTypeChecked.languageOptions,

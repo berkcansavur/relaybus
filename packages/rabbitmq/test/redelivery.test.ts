@@ -5,8 +5,11 @@ import {
   REDELIVERIES_HEADER,
   buildRetryLadder,
   chooseRetryTier,
+  ORIGINAL_ROUTING_KEY_HEADER,
   copyForRepublish,
+  originalRoutingKey,
   readCounterHeader,
+  withOriginalRoutingKey,
 } from '../src/redelivery.js';
 import { createDelivery } from './fakes.js';
 
@@ -113,5 +116,30 @@ describe('copyForRepublish', () => {
     });
     expect(copy.options.headers).not.toHaveProperty('x-delivery-count');
     expect(copy.options.headers).not.toHaveProperty(FIRST_FAILURE_HEADER);
+  });
+});
+
+describe('original routing key', () => {
+  it('reads no counter from a message without headers', () => {
+    expect(
+      readCounterHeader({ ...createDelivery(), properties: {} }, REDELIVERIES_HEADER),
+    ).toBeUndefined();
+  });
+
+  it('restores the routing key a retry copy was first published with', () => {
+    const delivery = createDelivery();
+    expect(originalRoutingKey(delivery)).toBe('order.placed.v1');
+    expect(withOriginalRoutingKey(delivery)).toBe(delivery);
+    const copy = {
+      ...delivery,
+      fields: { routingKey: 'relaybus.billing' },
+      properties: { headers: { [ORIGINAL_ROUTING_KEY_HEADER]: 'orders.placed' } },
+    };
+    expect(originalRoutingKey(copy)).toBe('orders.placed');
+    expect(withOriginalRoutingKey(copy)).toEqual({
+      ...copy,
+      fields: { routingKey: 'orders.placed' },
+    });
+    expect(originalRoutingKey({ ...delivery, properties: {} })).toBe('order.placed.v1');
   });
 });

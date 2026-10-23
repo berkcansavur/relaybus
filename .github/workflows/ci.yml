@@ -121,10 +121,10 @@ jobs:
         run: pnpm -r run typecheck
 
       - name: Lint package manifests (publint)
-        run: pnpm -r exec publint .
+        run: pnpm -r --filter "./packages/*" exec publint .
 
       - name: Check type resolution (attw)
-        run: pnpm -r exec attw --pack .
+        run: pnpm -r --filter "./packages/*" exec attw --pack .
 
   nestjs-compat:
     name: nestjs compat (@nestjs/* ${{ matrix.nest }})

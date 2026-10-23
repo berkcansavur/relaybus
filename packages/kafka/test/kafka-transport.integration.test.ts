@@ -1,5 +1,4 @@
-import { randomUUID } from 'node:crypto';
-import { beforeAll, describe, expect, it, inject, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { Kafka, Partitioners, logLevel, type Consumer } from 'kafkajs';
 import {
   InMemoryEventStore,
@@ -11,35 +10,18 @@ import {
 } from '@relaybus/core';
 import { KafkaTransport, type KafkaTransportOptions } from '../src/index.js';
 import { createEnvelope, createLogger } from './fakes.js';
+import {
+  createClient,
+  createTopics,
+  produceRaw,
+  readRaw,
+  startKafkaBroker,
+  stopKafkaBroker,
+  uniqueName,
+  waitFor,
+} from './support/kafka-broker.js';
 
 class OrderPlaced extends defineEvent<{ orderId: string }>('order.placed.v1') {}
-
-let brokers: string[];
-
-function createClient(): Kafka {
-  return new Kafka({
-    clientId: `relaybus-test-${randomUUID()}`,
-    brokers,
-    logLevel: logLevel.NOTHING,
-    retry: { initialRetryTime: 100, retries: 10 },
-  });
-}
-
-/** Unique topic name; the topic itself is created by `createTopics`. */
-function uniqueName(prefix: string): string {
-  return `${prefix}-${randomUUID()}`;
-}
-
-/** A consumer cannot subscribe to a topic that does not exist yet, so tests create theirs. */
-async function createTopics(...topics: string[]): Promise<void> {
-  const admin = createClient().admin();
-  await admin.connect();
-  await admin.createTopics({
-    waitForLeaders: true,
-    topics: topics.map((topic) => ({ topic, numPartitions: 1 })),
-  });
-  await admin.disconnect();
-}
 
 function createTransport(options: Partial<KafkaTransportOptions> = {}) {
   const logger = createLogger();
@@ -55,56 +37,12 @@ function createTransport(options: Partial<KafkaTransportOptions> = {}) {
   return { transport, logger };
 }
 
-async function waitFor(condition: () => boolean, timeoutMs = 60_000): Promise<void> {
-  const started = Date.now();
-  while (!condition()) {
-    if (Date.now() - started > timeoutMs) {
-      throw new Error('waitFor timed out');
-    }
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-}
+beforeAll(async () => {
+  await startKafkaBroker();
+});
 
-interface RawRecord {
-  key: string | null;
-  value: string | null;
-  headers: Record<string, string>;
-}
-
-/** Reads a topic from the beginning with a plain kafkajs consumer. */
-async function readRaw(topic: string, expected: number): Promise<RawRecord[]> {
-  const consumer: Consumer = createClient().consumer({ groupId: uniqueName('raw') });
-  const records: RawRecord[] = [];
-  await consumer.connect();
-  await consumer.subscribe({ topic, fromBeginning: true });
-  await consumer.run({
-    eachMessage: async ({ message }) => {
-      records.push({
-        key: message.key?.toString() ?? null,
-        value: message.value?.toString() ?? null,
-        headers: Object.fromEntries(
-          Object.entries(message.headers ?? {}).map(([name, value]) => [name, String(value)]),
-        ),
-      });
-    },
-  });
-  await waitFor(() => records.length >= expected);
-  await consumer.disconnect();
-  return records;
-}
-
-async function produceRaw(
-  topic: string,
-  messages: { key?: string; value: string; headers?: Record<string, string> }[],
-): Promise<void> {
-  const producer = createClient().producer({ createPartitioner: Partitioners.DefaultPartitioner });
-  await producer.connect();
-  await producer.send({ topic, messages });
-  await producer.disconnect();
-}
-
-beforeAll(() => {
-  brokers = inject('kafkaBrokers');
+afterAll(async () => {
+  await stopKafkaBroker();
 });
 
 describe('KafkaTransport against a real broker', () => {

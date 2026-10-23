@@ -81,19 +81,20 @@ export async function takeMessage(
   }
 }
 
-/** Publishes raw bytes the way a foreign producer would. */
+/** Publishes raw bytes the way a foreign producer would, with optional AMQP properties. */
 export async function publishRaw(
   amqpUrl: string,
   exchange: string,
   routingKey: string,
   content: Buffer,
   headers: Record<string, string> = {},
+  properties: amqplib.Options.Publish = {},
 ): Promise<void> {
   const connection = await amqplib.connect(amqpUrl);
   try {
     const channel = await connection.createConfirmChannel();
     await channel.assertExchange(exchange, 'topic', { durable: true });
-    channel.publish(exchange, routingKey, content, { headers, persistent: true });
+    channel.publish(exchange, routingKey, content, { ...properties, headers, persistent: true });
     await channel.waitForConfirms();
   } finally {
     await connection.close();

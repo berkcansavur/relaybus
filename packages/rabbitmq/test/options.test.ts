@@ -5,6 +5,7 @@ import {
   resolveSettings,
   type RabbitMqTransportOptions,
 } from '../src/options.js';
+import { decodeEnvelope } from '../src/wire-format.js';
 import { FakeConnection } from './fakes.js';
 
 const connect = async () => new FakeConnection();
@@ -156,5 +157,39 @@ describe('options', () => {
       'mine',
     );
     expect(() => resolveQueueName(resolveSettings({ connect }))).toThrow(/consumerGroup/);
+  });
+});
+
+describe('decode option', () => {
+  const message = {
+    content: Buffer.from('{"orderId":"1"}'),
+    fields: { routingKey: 'orders.placed' },
+    properties: { appId: 'legacy', timestamp: 1_767_225_600 },
+  };
+
+  it('decodes strict CloudEvents binary mode by default', () => {
+    expect(resolveSettings({ connect }).decode).toBe(decodeEnvelope);
+  });
+
+  it('completes the event a custom decoder returns', () => {
+    const { decode } = resolveSettings({
+      connect,
+      decode: (input) => ({
+        id: 'custom-1',
+        type: 'order.placed.v1',
+        payload: JSON.parse(input.content.toString()) as unknown,
+      }),
+    });
+    expect(decode(message)).toEqual({
+      id: 'custom-1',
+      type: 'order.placed.v1',
+      source: 'legacy',
+      key: null,
+      payload: { orderId: '1' },
+      headers: {},
+      correlationId: null,
+      causationId: null,
+      occurredAt: new Date(1_767_225_600_000),
+    });
   });
 });

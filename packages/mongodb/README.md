@@ -1,5 +1,7 @@
 # @relaybus/mongodb
 
+@relaybus/mongodb is the MongoDB event store of relaybus, a reliable, storage-agnostic event bus for NestJS and Node.js: it writes the transactional outbox in your own multi-document transaction, with the MongoDB driver or Mongoose sessions.
+
 MongoDB event store for [relaybus](https://github.com/berkcansavur/relaybus): a transactional
 outbox on multi-document transactions, with lane leases, batched claims and completions, and
 per-key ordering.
@@ -390,3 +392,28 @@ keys are unbounded (for example one per request), clean up counters of long-fini
 - **`MongoEventStore.append needs a ClientSession inside a started transaction`**: the session
   passed to `publish({ transaction })` or `append` has no transaction. Start one with
   `session.withTransaction` or `session.startTransaction()`.
+
+## When to use @relaybus/mongodb, and when not to
+
+Use it when your data lives in MongoDB 6 or newer running as a replica set or sharded cluster. MongoDB transactions need a replica set: a standalone `mongod` is rejected.
+
+Documentation: <https://berkcansavur.github.io/relaybus/packages/mongodb>
+
+### relaybus vs alternatives
+
+<!-- relaybus:snippet:comparison -->
+
+|                                                                      | What it is                                                                                                                                                | Survives a restart                | Written in your database transaction                                      | Choose it when                                                                                                       |
+| -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| **relaybus**                                                         | Event bus built on the transactional outbox: PostgreSQL and MongoDB stores, Kafka and RabbitMQ transports, per-handler deliveries                         | Yes, events live in your database | Yes                                                                       | Events must never be lost or phantom, and handlers need retries, dead letters and ordering keys                      |
+| [`@nestjs/event-emitter`](https://docs.nestjs.com/techniques/events) | In-process event emitter built on `eventemitter2`                                                                                                         | No persistence is documented      | No                                                                        | Simple in-process notifications where losing an event on restart is acceptable                                       |
+| [`@nestjs/cqrs`](https://docs.nestjs.com/recipes/cqrs)               | CommandBus, QueryBus, EventBus and sagas; the docs say sagas and event handlers run in memory                                                             | No built-in persistence           | No                                                                        | You want CQRS structure; it can sit on top of an outbox                                                              |
+| [`@nestjs/outbox`](https://github.com/nestjs/outbox)                 | Transactional outbox module from the NestJS organisation: PostgreSQL, MySQL and in-memory stores, relay with leases and retries, dead-letter table, inbox | Yes with the database stores      | Yes                                                                       | You need MySQL, or a NestJS-organisation module; compare features with relaybus before choosing                      |
+| [BullMQ](https://docs.bullmq.io/)                                    | Job queue on Redis with retries, delayed jobs and flows; at-least-once in the worst case                                                                  | Yes, in Redis                     | No, jobs are stored in Redis and cannot join a SQL or MongoDB transaction | Your stack is Redis-based and background jobs matter more than event atomicity                                       |
+| [pg-boss](https://github.com/timgit/pg-boss)                         | Job queue on PostgreSQL using `SKIP LOCKED`, with retries, dead letter queues, scheduling and pub/sub; jobs can be created in your own transaction        | Yes, in PostgreSQL                | Yes, through its database adapters                                        | You want a PostgreSQL job queue with scheduling; relaybus is an event bus with per-handler deliveries and transports |
+| Kafka client directly                                                | A distributed log; the idempotent producer and transactions give exactly-once within Kafka                                                                | Yes, in Kafka                     | No, producing to Kafka is a second write                                  | You consume and produce only inside Kafka; add an outbox when a database write must be announced                     |
+
+This table summarises the vendors' own documentation as of October 2026; check their docs for current details.
+Full comparison and sources: <https://berkcansavur.github.io/relaybus/comparison>.
+
+<!-- relaybus:end -->

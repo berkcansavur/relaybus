@@ -33,3 +33,13 @@ export {
   type KafkaRestartOptions,
   type KafkaTransportOptions,
 } from './kafka-transport.js';
+export { fromHeader, fromPayloadField } from './field-extractors.js';
+export {
+  decodeCloudEvent,
+  plainJsonDecoder,
+  type DecodedEvent,
+  type KafkaInboundRecord,
+  type KafkaMessageDecoder,
+  type PlainJsonDecoderOptions,
+  type PlainJsonRecord,
+} from './inbound-decoders.js';

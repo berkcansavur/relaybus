@@ -16,6 +16,7 @@ import {
   encodeEnvelope,
   toOutgoingHeaders,
 } from './cloudevents-codec.js';
+import { completeDecodedEvent, type KafkaMessageDecoder } from './inbound-decoders.js';
 import type {
   KafkaClientLike,
   KafkaConsumerEvent,
@@ -114,6 +115,17 @@ export interface KafkaTransportOptions {
   readonly restart?: KafkaRestartOptions;
   /** Handling of records that cannot be processed for good. Default `'dead-letter'`. */
   readonly onInvalidMessage?: InvalidMessagePolicy;
+  /**
+   * How consumed records become events. Default: strict CloudEvents binary
+   * mode ({@link decodeEnvelope}), which is what relaybus producers write; any
+   * other record is malformed and goes to `onInvalidMessage`. Set it to read
+   * topics written by services that do not use relaybus:
+   * {@link decodeCloudEvent} also accepts structured mode, {@link plainJsonDecoder}
+   * maps plain JSON records, and a function of your own can do anything else
+   * (switch on `record.topic` to decode topics differently). Whatever a custom
+   * decoder throws marks the record as malformed, never crashes the consumer.
+   */
+  readonly decode?: KafkaMessageDecoder;
   /** Default `console`. */
   readonly logger?: RelayBusLogger;
 }
@@ -147,6 +159,8 @@ interface Settings {
 /**
  * Kafka {@link Transport}. Events travel as CloudEvents binary-mode records
  * (`ce_*` headers, JSON value), so any CloudEvents-aware consumer can read them.
+ * Records from producers that do not use relaybus are read through the
+ * `decode` option.
  *
  * Publishing: idempotent producer, `acks=-1`, resolves after the broker ack and
  * rejects with {@link PublishTimeoutError} after `publishTimeout`. A timed-out
@@ -174,6 +188,7 @@ export class KafkaTransport implements Transport {
   readonly #producerConfig: object;
   readonly #consumerConfig: object;
   readonly #invalidPolicy: InvalidMessagePolicy;
+  readonly #decode: KafkaMessageDecoder | undefined;
   readonly #logger: RelayBusLogger;
   readonly #settings: Settings;
   readonly #sleepers = new Set<() => void>();
@@ -206,6 +221,7 @@ export class KafkaTransport implements Transport {
     this.#producerConfig = options.producerConfig ?? {};
     this.#consumerConfig = options.consumerConfig ?? {};
     this.#invalidPolicy = options.onInvalidMessage ?? 'dead-letter';
+    this.#decode = options.decode;
     this.#logger = options.logger ?? console;
     this.#settings = resolveSettings(options);
   }
@@ -411,14 +427,14 @@ export class KafkaTransport implements Transport {
   ): Promise<void> {
     let envelope: EventEnvelope;
     try {
-      envelope = decodeEnvelope(payload.message);
+      envelope = this.#decodeRecord(payload);
     } catch (error) {
-      if (!(error instanceof InvalidKafkaMessageError)) {
+      // The default decoder throws only InvalidKafkaMessageError for bad input; anything else is a bug.
+      if (this.#decode === undefined && !(error instanceof InvalidKafkaMessageError)) {
         throw toHandlerFailure(error);
       }
-      await this.#withRetries(payload, 'handleInvalid', () =>
-        this.#handleInvalid(payload, error.message),
-      );
+      const reason = toErrorInfo(error).message;
+      await this.#withRetries(payload, 'handleInvalid', () => this.#handleInvalid(payload, reason));
       return;
     }
     await this.#withRetries(payload, 'deliver', async () => {
@@ -432,6 +448,22 @@ export class KafkaTransport implements Transport {
         await this.#handleInvalid(payload, error.message);
       }
     });
+  }
+
+  #decodeRecord({ topic, partition, message }: KafkaEachMessagePayload): EventEnvelope {
+    if (this.#decode === undefined) {
+      return decodeEnvelope(message);
+    }
+    const record = {
+      topic,
+      partition,
+      offset: message.offset,
+      key: message.key,
+      value: message.value,
+      headers: message.headers,
+      timestamp: message.timestamp,
+    };
+    return completeDecodedEvent(this.#decode(record), record);
   }
 
   async #handleInvalid(payload: KafkaEachMessagePayload, reason: string): Promise<void> {

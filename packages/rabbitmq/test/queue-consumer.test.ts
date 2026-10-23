@@ -2,9 +2,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { InvalidEnvelopeError, createRetryPolicy, type EventEnvelope } from '@relaybus/core';
 import type { AmqpMessage } from '../src/amqp-types.js';
 import { QueueConsumer, type ConfirmedRepublish } from '../src/queue-consumer.js';
+import { decodeEnvelope } from '../src/wire-format.js';
 import {
   DEAD_LETTER_REASON_HEADER,
   FIRST_FAILURE_HEADER,
+  ORIGINAL_ROUTING_KEY_HEADER,
   REDELIVERIES_HEADER,
 } from '../src/redelivery.js';
 import {
@@ -30,6 +32,7 @@ interface SetupOverrides {
   ordered?: boolean;
   shutdownTimeoutMs?: number;
   republish?: ConfirmedRepublish;
+  decode?: (message: AmqpMessage) => EventEnvelope;
 }
 
 function setup(
@@ -51,6 +54,7 @@ function setup(
     deadLetterExchange: 'relaybus.dead',
     shutdownTimeoutMs: overrides.shutdownTimeoutMs ?? 1_000,
     onMessage: handler,
+    decode: overrides.decode ?? decodeEnvelope,
     onConsumerLost,
     republish,
     logger,
@@ -157,6 +161,7 @@ describe('QueueConsumer', () => {
         'cloudEvents:id': createEnvelope().id,
         'relaybus:traceparent': '00-abc-def-01',
         [REDELIVERIES_HEADER]: '1',
+        [ORIGINAL_ROUTING_KEY_HEADER]: 'order.placed.v1',
       });
       expect(options.headers).not.toHaveProperty('x-delivery-count');
       expect(options.headers).not.toHaveProperty('x-acquired-count');
@@ -303,6 +308,57 @@ describe('QueueConsumer', () => {
       expect(logger.error).toHaveBeenCalledWith(
         '[QueueConsumer](process) Dead-lettering malformed message | queue=relaybus.billing routingKey=order.placed.v1 error=Message body is not valid JSON',
       );
+    });
+
+    it('dead-letters a message whose decoder throws any error, and keeps consuming', async () => {
+      const decode = vi.fn((input: AmqpMessage): EventEnvelope => {
+        if (input.content.toString() === 'garbage') {
+          throw new TypeError('cannot read properties of undefined');
+        }
+        return createEnvelope();
+      });
+      const { consumer, channel, handler, logger, republish } = setup(undefined, { decode });
+      await consumer.attach(channel);
+      channel.deliver!({ ...message, content: Buffer.from('garbage') });
+      channel.deliver!(message);
+      await waitFor(() => channel.ack.mock.calls.length === 2);
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(republish).toHaveBeenCalledTimes(1);
+      expect(republish.mock.calls[0]![3].headers[DEAD_LETTER_REASON_HEADER]).toBe(
+        'malformed message',
+      );
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('error=cannot read properties of undefined'),
+      );
+    });
+
+    it('hands the decoder a retry copy with its original routing key and keeps that key on the next copy', async () => {
+      const decode = vi.fn((_input: AmqpMessage) => createEnvelope());
+      const { consumer, channel, republish } = setup(
+        async () => {
+          throw new Error('db down');
+        },
+        { decode },
+      );
+      await consumer.attach(channel);
+      const retryCopy = withHeaders(
+        { ...message, fields: { routingKey: 'relaybus.billing' } },
+        { [ORIGINAL_ROUTING_KEY_HEADER]: 'orders.placed', [REDELIVERIES_HEADER]: '1' },
+      );
+      channel.deliver!(retryCopy);
+      await waitFor(() => republish.mock.calls.length === 1);
+      expect(decode.mock.calls[0]![0].fields.routingKey).toBe('orders.placed');
+      expect(republish.mock.calls[0]![3].headers[ORIGINAL_ROUTING_KEY_HEADER]).toBe(
+        'orders.placed',
+      );
+    });
+
+    it('processes a message without headers, as a custom decoder may accept one', async () => {
+      const { consumer, channel, handler } = setup(undefined, { decode: () => createEnvelope() });
+      await consumer.attach(channel);
+      channel.deliver!({ content: Buffer.from('{}'), fields: { routingKey: 'x' }, properties: {} });
+      await waitFor(() => channel.ack.mock.calls.length === 1);
+      expect(handler).toHaveBeenCalledTimes(1);
     });
 
     it('dead-letters a message without any properties', async () => {

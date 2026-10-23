@@ -1,5 +1,7 @@
 # @relaybus/rabbitmq
 
+@relaybus/rabbitmq is the RabbitMQ transport of relaybus, a reliable, storage-agnostic event bus for NestJS and Node.js: it publishes outbox events with publisher confirms and consumes them with manual acknowledgements and an idempotent inbox.
+
 RabbitMQ transport for [relaybus](https://github.com/berkcansavur/relaybus). It publishes events
 from the outbox with broker confirms and consumes them with manual acknowledgements, so an event is
 never lost between services: it is either delivered, still waiting in the outbox, or in a
@@ -53,29 +55,30 @@ narrower check of the connection alone. relaybus health checks use `isReady()`.
 
 ## Options
 
-| Option               | Default                                           | Description                                                                                                                                                            |
-| -------------------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`               | `'rabbitmq'`                                      | Name referenced by routes and subscriptions.                                                                                                                           |
-| `url`                | -                                                 | `amqp://` URL or `{ hostname, port, username, password, vhost, heartbeat, protocol }`. Give exactly one of `url` and `connect`.                                        |
-| `connect`            | -                                                 | Factory returning an amqplib connection. Called again after every loss. Use for TLS options or credentials.                                                            |
-| `exchange`           | `'relaybus'`                                      | Durable topic exchange, created when missing.                                                                                                                          |
-| `prefetch`           | `50` (`1` when `ordered`)                         | Unacknowledged messages held by the consumer; also the handler concurrency.                                                                                            |
-| `queuePrefix`        | `'relaybus'`                                      | Prefix of derived queue names.                                                                                                                                         |
-| `consumerGroup`      | -                                                 | Services sharing a group share one queue `<queuePrefix>.<consumerGroup>` and split the messages. Required to subscribe unless `queue` is set.                          |
-| `queue`              | -                                                 | Explicit queue name; overrides `queuePrefix` and `consumerGroup`.                                                                                                      |
-| `deadLetterExchange` | `'<exchange>.dead'`                               | Direct exchange poison messages are dead-lettered to.                                                                                                                  |
-| `deadLetterQueue`    | `'<queue>.dead'`                                  | Quorum queue that keeps dead-lettered messages.                                                                                                                        |
-| `deliveryLimit`      | `10`                                              | Quorum queue `x-delivery-limit`: a backstop that makes the broker dead-letter a message that crashes its consumer again and again. Failing handlers do not use it.     |
-| `handlerRetry`       | 3 attempts, 200 ms, x2, 5 s cap, equal jitter     | Handler attempts, with short backoff, on one delivery before the message is scheduled for delayed redelivery (`RetryPolicyOptions`).                                   |
-| `redelivery`         | 2 s, x2, 5 min cap, equal jitter, `maxAge` `'1h'` | Delayed redelivery after `handlerRetry`: `initialDelay`, `factor`, `maxDelay`, `jitter`, and `maxAge`, how long a message may keep failing before it is dead-lettered. |
-| `ordered`            | `false`                                           | Consume strictly in order: single active consumer, one message at a time, failing messages retried in place. See Ordering.                                             |
-| `reconnect`          | 500 ms, x2, 30 s cap, equal jitter                | Reconnect backoff (`initialDelay`, `factor`, `maxDelay`, `jitter`; attempts are unlimited), or `false`.                                                                |
-| `failOnConnectError` | `true`                                            | `connect()` rejects when the broker is unreachable. When `false` it resolves and keeps trying in the background.                                                       |
-| `allowUnroutable`    | `false`                                           | When `true`, publishing a message no queue is bound to resolves (the broker discards it) instead of rejecting.                                                         |
-| `publishTimeout`     | `'30s'`                                           | How long `publish` waits for the confirm.                                                                                                                              |
-| `shutdownTimeout`    | `'30s'`                                           | How long `close()` waits for running handlers.                                                                                                                         |
-| `logger`             | `console`                                         | `log`/`warn`/`error`.                                                                                                                                                  |
-| `random`             | `Math.random`                                     | Jitter source, for tests.                                                                                                                                              |
+| Option               | Default                                           | Description                                                                                                                                                                                                                                                                                             |
+| -------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`               | `'rabbitmq'`                                      | Name referenced by routes and subscriptions.                                                                                                                                                                                                                                                            |
+| `url`                | -                                                 | `amqp://` URL or `{ hostname, port, username, password, vhost, heartbeat, protocol }`. Give exactly one of `url` and `connect`.                                                                                                                                                                         |
+| `connect`            | -                                                 | Factory returning an amqplib connection. Called again after every loss. Use for TLS options or credentials.                                                                                                                                                                                             |
+| `exchange`           | `'relaybus'`                                      | Durable topic exchange, created when missing.                                                                                                                                                                                                                                                           |
+| `prefetch`           | `50` (`1` when `ordered`)                         | Unacknowledged messages held by the consumer; also the handler concurrency.                                                                                                                                                                                                                             |
+| `queuePrefix`        | `'relaybus'`                                      | Prefix of derived queue names.                                                                                                                                                                                                                                                                          |
+| `consumerGroup`      | -                                                 | Services sharing a group share one queue `<queuePrefix>.<consumerGroup>` and split the messages. Required to subscribe unless `queue` is set.                                                                                                                                                           |
+| `queue`              | -                                                 | Explicit queue name; overrides `queuePrefix` and `consumerGroup`.                                                                                                                                                                                                                                       |
+| `deadLetterExchange` | `'<exchange>.dead'`                               | Direct exchange poison messages are dead-lettered to.                                                                                                                                                                                                                                                   |
+| `deadLetterQueue`    | `'<queue>.dead'`                                  | Quorum queue that keeps dead-lettered messages.                                                                                                                                                                                                                                                         |
+| `deliveryLimit`      | `10`                                              | Quorum queue `x-delivery-limit`: a backstop that makes the broker dead-letter a message that crashes its consumer again and again. Failing handlers do not use it.                                                                                                                                      |
+| `handlerRetry`       | 3 attempts, 200 ms, x2, 5 s cap, equal jitter     | Handler attempts, with short backoff, on one delivery before the message is scheduled for delayed redelivery (`RetryPolicyOptions`).                                                                                                                                                                    |
+| `redelivery`         | 2 s, x2, 5 min cap, equal jitter, `maxAge` `'1h'` | Delayed redelivery after `handlerRetry`: `initialDelay`, `factor`, `maxDelay`, `jitter`, and `maxAge`, how long a message may keep failing before it is dead-lettered.                                                                                                                                  |
+| `ordered`            | `false`                                           | Consume strictly in order: single active consumer, one message at a time, failing messages retried in place. See Ordering.                                                                                                                                                                              |
+| `reconnect`          | 500 ms, x2, 30 s cap, equal jitter                | Reconnect backoff (`initialDelay`, `factor`, `maxDelay`, `jitter`; attempts are unlimited), or `false`.                                                                                                                                                                                                 |
+| `failOnConnectError` | `true`                                            | `connect()` rejects when the broker is unreachable. When `false` it resolves and keeps trying in the background.                                                                                                                                                                                        |
+| `allowUnroutable`    | `false`                                           | When `true`, publishing a message no queue is bound to resolves (the broker discards it) instead of rejecting.                                                                                                                                                                                          |
+| `publishTimeout`     | `'30s'`                                           | How long `publish` waits for the confirm.                                                                                                                                                                                                                                                               |
+| `shutdownTimeout`    | `'30s'`                                           | How long `close()` waits for running handlers.                                                                                                                                                                                                                                                          |
+| `decode`             | strict binary mode                                | How consumed messages become events. `decodeCloudEvent` (binary and structured mode), `plainJsonDecoder({...})` (plain JSON from producers without relaybus) or your own function. See [Interoperating with services that do not use relaybus](#interoperating-with-services-that-do-not-use-relaybus). |
+| `logger`             | `console`                                         | `log`/`warn`/`error`.                                                                                                                                                                                                                                                                                   |
+| `random`             | `Math.random`                                     | Jitter source, for tests.                                                                                                                                                                                                                                                                               |
 
 ## Wire format
 
@@ -110,6 +113,78 @@ AMQP `messageId`, which matches broker returns), every header name (`relaybus:<n
 rejects with `AmqpLimitExceededError` (a `NonRetryableError`) instead of failing on every retry.
 `type`, `appId` and `correlationId` are mirrored into AMQP properties only when they fit; the
 `cloudEvents:` headers always carry them, so long values lose only the broker-tooling mirror.
+
+## Interoperating with services that do not use relaybus
+
+**relaybus producer, other consumer.** Bind a queue to the exchange and read the message as is: the
+body is the JSON payload (UTF-8), the `messageId` and `type` properties carry the event id and type,
+and the `cloudEvents:*` headers carry every attribute. A plain amqplib, Spring AMQP, Go or Python
+consumer only needs to parse the body; deduplicate on `messageId`, because an outbox delivers at
+least once. Event headers are prefixed: `traceparent` arrives as `relaybus:traceparent`.
+
+**Other producer, relaybus consumer.** By default the transport accepts only binary-mode
+CloudEvents; anything else is malformed and dead-lettered, so a misconfigured producer cannot slip
+events in. Opt in per transport (one transport is one queue) with `decode`:
+
+```ts
+import {
+  RabbitMqTransport,
+  decodeCloudEvent,
+  fromHeader,
+  fromPayloadField,
+  plainJsonDecoder,
+  type RabbitMqMessageDecoder,
+} from '@relaybus/rabbitmq';
+
+// A plain amqplib / Spring AMQP producer: JSON body, event type in the `type` property.
+const transport = new RabbitMqTransport({
+  url,
+  consumerGroup: 'billing',
+  decode: plainJsonDecoder({ type: (message) => message.properties.type as string | undefined }),
+});
+
+// The type in a header, the ordering key in the payload.
+const byHeader = plainJsonDecoder({
+  type: fromHeader('event-type'),
+  key: fromPayloadField('orderId'),
+});
+
+// A CloudEvents SDK producer in structured mode (`contentType: application/cloudevents+json`).
+const cloudEvents: RabbitMqMessageDecoder = decodeCloudEvent;
+```
+
+| Decoder                  | Accepts                                                                                                                                                                                                                                             |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| default                  | Binary-mode CloudEvents only, as described above. Unchanged.                                                                                                                                                                                        |
+| `decodeCloudEvent`       | Binary mode as the default, plus structured mode: a JSON body with `specversion` `1.0`, `id`, `type`, `source`, optional `time` (else the `timestamp` property, else receipt), `subject` (the key), `data` (the payload; `data_base64` is refused). |
+| `plainJsonDecoder(opts)` | Any JSON body. A message that is a CloudEvent anyway (a `cloudEvents:specversion` header or a structured content type) goes through `decodeCloudEvent`, so relaybus and foreign producers can feed one queue.                                       |
+| your function            | `(message) => ({ id, type, payload, ...optional })`. Missing fields are filled: `source` = `appId` (else routing key), `key` = null, `occurredAt` = `timestamp` property (else receipt), `headers` = `{}`.                                          |
+
+`plainJsonDecoder` options (each extractor gets `{ routingKey, properties, headers, payload }`; an
+extractor returning `undefined` or `''` selects the default):
+
+| Option       | Default                                | Meaning                                                                                                                                       |
+| ------------ | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`       | required                               | A fixed event type, or an extractor such as `fromHeader('event-type')`, `fromPayloadField('type')` or `(m) => m.properties.type`.             |
+| `id`         | the `messageId` property               | Inbox dedup id. A message with neither an extracted id nor a `messageId` is malformed: AMQP has no other identity stable across redeliveries. |
+| `key`        | none                                   | Ordering key, for example `fromHeader('customer')`.                                                                                           |
+| `source`     | the `appId` property, else routing key | Fixed text or an extractor.                                                                                                                   |
+| `occurredAt` | the `timestamp` property, else receipt | Extractor returning a `Date`.                                                                                                                 |
+
+String message headers become event headers, except the broker's and the transport's own
+(`x-first-death-*`, `x-last-death-*`, `x-relaybus-*`; non-string values such as `x-death` are skipped).
+
+**Guarantees stay the same.** Decoding runs again on every redelivery (also after a retry-queue
+round trip, which keeps `messageId` and restores the original routing key from the
+`x-relaybus-routing-key` header it adds to retry copies) and must be deterministic; the inbox deduplicates on the id, so
+a redelivered message is stored and handled once. A message that cannot be decoded (not JSON, no id,
+no type, an invalid type, an extractor returning a non-string) and anything a custom decoder throws
+are dead-lettered (`x-relaybus-dead-letter-reason: malformed message`, the detail is logged) and the
+consumer keeps running. Messages are handled in queue order only with `ordered: true`.
+
+**Give producers a `messageId`.** Spring AMQP generates one when the message converter has
+`setCreateMessageIds(true)`; amqplib takes the `messageId` publish option. Without it, configure `id` to read a business id from a header or the
+payload.
 
 ## Guarantees
 
@@ -235,3 +310,28 @@ The dead-letter queue and exchange are unchanged and need no migration.
 | `isReady()` is false but `isConnected()` is true        | The consumer was cancelled (queue deleted, node failover) and is being restored, or the publisher channel closed.                                                                  |
 | Publishes hang until `publishTimeout`                   | Broker is blocked (memory or disk alarm) or the connection died without heartbeats.                                                                                                |
 | `Needs 'consumerGroup' or 'queue' to subscribe`         | Set `consumerGroup` (or `queue`) on the transport that subscribes.                                                                                                                 |
+
+## When to use @relaybus/rabbitmq, and when not to
+
+Use it to send events between services through RabbitMQ with publisher confirms, retry queues and dead-letter queues. It needs RabbitMQ 3.13 or 4.x (quorum queues) and does not preserve order unless you set `ordered: true`.
+
+Documentation: <https://berkcansavur.github.io/relaybus/packages/rabbitmq>
+
+### relaybus vs alternatives
+
+<!-- relaybus:snippet:comparison -->
+
+|                                                                      | What it is                                                                                                                                                | Survives a restart                | Written in your database transaction                                      | Choose it when                                                                                                       |
+| -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| **relaybus**                                                         | Event bus built on the transactional outbox: PostgreSQL and MongoDB stores, Kafka and RabbitMQ transports, per-handler deliveries                         | Yes, events live in your database | Yes                                                                       | Events must never be lost or phantom, and handlers need retries, dead letters and ordering keys                      |
+| [`@nestjs/event-emitter`](https://docs.nestjs.com/techniques/events) | In-process event emitter built on `eventemitter2`                                                                                                         | No persistence is documented      | No                                                                        | Simple in-process notifications where losing an event on restart is acceptable                                       |
+| [`@nestjs/cqrs`](https://docs.nestjs.com/recipes/cqrs)               | CommandBus, QueryBus, EventBus and sagas; the docs say sagas and event handlers run in memory                                                             | No built-in persistence           | No                                                                        | You want CQRS structure; it can sit on top of an outbox                                                              |
+| [`@nestjs/outbox`](https://github.com/nestjs/outbox)                 | Transactional outbox module from the NestJS organisation: PostgreSQL, MySQL and in-memory stores, relay with leases and retries, dead-letter table, inbox | Yes with the database stores      | Yes                                                                       | You need MySQL, or a NestJS-organisation module; compare features with relaybus before choosing                      |
+| [BullMQ](https://docs.bullmq.io/)                                    | Job queue on Redis with retries, delayed jobs and flows; at-least-once in the worst case                                                                  | Yes, in Redis                     | No, jobs are stored in Redis and cannot join a SQL or MongoDB transaction | Your stack is Redis-based and background jobs matter more than event atomicity                                       |
+| [pg-boss](https://github.com/timgit/pg-boss)                         | Job queue on PostgreSQL using `SKIP LOCKED`, with retries, dead letter queues, scheduling and pub/sub; jobs can be created in your own transaction        | Yes, in PostgreSQL                | Yes, through its database adapters                                        | You want a PostgreSQL job queue with scheduling; relaybus is an event bus with per-handler deliveries and transports |
+| Kafka client directly                                                | A distributed log; the idempotent producer and transactions give exactly-once within Kafka                                                                | Yes, in Kafka                     | No, producing to Kafka is a second write                                  | You consume and produce only inside Kafka; add an outbox when a database write must be announced                     |
+
+This table summarises the vendors' own documentation as of October 2026; check their docs for current details.
+Full comparison and sources: <https://berkcansavur.github.io/relaybus/comparison>.
+
+<!-- relaybus:end -->
