@@ -568,7 +568,10 @@ export class MongoEventStore implements EventStore<ClientSession> {
       { readonly key: string | null; readonly sequence: number | null }
     >();
     for (const [eventId, stored] of storedEvents) {
-      orderingByEventId.set(eventId, { key: stored.key, sequence: stored.sequence });
+      orderingByEventId.set(eventId, {
+        key: stored.key ?? null,
+        sequence: stored.sequence ?? null,
+      });
       knownHandlers.set(eventId, new Set(stored.handlers));
     }
 

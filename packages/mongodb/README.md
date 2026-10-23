@@ -342,6 +342,10 @@ with the upgraded documents.
   `completeMany`: three commands per batch (one transaction with `completionHistory`).
 - **Transactional handlers** commit their writes with the deletion of the delivery. They conflict
   only with a takeover of their own delivery, not with each other.
+- **Document size.** New events leave out `key`, `sequence`, `correlationId`, `causationId` when they
+  are null and `revision` while it is 0, and new deliveries leave out `updatedAt` until it differs from
+  `createdAt`: every byte of a new document is written to the oplog too. Documents of earlier versions
+  with these fields are read the same way.
 
 ## Retention
 

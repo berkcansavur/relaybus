@@ -248,6 +248,34 @@ describe('stored data', () => {
     expect(record!.event.payload).toBeUndefined();
   });
 
+  it('leaves null fields and the unchanged update time out of new documents and reads them back', async () => {
+    const { store, database } = await createStore();
+    const event = createEnvelope();
+    await store.transaction((session) =>
+      store.append(session, [{ event, deliveries: [createDelivery('h')] }], at(0)),
+    );
+    const db = client.db(database);
+    const storedEvent = await db.collection('relaybus_events').findOne({ _id: event.id as never });
+    for (const field of ['key', 'sequence', 'correlationId', 'causationId', 'revision']) {
+      expect(storedEvent).not.toHaveProperty(field);
+    }
+    const storedDelivery = await db.collection('relaybus_deliveries').findOne({});
+    expect(storedDelivery).not.toHaveProperty('updatedAt');
+    expect(storedDelivery).toMatchObject({ attempts: 0 });
+    const [record] = await store.listDeliveries({});
+    expect(record).toMatchObject({ updatedAt: at(0), createdAt: at(0), attempts: 0 });
+    expect(record!.event).toMatchObject({ key: null, correlationId: null, causationId: null });
+    // An event that gets another handler later counts its revision up from nothing.
+    await store.transaction((session) =>
+      store.append(session, [{ event, deliveries: [createDelivery('other')] }], at(1)),
+    );
+    expect(
+      await db.collection('relaybus_events').findOne({ _id: event.id as never }),
+    ).toMatchObject({
+      revision: 1,
+    });
+  });
+
   it('records an error without a stack as such', async () => {
     const { store } = await createStore();
     await store.transaction((session) =>

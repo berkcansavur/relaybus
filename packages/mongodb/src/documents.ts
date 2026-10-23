@@ -15,17 +15,23 @@ export interface EventDocument {
   readonly _id: string;
   readonly type: string;
   readonly source: string;
-  readonly key: string | null;
-  /** Position among the events of the same key, in commit order. Null for unkeyed events. */
-  readonly sequence: number | null;
+  /** Ordering key. Absent (or null in documents written before 0.2) for unkeyed events. */
+  readonly key?: string | null;
+  /** Position among the events of the same key, in commit order. Absent (or null) for unkeyed events. */
+  readonly sequence?: number | null;
   /** JSON-normalized payload. Absent when the published payload was `undefined`. */
   readonly payload?: unknown;
   readonly headers: Readonly<Record<string, string>>;
-  readonly correlationId: string | null;
-  readonly causationId: string | null;
+  /** Absent (or null) when the event has none. */
+  readonly correlationId?: string | null;
+  /** Absent (or null) when the event has none. */
+  readonly causationId?: string | null;
   readonly occurredAt: Date;
-  /** Incremented when deliveries are added to an already stored event, so a concurrent purge conflicts with it. */
-  readonly revision: number;
+  /**
+   * Incremented when deliveries are added to an already stored event, so a concurrent purge conflicts with
+   * it. Absent means 0.
+   */
+  readonly revision?: number;
   /**
    * Handlers that ever got a delivery of this event, completed ones included.
    * Completed deliveries are deleted, so this list is what keeps a redelivered
@@ -92,7 +98,8 @@ export interface DeliveryDocument {
   readonly dueAt?: Date;
   readonly lastError?: ErrorInfo;
   readonly createdAt: Date;
-  readonly updatedAt: Date;
+  /** Last change after the insert. Absent means `createdAt`: a new delivery is written without it. */
+  readonly updatedAt?: Date;
   readonly completedAt?: Date;
 }
 
@@ -180,14 +187,14 @@ export function toEventDocument(
     _id: event.id,
     type: event.type,
     source: event.source,
-    key: event.key,
-    sequence,
+    // Fields that are null or 0 are left out: every byte of a new document is written to the oplog too.
+    ...(event.key === null ? {} : { key: event.key }),
+    ...(sequence === null ? {} : { sequence }),
     ...(payloadJson === undefined ? {} : { payload: JSON.parse(payloadJson) as unknown }),
     headers: JSON.parse(headersJson) as Record<string, string>,
-    correlationId: event.correlationId,
-    causationId: event.causationId,
+    ...(event.correlationId === null ? {} : { correlationId: event.correlationId }),
+    ...(event.causationId === null ? {} : { causationId: event.causationId }),
     occurredAt: event.occurredAt,
-    revision: 0,
     handlers,
     createdAt,
   };
@@ -220,11 +227,11 @@ export function toEnvelope(document: EventDocument): EventEnvelope {
     id: document._id,
     type: document.type,
     source: document.source,
-    key: document.key,
+    key: document.key ?? null,
     payload: document.payload,
     headers: document.headers,
-    correlationId: document.correlationId,
-    causationId: document.causationId,
+    correlationId: document.correlationId ?? null,
+    causationId: document.causationId ?? null,
     occurredAt: document.occurredAt,
   };
 }
@@ -248,10 +255,10 @@ export function toDeliveryDocument(
     status: 'pending',
     lane: 'ready',
     attempts: 0,
+    // No updatedAt (it equals createdAt): every byte of a new document is written to the oplog too.
     availableAt: delivery.availableAt,
     dueAt: delivery.availableAt,
     createdAt: now,
-    updatedAt: now,
   };
 }
 
@@ -275,7 +282,7 @@ export function toDeliveryRecord(
     leaseExpiresAt: runningIn === undefined ? null : runningIn.leaseExpiresAt,
     lastError: document.lastError === undefined ? null : toErrorInfo(document.lastError),
     createdAt: document.createdAt,
-    updatedAt: document.updatedAt,
+    updatedAt: document.updatedAt ?? document.createdAt,
     completedAt: document.completedAt ?? null,
     event,
   };
