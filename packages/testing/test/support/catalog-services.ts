@@ -148,7 +148,12 @@ export function createOrdersService(
   options: ServiceOptions,
 ): OrdersService {
   const schema = uniqueSchema();
-  const store = new PostgresEventStore({ pool: databases.postgres.pool, schema });
+  const store = new PostgresEventStore({
+    pool: databases.postgres.pool,
+    schema,
+    // The tests read completed deliveries back (to wait on them and replay them).
+    completionHistory: true,
+  });
   const record: ServiceRecord = { handled: [], received: [] };
   const routes: RouteOptions[] = [
     {
@@ -252,7 +257,12 @@ export function createShippingService(
   options: ServiceOptions,
 ): ShippingService {
   const database = uniqueDatabaseName();
-  const store = new MongoEventStore({ client: databases.mongo, database });
+  const store = new MongoEventStore({
+    client: databases.mongo,
+    database,
+    // The tests read completed deliveries back (to wait on them and replay them).
+    completionHistory: true,
+  });
   const shipments = databases.mongo
     .db(database)
     .collection<{ _id: string; status: string }>('shipments');

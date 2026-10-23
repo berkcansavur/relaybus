@@ -1,6 +1,5 @@
 import amqplib from 'amqplib';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import type { StartedRabbitMQContainer } from '@testcontainers/rabbitmq';
 import { InMemoryEventStore, RelayBus, type EventEnvelope } from '@relaybus/core';
 import {
   RabbitMqTransport,
@@ -15,12 +14,13 @@ import {
   remoteEnvelope,
   startBroker,
   takeMessage,
+  type TestBroker,
   unique,
 } from './support/broker.js';
 
 const silent = { log: () => undefined, warn: () => undefined, error: () => undefined };
 
-let broker: StartedRabbitMQContainer;
+let broker: TestBroker;
 let amqpUrl: string;
 const buses: RelayBus[] = [];
 

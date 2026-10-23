@@ -1,10 +1,9 @@
-import type { StartedRabbitMQContainer } from '@testcontainers/rabbitmq';
 import { describeSharedCatalogServices } from '../../testing/test/support/catalog-services.suite.js';
 import { silentLogger } from '../../testing/test/support/catalog-services.js';
 import { RabbitMqTransport } from '../src/index.js';
-import { startBroker, unique } from './support/broker.js';
+import { startBroker, unique, type TestBroker } from './support/broker.js';
 
-let broker: StartedRabbitMQContainer;
+let broker: TestBroker;
 /** Every test gets its own exchange, so tests never see each other's events. */
 let exchange = '';
 
