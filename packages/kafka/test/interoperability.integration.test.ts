@@ -130,7 +130,8 @@ describe('producer that does not use relaybus to a relaybus consumer', () => {
       expect(sequences).toHaveLength(10);
     }
     expect(new Set(service.handled.map((event) => event.id)).size).toBe(messages.length);
-    expect(service.handled[0]).toMatchObject({
+    // Order holds per key only: the record at offset 0 is not necessarily the first one handled.
+    expect(service.handled.find((event) => event.id === `kafka:${topic}:0:0`)).toMatchObject({
       id: `kafka:${topic}:0:0`,
       type: 'order.placed.v1',
       source: topic,
