@@ -9,6 +9,7 @@ import {
   type EventHandler,
 } from '@relaybus/core';
 import { readEventConsumerMetadata } from './event-consumer.decorator.js';
+import { bindInstance } from './relay-bus-registry.js';
 import { readSubscribeMetadata, type SubscribeMetadata } from './subscribe.decorator.js';
 
 /** What one discovery pass has registered so far. */
@@ -65,6 +66,7 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
     if (prototype === null) {
       return;
     }
+    bindInstance(instance, this.bus);
     const className = instance.constructor.name;
     for (const subscribed of this.subscribedMethods(prototype)) {
       this.registerSubscribedMethod(instance, { subscribedMethod: subscribed, discovery });

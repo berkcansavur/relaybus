@@ -31,10 +31,19 @@ export class ShippingHandlers {
 }
 
 // order.service.ts
-await this.bus.transaction(async (tx) => {
-  await tx.query('INSERT INTO orders ...');
-  await this.bus.publish(new OrderPlaced({ orderId }), { transaction: tx });
-});
+@Injectable()
+export class OrderService {
+  constructor(
+    private readonly bus: RelayBus,
+    private readonly transactions: RelayBusTransactionHost<PoolClient>,
+  ) {}
+
+  @RelayBusTransaction()
+  async place(orderId: string): Promise<void> {
+    await this.transactions.current().query('INSERT INTO orders (id) VALUES ($1)', [orderId]);
+    await this.bus.publish(new OrderPlaced({ orderId })); // joins the transaction
+  }
+}
 ```
 
 That is all: the module is global, the handler is discovered, the bus starts after bootstrap and
@@ -186,9 +195,57 @@ RelayBusModule.forRoot({
 
 ## Transactions
 
-Inside `bus.transaction(fn)` every `publish` joins the transaction. Without it, publish needs a
-transaction: pass `{ transaction }`, configure `transactionResolver`, or set
-`transactionMode: 'optional'` (event stays durable but is no longer atomic with your writes).
+### `@RelayBusTransaction()`
+
+Runs an async method in a relaybus transaction. Every `bus.publish(...)` inside it, and inside
+everything it awaits, joins the transaction without `{ transaction }`; the transaction commits when
+the method resolves and rolls back when it throws.
+
+```ts
+// Before: the transaction is threaded through by hand
+async place(orderId: string): Promise<void> {
+  await this.bus.transaction(async (tx) => {
+    await tx.query('INSERT INTO orders (id) VALUES ($1)', [orderId]);
+    await this.bus.publish(new OrderPlaced({ orderId }), { transaction: tx });
+  });
+}
+
+// After
+@RelayBusTransaction()
+async place(orderId: string): Promise<void> {
+  await this.orders.insert(orderId); // the repository reads RelayBusTransactionHost.current()
+  await this.bus.publish(new OrderPlaced({ orderId }));
+}
+```
+
+- **Self-calls are transactional.** The decorator replaces the method itself (not an interceptor
+  or proxy), so `this.place()` from another method of the class opens the transaction too.
+- **Nested calls share one transaction.** A decorated method called inside another one, inside
+  `bus.transaction`, inside a transactional handler, or while `transactionResolver` finds a
+  transaction (for example `@nestjs-cls/transactional`) joins it instead of opening a second one.
+- **No injection needed.** The bus is the one of the application's `RelayBusModule`. Calling the
+  method before the application initialised, after it shut down, or with no `RelayBusModule`
+  throws a `ConfigurationError` that says so.
+- **Async methods only.** On a method that does not return a Promise it fails to compile:
+  `'@RelayBusTransaction() needs a method that returns a Promise: make the method async'`.
+
+### Repositories: `RelayBusTransactionHost<T>`
+
+Inject `RelayBusTransactionHost` typed with your store's transaction handle. `current()` returns
+the active transaction and throws `TransactionRequiredError` outside one; `find()` returns
+`undefined` instead. Outside Nest, `bus.currentTransaction()` does the same as `find()`.
+
+| Store / executor                    | `T` of `RelayBusTransactionHost<T>` | Write with                                   |
+| ----------------------------------- | ----------------------------------- | -------------------------------------------- |
+| `PostgresEventStore` with `pg`      | `PoolClient`                        | `tx.query(sql, values)`                      |
+| `createKyselyExecutor(db)`          | `Transaction<DB>`                   | `tx.insertInto('orders')...execute()`        |
+| `createTypeOrmExecutor(dataSource)` | `EntityManager`                     | `tx.getRepository(Order).save(order)`        |
+| `createPrismaExecutor(prisma)`      | `Prisma.TransactionClient`          | `tx.order.create({ data })`                  |
+| `MongoEventStore`                   | `ClientSession`                     | `collection.insertOne(doc, { session: tx })` |
+
+Without a decorator or `bus.transaction`, `publish` needs a transaction: pass `{ transaction }`,
+configure `transactionResolver`, or set `transactionMode: 'optional'` (event stays durable but is
+no longer atomic with your writes).
 
 ### Transactional handlers
 

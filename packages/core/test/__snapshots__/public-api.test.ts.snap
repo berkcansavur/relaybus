@@ -196,6 +196,7 @@ exports[`public API > @relaybus/mongodb keeps its exported surface 1`] = `
 
 exports[`public API > @relaybus/nestjs keeps its exported surface 1`] = `
 [
+  "AsyncMethodDescriptor: type",
   "EventConsumer: value",
   "EventConsumerClass: type",
   "EventConsumerMetadata: type",
@@ -209,6 +210,10 @@ exports[`public API > @relaybus/nestjs keeps its exported surface 1`] = `
   "RelayBusModuleExtras: type",
   "RelayBusModuleOptions: type",
   "RelayBusModuleOptionsFactory: type",
+  "RelayBusTransaction: value",
+  "RelayBusTransactionDecorator: type",
+  "RelayBusTransactionHost: value+type",
+  "RelayBusTransactionNeedsAsyncMethod: type",
   "Subscribe: value",
   "SubscribeDecoratorOptions: type",
   "SubscribeMetadata: type",

@@ -496,6 +496,17 @@ export class RelayBus<TTransaction = unknown> {
   }
 
   /**
+   * The transaction `publish` would join right now: the one of the enclosing `bus.transaction`
+   * (or `@RelayBusTransaction()` method, or transactional handler), else the one
+   * `transactionResolver` finds. Repositories use it to write in the same transaction.
+   */
+  currentTransaction(): TTransaction | undefined {
+    return (
+      (getCurrentScope()?.transaction as TTransaction | undefined) ?? this.#transactionResolver?.()
+    );
+  }
+
+  /**
    * Stores an event received from a broker and schedules it for local handlers.
    * Idempotent on the event id. Transports call it and acknowledge the message
    * only after it resolves. Throws {@link InvalidEnvelopeError} for malformed

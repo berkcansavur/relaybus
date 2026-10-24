@@ -13,6 +13,13 @@ export type {
 export { RelayBusHealth, type RelayBusHealthReport } from './relay-bus-health.js';
 export { RelayBusLifecycle } from './relay-bus-lifecycle.js';
 export { RelayBusModule } from './relay-bus.module.js';
+export { RelayBusTransactionHost } from './relay-bus-transaction-host.js';
+export {
+  RelayBusTransaction,
+  type AsyncMethodDescriptor,
+  type RelayBusTransactionDecorator,
+  type RelayBusTransactionNeedsAsyncMethod,
+} from './relay-bus-transaction.decorator.js';
 export {
   Subscribe,
   type SubscribeDecoratorOptions,

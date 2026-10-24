@@ -9,10 +9,11 @@ import {
 } from './module-options.js';
 import { RelayBusHealth } from './relay-bus-health.js';
 import { RelayBusLifecycle } from './relay-bus-lifecycle.js';
+import { RelayBusTransactionHost } from './relay-bus-transaction-host.js';
 
 /**
  * Registers one {@link RelayBus} for the application, discovers `@Subscribe`
- * handlers in every module, starts the bus after bootstrap and stops it on
+ * handlers in every module, runs `@RelayBusTransaction()` methods on the bus, starts the bus after bootstrap and stops it on
  * shutdown. Global unless `isGlobal: false`.
  *
  * ```ts
@@ -31,7 +32,8 @@ import { RelayBusLifecycle } from './relay-bus-lifecycle.js';
     RelayBusHandlerExplorer,
     RelayBusLifecycle,
     RelayBusHealth,
+    RelayBusTransactionHost,
   ],
-  exports: [RelayBus, RelayBusHealth],
+  exports: [RelayBus, RelayBusHealth, RelayBusTransactionHost],
 })
 export class RelayBusModule extends RelayBusConfigurableModule {}
