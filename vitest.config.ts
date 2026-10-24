@@ -3,12 +3,17 @@ import { defineConfig } from 'vitest/config';
 
 const packages = ['core', 'nestjs', 'postgres', 'mongodb', 'kafka', 'rabbitmq', 'testing'];
 
-const alias = Object.fromEntries(
-  packages.map((name) => [
+const alias = Object.fromEntries([
+  // Before `@relaybus/core`, which would otherwise match the subpath as a prefix.
+  [
+    '@relaybus/core/internal',
+    fileURLToPath(new URL('./packages/core/src/internal/index.ts', import.meta.url)),
+  ],
+  ...packages.map((name) => [
     `@relaybus/${name}`,
     fileURLToPath(new URL(`./packages/${name}/src/index.ts`, import.meta.url)),
   ]),
-);
+]);
 
 /** Integration files whose timing or server-wide effects must not overlap with other files. */
 const serialIntegrationTests = [

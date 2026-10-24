@@ -8,12 +8,17 @@ const packages = ['core', 'nestjs', 'postgres', 'mongodb', 'kafka', 'rabbitmq', 
 // Stryker runs in place (`inPlace: true`), so these paths are the mutated files.
 // Without aliases `@relaybus/*` would resolve through the pnpm workspace symlinks
 // to the packages' built `dist/` output, which holds no mutants.
-const alias = Object.fromEntries(
-  packages.map((name) => [
+const alias = Object.fromEntries([
+  // Before `@relaybus/core`, which would otherwise match the subpath as a prefix.
+  [
+    '@relaybus/core/internal',
+    fileURLToPath(new URL('./packages/core/src/internal/index.ts', import.meta.url)),
+  ],
+  ...packages.map((name) => [
     `@relaybus/${name}`,
     fileURLToPath(new URL(`./packages/${name}/src/index.ts`, import.meta.url)),
   ]),
-);
+]);
 
 export default defineConfig({
   resolve: { alias },

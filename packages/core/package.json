@@ -38,6 +38,13 @@
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "typesVersions": {
+    "*": {
+      "internal": [
+        "./dist/internal/index.d.ts"
+      ]
+    }
+  },
   "exports": {
     ".": {
       "import": {
@@ -47,6 +54,16 @@
       "require": {
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
+      }
+    },
+    "./internal": {
+      "import": {
+        "types": "./dist/internal/index.d.ts",
+        "default": "./dist/internal/index.js"
+      },
+      "require": {
+        "types": "./dist/internal/index.d.cts",
+        "default": "./dist/internal/index.cjs"
       }
     },
     "./package.json": "./package.json"

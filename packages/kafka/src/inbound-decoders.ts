@@ -1,4 +1,5 @@
 import { assertEventType, type EventEnvelope, type EventHeaders } from '@relaybus/core';
+import { createCloudEventReaders, isJsonObject, mediaTypeOf } from '@relaybus/core/internal';
 import {
   CONTENT_TYPE,
   collectUserHeaders,
@@ -12,6 +13,9 @@ import {
   type DecodableMessage,
 } from './cloudevents-codec.js';
 import type { KafkaBytes, KafkaIncomingHeaders } from './kafka-client.js';
+
+const { optionalAttribute, requiredAttribute, assertValidType, assertJsonDataContentType } =
+  createCloudEventReaders(invalid);
 
 /** A consumed record as handed to a {@link KafkaMessageDecoder}. */
 export interface KafkaInboundRecord extends DecodableMessage {
@@ -254,50 +258,6 @@ export function completeDecodedEvent(decoded: unknown, record: KafkaInboundRecor
     causationId: event.causationId ?? null,
     occurredAt: event.occurredAt ?? requireRecordTimestamp(record),
   };
-}
-
-function mediaTypeOf(contentType: string | undefined): string | undefined {
-  return contentType?.split(';')[0]?.trim().toLowerCase();
-}
-
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function optionalAttribute(body: Record<string, unknown>, name: string): string | undefined {
-  const value = body[name];
-  if (value !== undefined && typeof value !== 'string') {
-    throw invalid(`Attribute '${name}' must be a string`);
-  }
-  return value;
-}
-
-function requiredAttribute(body: Record<string, unknown>, name: string): string {
-  const value = optionalAttribute(body, name);
-  if (value === undefined || value.length === 0) {
-    throw invalid(`Attribute '${name}' is missing or empty`);
-  }
-  return value;
-}
-
-function assertValidType(type: string, label: string): void {
-  try {
-    assertEventType(type);
-  } catch (error) {
-    throw invalid(`${label} is not a valid event type: ${(error as Error).message}`);
-  }
-}
-
-function assertJsonDataContentType(dataContentType: string | undefined): void {
-  const mediaType = mediaTypeOf(dataContentType);
-  if (
-    mediaType !== undefined &&
-    mediaType !== 'application/json' &&
-    mediaType !== 'text/json' &&
-    !mediaType.endsWith('+json')
-  ) {
-    throw invalid(`datacontenttype must be JSON, received '${dataContentType}'`);
-  }
 }
 
 function extensionAttributes(body: Record<string, unknown>): Record<string, string> {

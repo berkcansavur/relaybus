@@ -1,7 +1,11 @@
 import { assertEventType, type EventEnvelope, type EventHeaders } from '@relaybus/core';
+import { createCloudEventReaders, isJsonObject, mediaTypeOf } from '@relaybus/core/internal';
 import type { AmqpMessage, AmqpMessageProperties } from './amqp-types.js';
 import { MalformedMessageError } from './errors.js';
 import { RFC3339_PATTERN, decodeEnvelope } from './wire-format.js';
+
+const { optionalAttribute, requiredAttribute, assertValidType, assertJsonDataContentType } =
+  createCloudEventReaders((reason) => new MalformedMessageError(reason));
 
 /**
  * The event a decoder extracted from a message. `id`, `type` and `payload` are
@@ -250,60 +254,12 @@ function parseJsonBody(content: Buffer): unknown {
   }
 }
 
-function mediaTypeOf(contentType: unknown): string | undefined {
-  return typeof contentType === 'string'
-    ? contentType.split(';')[0]!.trim().toLowerCase()
-    : undefined;
-}
-
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 function nonEmptyText(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
 function defaultSource(message: AmqpMessage): string {
   return nonEmptyText(message.properties.appId) ?? message.fields.routingKey;
-}
-
-function optionalAttribute(body: Record<string, unknown>, name: string): string | undefined {
-  const value = body[name];
-  if (value !== undefined && typeof value !== 'string') {
-    throw new MalformedMessageError(`Attribute '${name}' must be a string`);
-  }
-  return value;
-}
-
-function requiredAttribute(body: Record<string, unknown>, name: string): string {
-  const value = optionalAttribute(body, name);
-  if (value === undefined || value.length === 0) {
-    throw new MalformedMessageError(`Attribute '${name}' is missing or empty`);
-  }
-  return value;
-}
-
-function assertValidType(type: string, label: string): void {
-  try {
-    assertEventType(type);
-  } catch (error) {
-    throw new MalformedMessageError(
-      `${label} is not a valid event type: ${(error as Error).message}`,
-    );
-  }
-}
-
-function assertJsonDataContentType(dataContentType: string | undefined): void {
-  const mediaType = mediaTypeOf(dataContentType);
-  if (
-    mediaType !== undefined &&
-    mediaType !== 'application/json' &&
-    mediaType !== 'text/json' &&
-    !mediaType.endsWith('+json')
-  ) {
-    throw new MalformedMessageError(`datacontenttype must be JSON, received '${dataContentType}'`);
-  }
 }
 
 function parseTime(text: string): Date {

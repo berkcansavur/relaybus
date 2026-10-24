@@ -11,6 +11,7 @@
     "emitDecoratorMetadata": false,
     "paths": {
       "@relaybus/core": ["../packages/core/src/index.ts"],
+      "@relaybus/core/internal": ["../packages/core/src/internal/index.ts"],
       "@relaybus/postgres": ["../packages/postgres/src/index.ts"],
       "@relaybus/mongodb": ["../packages/mongodb/src/index.ts"],
       "pg": ["../packages/postgres/node_modules/@types/pg/index.d.ts"],

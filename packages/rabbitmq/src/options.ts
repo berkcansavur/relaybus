@@ -8,6 +8,7 @@ import {
   type RetryPolicy,
   type RetryPolicyOptions,
 } from '@relaybus/core';
+import { assertPositiveInteger } from '@relaybus/core/internal';
 import type { AmqpConnection, AmqpMessage } from './amqp-types.js';
 import { completeDecodedEvent, type RabbitMqMessageDecoder } from './inbound-decoders.js';
 import { buildRetryLadder } from './redelivery.js';
@@ -213,7 +214,7 @@ export function resolveSettings(options: RabbitMqTransportOptions): ResolvedTran
     );
   }
   const ordered = options.ordered ?? false;
-  const prefetch = positiveInteger(options.prefetch ?? (ordered ? 1 : 50), 'prefetch');
+  const prefetch = assertPositiveInteger(options.prefetch ?? (ordered ? 1 : 50), 'prefetch');
   if (ordered && prefetch !== 1) {
     throw new ConfigurationError(`ordered consumption needs prefetch 1, received ${prefetch}`);
   }
@@ -231,7 +232,7 @@ export function resolveSettings(options: RabbitMqTransportOptions): ResolvedTran
       'deadLetterExchange',
     ),
     deadLetterQueue: optionalNonEmpty(options.deadLetterQueue, 'deadLetterQueue'),
-    deliveryLimit: positiveInteger(options.deliveryLimit ?? 10, 'deliveryLimit'),
+    deliveryLimit: assertPositiveInteger(options.deliveryLimit ?? 10, 'deliveryLimit'),
     handlerRetry: createRetryPolicy(options.handlerRetry, DEFAULT_HANDLER_RETRY),
     redelivery,
     retryLadder: ordered ? [] : buildRetryLadder(redelivery),
@@ -305,13 +306,6 @@ function nonEmpty(value: string, name: string): string {
 
 function optionalNonEmpty(value: string | undefined, name: string): string | undefined {
   return value === undefined ? undefined : nonEmpty(value, name);
-}
-
-function positiveInteger(value: number, name: string): number {
-  if (!Number.isInteger(value) || value < 1) {
-    throw new ConfigurationError(`${name} must be a positive integer, received ${value}`);
-  }
-  return value;
 }
 
 function positiveDuration(value: Duration, name: string): number {

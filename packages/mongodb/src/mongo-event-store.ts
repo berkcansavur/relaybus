@@ -17,6 +17,7 @@ import {
   type PurgeResult,
   type RelayBusLogger,
 } from '@relaybus/core';
+import { assertPositiveInteger } from '@relaybus/core/internal';
 import type {
   AnyBulkWriteOperation,
   ClientSession,
@@ -253,12 +254,10 @@ export class MongoEventStore implements EventStore<ClientSession> {
     if (options.database !== undefined) {
       assertDatabaseName(options.database);
     }
-    const purgeBatchSize = options.purgeBatchSize ?? DEFAULT_PURGE_BATCH_SIZE;
-    if (!Number.isInteger(purgeBatchSize) || purgeBatchSize < 1) {
-      throw new ConfigurationError(
-        `purgeBatchSize must be a positive integer, received ${String(purgeBatchSize)}`,
-      );
-    }
+    const purgeBatchSize = assertPositiveInteger(
+      options.purgeBatchSize ?? DEFAULT_PURGE_BATCH_SIZE,
+      'purgeBatchSize',
+    );
     this.#client = options.client;
     const database = options.client.db(options.database);
     this.#database = database;

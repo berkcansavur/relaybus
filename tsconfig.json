@@ -5,6 +5,7 @@
     "rootDir": ".",
     "paths": {
       "@relaybus/core": ["./packages/core/src/index.ts"],
+      "@relaybus/core/internal": ["./packages/core/src/internal/index.ts"],
       "@relaybus/nestjs": ["./packages/nestjs/src/index.ts"],
       "@relaybus/postgres": ["./packages/postgres/src/index.ts"],
       "@relaybus/mongodb": ["./packages/mongodb/src/index.ts"],

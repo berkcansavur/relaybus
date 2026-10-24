@@ -16,6 +16,7 @@ import {
 import { CatalogPublisher } from './catalog-publisher.js';
 import { systemClock, type Clock } from './clock.js';
 import { Dispatcher, type DispatcherSettings } from './dispatcher.js';
+import { assertPositiveInteger } from './internal/validation.js';
 import { toMilliseconds, toTimerMilliseconds, type Duration } from './duration.js';
 import {
   ConfigurationError,
@@ -891,25 +892,18 @@ function oneOf<T extends string>(value: T, allowed: readonly T[], name: string):
   return value;
 }
 
-function positiveInteger(value: number, name: string): number {
-  if (!Number.isInteger(value) || value < 1) {
-    throw new ConfigurationError(`${name} must be a positive integer, received ${value}`);
-  }
-  return value;
-}
-
 function createDispatcherSettings(
   options: DispatcherOptions | undefined,
   generateIdentifier: IdentifierGenerator,
 ): DispatcherSettings {
-  const concurrency = positiveInteger(
+  const concurrency = assertPositiveInteger(
     options?.concurrency ?? DEFAULTS.concurrency,
     'dispatcher.concurrency',
   );
   return {
     owner: `${hostname()}:${process.pid}:${generateIdentifier()}`,
     concurrency,
-    batchSize: positiveInteger(options?.batchSize ?? concurrency, 'dispatcher.batchSize'),
+    batchSize: assertPositiveInteger(options?.batchSize ?? concurrency, 'dispatcher.batchSize'),
     pollIntervalMs: toTimerMilliseconds(
       options?.pollInterval ?? DEFAULTS.pollInterval,
       'dispatcher.pollInterval',
@@ -926,7 +920,7 @@ function createDispatcherSettings(
       options?.completionBatchWindow ?? DEFAULTS.completionBatchWindow,
       'dispatcher.completionBatchWindow',
     ),
-    completionBatchSize: positiveInteger(
+    completionBatchSize: assertPositiveInteger(
       options?.completionBatchSize ?? DEFAULTS.completionBatchSize,
       'dispatcher.completionBatchSize',
     ),

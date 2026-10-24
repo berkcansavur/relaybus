@@ -10,6 +10,7 @@ import {
   type Transport,
   type TransportMessageHandler,
 } from '@relaybus/core';
+import { assertPositiveInteger } from '@relaybus/core/internal';
 import {
   InvalidKafkaMessageError,
   decodeEnvelope,
@@ -705,12 +706,10 @@ export class KafkaTransport implements Transport {
 }
 
 function resolveSettings(options: KafkaTransportOptions): Settings {
-  const maxAttempts = options.processing?.maxAttempts ?? DEFAULTS.maxAttempts;
-  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
-    throw new ConfigurationError(
-      `processing.maxAttempts must be a positive integer, received ${maxAttempts}`,
-    );
-  }
+  const maxAttempts = assertPositiveInteger(
+    options.processing?.maxAttempts ?? DEFAULTS.maxAttempts,
+    'processing.maxAttempts',
+  );
   return {
     maxAttempts,
     initialBackoffMs: toMilliseconds(

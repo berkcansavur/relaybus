@@ -1,5 +1,6 @@
 import { toTimerMilliseconds, type Duration } from './duration.js';
 import { ConfigurationError } from './errors.js';
+import { assertPositiveInteger } from './internal/validation.js';
 import type { EventEnvelope } from './event.js';
 import { createRetryPolicy, type RetryPolicy, type RetryPolicyOptions } from './retry-policy.js';
 import type { StandardSchemaV1 } from './standard-schema.js';
@@ -97,13 +98,8 @@ export class HandlerRegistry {
     if (this.#byId.has(options.id)) {
       throw new ConfigurationError(`Handler id '${options.id}' is already registered`);
     }
-    if (
-      options.concurrency !== undefined &&
-      (!Number.isInteger(options.concurrency) || options.concurrency < 1)
-    ) {
-      throw new ConfigurationError(
-        `Concurrency of handler '${options.id}' must be a positive integer, received ${options.concurrency}`,
-      );
+    if (options.concurrency !== undefined) {
+      assertPositiveInteger(options.concurrency, `Concurrency of handler '${options.id}'`);
     }
     const registration: HandlerRegistration = {
       id: options.id,

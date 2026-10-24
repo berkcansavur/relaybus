@@ -15,6 +15,7 @@ import {
   type PurgeResult,
   type RelayBusLogger,
 } from '@relaybus/core';
+import { assertPositiveInteger } from '@relaybus/core/internal';
 import { ReconcileFailedError } from './errors.js';
 import { Client, Pool, type PoolClient, type PoolConfig } from 'pg';
 import type {
@@ -225,12 +226,10 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
         'PostgresEventStore needs exactly one of pool, connectionString or executor',
       );
     }
-    const purgeBatchSize = options.purgeBatchSize ?? DEFAULT_PURGE_BATCH_SIZE;
-    if (!Number.isInteger(purgeBatchSize) || purgeBatchSize < 1) {
-      throw new ConfigurationError(
-        `purgeBatchSize must be a positive integer, received ${String(purgeBatchSize)}`,
-      );
-    }
+    const purgeBatchSize = assertPositiveInteger(
+      options.purgeBatchSize ?? DEFAULT_PURGE_BATCH_SIZE,
+      'purgeBatchSize',
+    );
     const wakeUp = options.wakeUp ?? 'notify';
     if (!WAKE_UPS.includes(wakeUp)) {
       throw new ConfigurationError(`wakeUp must be 'notify' or 'poll', received ${String(wakeUp)}`);
