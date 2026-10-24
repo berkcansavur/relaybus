@@ -210,6 +210,11 @@
     "unit": "scans",
     "description": "Sequential scans of deliveries or events in that claim."
   },
+  "postgres.explain.claim.maximumEstimatedCost": {
+    "budget": 25000,
+    "unit": "cost units",
+    "description": "Highest planner cost estimate of a claim statement with 8 handlers, on 50,000 unkeyed deliveries (cold and warm) and on 20,000 deliveries of 10 hot keys whose heads are in flight. A statement above jit_above_cost (100,000 by default) is JIT-compiled on every call, which took about 100 ms."
+  },
   "postgres.explain.claimHotKeysAllInFlight.buffers": {
     "budget": 2720,
     "unit": "buffers",

@@ -455,6 +455,55 @@ ORDER BY picked.due_at, picked.delivery_id`;
   }
 
   /**
+   * The head (lowest pending sequence) of every key of every wanted handler in the lane `scope.lane`,
+   * as a subquery returning `(id, lane, available_at, handler, key)`. A loose index scan on the
+   * pending-key index hops from key to key of a handler, and after its last key on to the first key of
+   * the next wanted handler, so the cost follows the number of keys, not the number of followers. The
+   * handlers are walked inside the recursion instead of joined to it: a join multiplied the planner's
+   * cost estimate by the handler count, which pushed the claim statements over `jit_above_cost`, and
+   * compiling them took longer than running them.
+   */
+  #keyHeads(scope: string): string {
+    const deliveries = this.#names.deliveries;
+    // `key IS NOT NULL` is spelled out only where nothing else implies it: next to `key > ...` or
+    // `key = ...` the planner proves the partial index from those, and with the column all null in the
+    // statistics the extra clause made it expect one row behind many index entries and cost every hop as a
+    // full range scan.
+    const pending = `candidate.lane = ${scope}.lane AND candidate.status = 'pending'`;
+    const nextHandler = (after: string): string =>
+      `(SELECT min(wanted.handler) FROM jsonb_array_elements_text($2::jsonb) AS wanted (handler)${after === '' ? '' : ` WHERE wanted.handler > ${after}`})`;
+    return `
+    WITH RECURSIVE hops (handler, key) AS (
+      SELECT ${nextHandler('')}, NULL::text
+      UNION ALL
+      SELECT CASE WHEN next.key IS NULL THEN ${nextHandler('hops.handler')} ELSE hops.handler END, next.key
+      FROM hops
+      CROSS JOIN LATERAL (
+        SELECT CASE WHEN hops.key IS NULL
+          THEN (SELECT candidate.key FROM ${deliveries} AS candidate
+                WHERE ${pending} AND candidate.handler = hops.handler AND candidate.key IS NOT NULL
+                ORDER BY candidate.key LIMIT 1)
+          ELSE (SELECT candidate.key FROM ${deliveries} AS candidate
+                WHERE ${pending} AND candidate.handler = hops.handler AND candidate.key > hops.key
+                ORDER BY candidate.key LIMIT 1)
+        END AS key
+        OFFSET 0
+      ) AS next
+      WHERE hops.handler IS NOT NULL
+    )
+    SELECT lowest.id, lowest.lane, lowest.available_at, lowest.handler, lowest.key
+    FROM hops
+    CROSS JOIN LATERAL (
+      SELECT candidate.id, candidate.lane, candidate.available_at, candidate.handler, candidate.key
+      FROM ${deliveries} AS candidate
+      WHERE ${pending} AND candidate.handler = hops.handler AND candidate.key = hops.key
+      ORDER BY candidate.sequence LIMIT 1
+    ) AS lowest
+    WHERE hops.key IS NOT NULL
+  `;
+  }
+
+  /**
    * CTEs that pick up to `limit` claimable deliveries from the lanes of the CTE `scope` (columns `lane`,
    * `epoch`, `in_flight`), named after `prefix`; the result is `<prefix>_candidates (id, lane, available_at)`.
    * The rules are those of {@link claim}. The fast window reads the first {@link LANE_SCAN_WINDOW} due
@@ -514,33 +563,7 @@ ORDER BY picked.due_at, picked.delivery_id`;
 ), ${prefix}_heads AS MATERIALIZED (
   SELECT head.id, head.lane, head.available_at, head.handler, head.key
   FROM ${prefix}_saturated AS scope
-  CROSS JOIN unnest(ARRAY(SELECT jsonb_array_elements_text($2::jsonb))) AS wanted (handler)
-  CROSS JOIN LATERAL (
-    -- Loose index scan: hop from key to key on the pending-key index, then take the lowest
-    -- sequence of each key. The cost follows the number of keys, not the number of followers.
-    WITH RECURSIVE hops (key) AS (
-      (SELECT candidate.key FROM ${deliveries} AS candidate
-       WHERE candidate.lane = scope.lane AND candidate.handler = wanted.handler
-         AND candidate.key IS NOT NULL AND candidate.status = 'pending'
-       ORDER BY candidate.key LIMIT 1)
-      UNION ALL
-      SELECT (SELECT candidate.key FROM ${deliveries} AS candidate
-              WHERE candidate.lane = scope.lane AND candidate.handler = wanted.handler
-                AND candidate.key IS NOT NULL AND candidate.status = 'pending' AND candidate.key > hops.key
-              ORDER BY candidate.key LIMIT 1)
-      FROM hops WHERE hops.key IS NOT NULL
-    )
-    SELECT lowest.id, lowest.lane, lowest.available_at, lowest.handler, lowest.key
-    FROM hops
-    CROSS JOIN LATERAL (
-      SELECT candidate.id, candidate.lane, candidate.available_at, candidate.handler, candidate.key
-      FROM ${deliveries} AS candidate
-      WHERE candidate.lane = scope.lane AND candidate.handler = wanted.handler
-        AND candidate.key = hops.key AND candidate.status = 'pending'
-      ORDER BY candidate.sequence LIMIT 1
-    ) AS lowest
-    WHERE hops.key IS NOT NULL
-  ) AS head
+  CROSS JOIN LATERAL (${this.#keyHeads('scope')}) AS head
 ), ${prefix}_keyed AS MATERIALIZED (
   SELECT heads.id, heads.lane, heads.available_at
   FROM ${prefix}_heads AS heads
@@ -701,33 +724,7 @@ ${this.#pickedRows(`((SELECT count(*) FROM due_window) >= ${CLAIM_SCAN_WINDOW} O
 heads AS MATERIALIZED (
   SELECT head.id, head.lane, head.available_at, head.handler, head.key
   FROM scope
-  CROSS JOIN unnest(ARRAY(SELECT jsonb_array_elements_text($2::jsonb))) AS wanted (handler)
-  CROSS JOIN LATERAL (
-    -- Loose index scan: hop from key to key on the pending-key index, then take the lowest
-    -- sequence of each key. The cost follows the number of keys, not the number of followers.
-    WITH RECURSIVE hops (key) AS (
-      (SELECT candidate.key FROM ${deliveries} AS candidate
-       WHERE candidate.lane = scope.lane AND candidate.handler = wanted.handler
-         AND candidate.key IS NOT NULL AND candidate.status = 'pending'
-       ORDER BY candidate.key LIMIT 1)
-      UNION ALL
-      SELECT (SELECT candidate.key FROM ${deliveries} AS candidate
-              WHERE candidate.lane = scope.lane AND candidate.handler = wanted.handler
-                AND candidate.key IS NOT NULL AND candidate.status = 'pending' AND candidate.key > hops.key
-              ORDER BY candidate.key LIMIT 1)
-      FROM hops WHERE hops.key IS NOT NULL
-    )
-    SELECT lowest.id, lowest.lane, lowest.available_at, lowest.handler, lowest.key
-    FROM hops
-    CROSS JOIN LATERAL (
-      SELECT candidate.id, candidate.lane, candidate.available_at, candidate.handler, candidate.key
-      FROM ${deliveries} AS candidate
-      WHERE candidate.lane = scope.lane AND candidate.handler = wanted.handler
-        AND candidate.key = hops.key AND candidate.status = 'pending'
-      ORDER BY candidate.sequence LIMIT 1
-    ) AS lowest
-    WHERE hops.key IS NOT NULL
-  ) AS head
+  CROSS JOIN LATERAL (${this.#keyHeads('scope')}) AS head
 ), keyed AS MATERIALIZED (
   SELECT heads.id, heads.lane, heads.available_at
   FROM heads

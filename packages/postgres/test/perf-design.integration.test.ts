@@ -552,6 +552,7 @@ interface PlanNode {
   readonly 'Relation Name'?: string;
   readonly 'Shared Hit Blocks': number;
   readonly 'Shared Read Blocks': number;
+  readonly 'Total Cost': number;
   readonly Plans?: readonly PlanNode[];
 }
 
@@ -566,7 +567,7 @@ function planNodes(node: PlanNode): PlanNode[] {
 async function explain(
   fixture: Fixture,
   operation: () => Promise<unknown>,
-): Promise<{ readonly buffers: number; readonly nodes: PlanNode[] }> {
+): Promise<{ readonly buffers: number; readonly nodes: PlanNode[]; readonly maximumCost: number }> {
   const plans: PlanNode[] = [];
   fixture.executor.explaining = plans;
   try {
@@ -580,6 +581,7 @@ async function explain(
       0,
     ),
     nodes: plans.flatMap(planNodes),
+    maximumCost: Math.max(0, ...plans.map((plan) => plan['Total Cost'])),
   };
 }
 
@@ -688,6 +690,37 @@ describe('plan shape and buffers', () => {
     expect(await claim(busy.store, 10)).toHaveLength(10);
     const blocked = await explain(busy, () => claim(busy.store, 10));
     expectPlanWithinBudget('claimHotKeysAllInFlight', blocked);
+  });
+});
+
+describe('planner cost estimates', () => {
+  // PostgreSQL compiles a statement with JIT when its estimated cost passes jit_above_cost (100,000 by
+  // default). For these short statements compiling took about 100 ms, while running them takes 1-3 ms.
+  const EIGHT_HANDLERS = ['h', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7', 'h8'];
+
+  it('keeps every claim statement far below the JIT threshold, unkeyed or keyed, whatever the backlog', async () => {
+    // Unkeyed only: the key column is all null in the statistics, which is what misled the estimates.
+    const unkeyed = await createFixture();
+    await publishMany(unkeyed.store, events(50_000));
+    await analyze(unkeyed);
+    const cold = await explain(unkeyed, () => claim(unkeyed.store, 10, EIGHT_HANDLERS));
+    const warm = await explain(unkeyed, () => claim(unkeyed.store, 10, EIGHT_HANDLERS));
+
+    // Hot keys whose heads are all in flight: the claim looks behind the blocked followers.
+    const keyed = await createFixture();
+    await publishMany(
+      keyed.store,
+      events(20_000, (index) => `hot-${index % 10}`),
+    );
+    await analyze(keyed);
+    expect(await claim(keyed.store, 10, EIGHT_HANDLERS)).toHaveLength(10);
+    const blocked = await explain(keyed, () => claim(keyed.store, 10, EIGHT_HANDLERS));
+    const other = await explain(keyed, () => claim(keyed.store, 10, EIGHT_HANDLERS, 'worker-2'));
+
+    expectWithinBudget(
+      'postgres.explain.claim.maximumEstimatedCost',
+      Math.max(cold.maximumCost, warm.maximumCost, blocked.maximumCost, other.maximumCost),
+    );
   });
 });
 
