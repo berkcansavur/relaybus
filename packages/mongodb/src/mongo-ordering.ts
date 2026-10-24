@@ -73,25 +73,44 @@ export class MongoOrdering {
           .toArray(),
         running,
       ]);
-      // Look up predecessors only for as many candidates as the claim still needs, then more.
-      for (let offset = 0; offset < page.length;) {
-        const slice = page.slice(offset, offset + request.limit - picked.length);
-        offset += slice.length;
-        await this.#notePredecessors(slice, scan);
-        for (const candidate of slice) {
-          if (isClaimable(candidate, scan, keys)) {
-            picked.push(candidate);
-          }
-        }
-        if (picked.length >= request.limit) {
-          return;
-        }
+      if (await this.#pickFromPage(page, { request, scan, picked, keys })) {
+        return;
       }
       if (page.length < pageSize) {
         return;
       }
       after = page.at(-1);
     }
+  }
+
+  /**
+   * Adds the claimable candidates of `page` to `picked`. Looks up predecessors only for as many
+   * candidates as the claim still needs, then more. True once the claim has `request.limit` picks.
+   */
+  async #pickFromPage(
+    page: readonly DeliveryDocument[],
+    claim: {
+      readonly request: ClaimRequest;
+      readonly scan: ClaimScan;
+      readonly picked: DeliveryDocument[];
+      readonly keys: Set<string>;
+    },
+  ): Promise<boolean> {
+    const { request, scan, picked, keys } = claim;
+    for (let offset = 0; offset < page.length;) {
+      const slice = page.slice(offset, offset + request.limit - picked.length);
+      offset += slice.length;
+      await this.#notePredecessors(slice, scan);
+      for (const candidate of slice) {
+        if (isClaimable(candidate, scan, keys)) {
+          picked.push(candidate);
+        }
+      }
+      if (picked.length >= request.limit) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**

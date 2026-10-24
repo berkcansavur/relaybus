@@ -176,38 +176,9 @@ export class MongoLaneLeases {
       const gone = lane.listed.filter((id) => !runningIds.has(id));
       const ids = picksByLane.get(lane.laneId);
       if (ids !== undefined) {
-        operations.push({
-          updateOne: {
-            filter: {
-              _id: lane.laneId,
-              epoch: lane.epoch,
-              owner: request.leaseOwner,
-              holder: this.#state.instanceId,
-              // A record that reaches the server late (after its claim failed and reconciled)
-              // finds a newer revision and changes nothing.
-              revision: atCount(lane.revision),
-            },
-            update: [
-              {
-                $set: {
-                  inFlight: {
-                    $concatArrays: [
-                      {
-                        $filter: {
-                          input: '$inFlight',
-                          cond: { $not: [{ $in: ['$$this', { $literal: gone }] }] },
-                        },
-                      },
-                      { $literal: ids },
-                    ],
-                  },
-                  leaseExpiresAt: { $max: ['$leaseExpiresAt', request.leaseExpiresAt] },
-                  revision: { $add: [{ $ifNull: ['$revision', 0] }, 1] },
-                },
-              },
-            ],
-          },
-        });
+        operations.push(
+          recordInFlight({ lane, ids, gone, request, instanceId: this.#state.instanceId }),
+        );
       } else if (gone.length === lane.listed.length) {
         operations.push(freeLane(lane.laneId, lane.epoch, lane.revision, gone));
         handedBack.add(lane.laneId);
@@ -220,13 +191,25 @@ export class MongoLaneLeases {
     if (result.matchedCount === operations.length) {
       return { recorded: new Set(picksByLane.keys()), handedBack };
     }
+    return {
+      recorded: await this.#readRecorded(scope, [...picksByLane.keys()], request),
+      handedBack,
+    };
+  }
+
+  /** The lanes of `laneIds` whose record of this claim applied, read back after a partial bulk write. */
+  async #readRecorded(
+    scope: ReadonlyMap<number, ScopeLane>,
+    laneIds: readonly number[],
+    request: ClaimRequest,
+  ): Promise<Set<number>> {
     const current = await this.#state.lanes
       .find(
-        { _id: { $in: [...picksByLane.keys()] } },
+        { _id: { $in: [...laneIds] } },
         { projection: { epoch: 1, owner: 1, holder: 1, revision: 1 } },
       )
       .toArray();
-    const recorded = new Set(
+    return new Set(
       current
         .filter(
           (lane) =>
@@ -237,7 +220,6 @@ export class MongoLaneLeases {
         )
         .map((lane) => lane._id),
     );
-    return { recorded, handedBack };
   }
 
   /** Implements {@link MongoEventStore.relinquish}. */
@@ -258,6 +240,51 @@ export class MongoLaneLeases {
       );
     }
   }
+}
+
+/** One lane's record of a claim: the picks join its in-flight list and the deliveries no longer running leave it. */
+type RecordInFlightInput = {
+  readonly lane: ScopeLane;
+  readonly ids: readonly string[];
+  readonly gone: readonly string[];
+  readonly request: ClaimRequest;
+  readonly instanceId: string;
+};
+
+function recordInFlight(input: RecordInFlightInput): AnyBulkWriteOperation<LaneDocument> {
+  const { lane, ids, gone, request, instanceId } = input;
+  return {
+    updateOne: {
+      filter: {
+        _id: lane.laneId,
+        epoch: lane.epoch,
+        owner: request.leaseOwner,
+        holder: instanceId,
+        // A record that reaches the server late (after its claim failed and reconciled)
+        // finds a newer revision and changes nothing.
+        revision: atCount(lane.revision),
+      },
+      update: [
+        {
+          $set: {
+            inFlight: {
+              $concatArrays: [
+                {
+                  $filter: {
+                    input: '$inFlight',
+                    cond: { $not: [{ $in: ['$$this', { $literal: gone }] }] },
+                  },
+                },
+                { $literal: ids },
+              ],
+            },
+            leaseExpiresAt: { $max: ['$leaseExpiresAt', request.leaseExpiresAt] },
+            revision: { $add: [{ $ifNull: ['$revision', 0] }, 1] },
+          },
+        },
+      ],
+    },
+  };
 }
 
 /**

@@ -1,4 +1,4 @@
-import type { Document } from 'mongodb';
+import type { Document, IndexDescriptionInfo } from 'mongodb';
 import { LANE_COUNT, laneOf } from './lanes.js';
 import { createTransactionsUnsupportedError } from './mongo-errors.js';
 import type { MongoStoreState } from './mongo-store-state.js';
@@ -51,6 +51,11 @@ export class MongoSchema {
       await this.#seedLanes();
     }
     await this.#dropObsoleteIndexes();
+    await this.#createIndexes();
+  }
+
+  /** Creates the indexes of every collection; existing indexes are left as they are. */
+  async #createIndexes(): Promise<void> {
     await this.#state.deliveries.createIndexes([
       // Idempotent appends and lookups by event.
       { key: { eventId: 1, handler: 1 }, name: 'event_handler', unique: true },
@@ -155,6 +160,11 @@ export class MongoSchema {
         );
       },
     );
+    await this.#upgradeEventsFromVersion010();
+  }
+
+  /** Tells every 0.1.0 event which handlers it already has deliveries for and when it was created. */
+  async #upgradeEventsFromVersion010(): Promise<void> {
     await inBatches(
       this.#state.events.find(
         { handlers: { $exists: false } },
@@ -225,22 +235,30 @@ export class MongoSchema {
   /** Drops the 0.1.0 indexes that no query uses, and a `claim` index with the 0.1.0 key. */
   async #dropObsoleteIndexes(): Promise<void> {
     for (const index of await this.#state.deliveries.indexes()) {
-      const obsolete =
-        OBSOLETE_INDEXES.includes(index.name!) ||
-        (index.name === 'claim' &&
-          Object.keys(index.key).join() !== Object.keys(CLAIM_INDEX_KEY).join());
-      if (obsolete) {
-        try {
-          await this.#state.deliveries.dropIndex(index.name!);
-        } catch (error) {
-          // Another process running setup() dropped it first.
-          if (!hasErrorCode(error, INDEX_NOT_FOUND)) {
-            throw error;
-          }
-        }
+      if (isObsoleteIndex(index)) {
+        await this.#dropIndexIfPresent(index.name!);
       }
     }
   }
+
+  async #dropIndexIfPresent(name: string): Promise<void> {
+    try {
+      await this.#state.deliveries.dropIndex(name);
+    } catch (error) {
+      // Another process running setup() dropped it first.
+      if (!hasErrorCode(error, INDEX_NOT_FOUND)) {
+        throw error;
+      }
+    }
+  }
+}
+
+function isObsoleteIndex(index: IndexDescriptionInfo): boolean {
+  return (
+    OBSOLETE_INDEXES.includes(index.name!) ||
+    (index.name === 'claim' &&
+      Object.keys(index.key).join() !== Object.keys(CLAIM_INDEX_KEY).join())
+  );
 }
 
 /** Feeds the documents of `cursor` to `work` in batches of the cursor's batch size. */

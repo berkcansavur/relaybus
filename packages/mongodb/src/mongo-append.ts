@@ -1,7 +1,42 @@
 import type { AppendEntry, AppendResult, EventEnvelope } from '@relaybus/core';
-import type { ClientSession } from 'mongodb';
-import { toDeliveryDocument, toEventDocument, type DeliveryDocument } from './documents.js';
+import type { ClientSession, WithId } from 'mongodb';
+import {
+  toDeliveryDocument,
+  toEventDocument,
+  type DeliveryDocument,
+  type EventDocument,
+} from './documents.js';
 import { assertInTransaction, type MongoStoreState } from './mongo-store-state.js';
+
+/** The events of an append that already existed, with what the append needs of them. */
+type StoredEvents = Map<string, WithId<EventDocument>>;
+
+type PlanAppendInput = {
+  readonly session: ClientSession;
+  readonly entries: readonly AppendEntry[];
+  readonly storedEvents: StoredEvents;
+  readonly now: Date;
+};
+
+/** What an append writes and reports. */
+type AppendWritePlan = {
+  readonly appendedEventIds: string[];
+  readonly duplicateEventIds: string[];
+  readonly newEvents: ReadonlyArray<{
+    readonly event: EventEnvelope;
+    readonly sequence: number | null;
+  }>;
+  readonly newDeliveries: DeliveryDocument[];
+  /** Handlers this call adds, per event. */
+  readonly addedHandlers: Map<string, string[]>;
+};
+
+type WriteAppendInput = {
+  readonly session: ClientSession;
+  readonly plan: AppendWritePlan;
+  readonly storedEvents: StoredEvents;
+  readonly now: Date;
+};
 
 /** Appends events and their deliveries inside the caller's transaction. */
 export class MongoAppend {
@@ -19,7 +54,7 @@ export class MongoAppend {
   ): Promise<AppendResult> {
     assertInTransaction(session, 'append');
     const eventIds = [...new Set(entries.map((entry) => entry.event.id))];
-    const storedEvents = new Map(
+    const storedEvents: StoredEvents = new Map(
       (
         await this.#state.events
           .find(
@@ -30,6 +65,21 @@ export class MongoAppend {
       ).map((stored) => [stored._id, stored]),
     );
 
+    const plan = await this.#planAppend({ session, entries, storedEvents, now });
+    await this.#writeAppend({ session, plan, storedEvents, now });
+    return {
+      appendedEventIds: plan.appendedEventIds,
+      duplicateEventIds: plan.duplicateEventIds,
+      appendedDeliveryCount: plan.newDeliveries.length,
+    };
+  }
+
+  /**
+   * Decides, in entry order, which events are new (taking their key sequence) and which deliveries
+   * each event still lacks.
+   */
+  async #planAppend(input: PlanAppendInput): Promise<AppendWritePlan> {
+    const { session, entries, storedEvents, now } = input;
     const appendedEventIds: string[] = [];
     const duplicateEventIds: string[] = [];
     const newEvents: Array<{ readonly event: EventEnvelope; readonly sequence: number | null }> =
@@ -73,7 +123,13 @@ export class MongoAppend {
         newDeliveries.push(toDeliveryDocument(delivery, event, ordering, now));
       }
     }
+    return { appendedEventIds, duplicateEventIds, newEvents, newDeliveries, addedHandlers };
+  }
 
+  /** Writes the new events, the handlers added to existing events and the new deliveries, in that order. */
+  async #writeAppend(input: WriteAppendInput): Promise<void> {
+    const { session, plan, storedEvents, now } = input;
+    const { newEvents, newDeliveries, addedHandlers } = plan;
     if (newEvents.length > 0) {
       // Upserts, not inserts: a duplicate-key error would abort the whole transaction,
       // whereas a concurrent writer of the same id surfaces as a retryable write conflict.
@@ -115,7 +171,6 @@ export class MongoAppend {
         { session, ordered: true },
       );
     }
-    return { appendedEventIds, duplicateEventIds, appendedDeliveryCount: newDeliveries.length };
   }
 
   /** Atomically increments the counter of `key`; conflicting appends of the key serialize here. */

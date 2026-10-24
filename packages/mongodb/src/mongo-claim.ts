@@ -1,6 +1,6 @@
 import type { ClaimRequest, ClaimedDelivery } from '@relaybus/core';
 import { ClaimScan, orderingIdentity } from './claim-scan.js';
-import type { DeliveryDocument } from './documents.js';
+import type { DeliveryDocument, LaneDocument } from './documents.js';
 import { formatLeaseToken, parseLeaseToken } from './lanes.js';
 import type { MongoLaneLeases } from './mongo-lane-leases.js';
 import type { MongoOrdering } from './mongo-ordering.js';
@@ -24,6 +24,34 @@ const INITIAL_LANES_PER_ROUND = 4;
  * delivery of those lanes in memory instead of reading them in due order.
  */
 const LANES_PER_CANDIDATE_QUERY = 128;
+
+/** The deliveries the held lanes still run: their ids and (handler, key) identities. */
+type RunningDeliveries = { readonly ids: Set<string>; readonly keys: Set<string> };
+
+/** One claim's lanes and picks while it reads candidates. */
+type PickAcrossLanesInput = {
+  readonly request: ClaimRequest;
+  /** Grows by every lane the claim takes. */
+  readonly scope: Map<number, ScopeLane>;
+  readonly scan: ClaimScan;
+  readonly running: Promise<RunningDeliveries>;
+  readonly picked: DeliveryDocument[];
+};
+
+/** The held lanes as the claim read them. */
+function scopeOf(held: readonly LaneDocument[]): Map<number, ScopeLane> {
+  return new Map<number, ScopeLane>(
+    held.map((lane) => [
+      lane._id,
+      {
+        laneId: lane._id,
+        epoch: lane.epoch,
+        listed: lane.inFlight,
+        revision: lane.revision ?? 0,
+      },
+    ]),
+  );
+}
 
 /** Claims due deliveries for one owner at a time and reconciles the lanes after a failed claim. */
 export class MongoClaims {
@@ -180,30 +208,59 @@ export class MongoClaims {
       this.#ordering.unparkNextDeliveries(request.handlers),
     ]);
     await this.#laneLeases.chargeLost(held);
-    const scope = new Map<number, ScopeLane>(
-      held.map((lane) => [
-        lane._id,
-        {
-          laneId: lane._id,
-          epoch: lane.epoch,
-          listed: lane.inFlight,
-          revision: lane.revision ?? 0,
-        },
-      ]),
-    );
+    const scope = scopeOf(held);
     // Loaded while the first candidates are read; only keyed candidates and the record need it.
-    const running = this.#queries
-      .findRunning(held.flatMap((lane) => lane.inFlight))
-      .then((documents) => ({
-        ids: new Set(documents.map((document) => document._id)),
-        keys: new Set(
-          documents.flatMap((document) =>
-            document.key === undefined ? [] : [orderingIdentity(document.handler, document.key)],
-          ),
-        ),
-      }));
+    const running = this.#loadRunning(held);
     const scan = new ClaimScan();
     const picked: DeliveryDocument[] = [];
+    await this.#pickAcrossLanes({ request, scope, scan, running, picked });
+    // Read before recording: a failure from here on must not leave picks listed as running.
+    const events = await this.#queries.readEnvelopes(picked.map((document) => document.eventId));
+    const runningIds = (await running).ids;
+    this.#forgetSettled(held, runningIds, request.leaseOwner);
+    const { recorded, handedBack } = await this.#laneLeases.recordClaim(
+      scope,
+      picked,
+      runningIds,
+      request,
+    );
+    const claimed = await this.#releaseOvertaken(
+      picked.filter((document) => recorded.has(document.laneId)),
+      scope,
+    );
+    await this.#ordering.parkWaiting(scan.waitingBacklogs(PARK_BACKLOG_THRESHOLD, handedBack));
+    return claimed.map((document) => ({
+      deliveryId: document._id,
+      leaseToken: formatLeaseToken(
+        document.laneId,
+        scope.get(document.laneId)!.epoch,
+        document.claims ?? 0,
+      ),
+      handler: document.handler,
+      attempt: document.attempts + 1,
+      leaseExpiresAt: request.leaseExpiresAt,
+      event: events.get(document.eventId)!,
+    }));
+  }
+
+  /** The deliveries still running in the held lanes, with their (handler, key) identities. */
+  #loadRunning(held: readonly LaneDocument[]): Promise<RunningDeliveries> {
+    return this.#queries.findRunning(held.flatMap((lane) => lane.inFlight)).then((documents) => ({
+      ids: new Set(documents.map((document) => document._id)),
+      keys: new Set(
+        documents.flatMap((document) =>
+          document.key === undefined ? [] : [orderingIdentity(document.handler, document.key)],
+        ),
+      ),
+    }));
+  }
+
+  /**
+   * Picks from the lanes in `scope`, then takes free lanes with due work, a few more each round
+   * (4, 8, 16, ...), and picks from them, until the claim is full or no free lane is left.
+   */
+  async #pickAcrossLanes(input: PickAcrossLanesInput): Promise<void> {
+    const { request, scope, scan, running, picked } = input;
     const pickFrom = async (lanes: readonly ScopeLane[]): Promise<void> => {
       for (let offset = 0; offset < lanes.length; offset += LANES_PER_CANDIDATE_QUERY) {
         if (picked.length < request.limit) {
@@ -233,13 +290,20 @@ export class MongoClaims {
       }
       await pickFrom(taken);
     }
-    // Read before recording: a failure from here on must not leave picks listed as running.
-    const events = await this.#queries.readEnvelopes(picked.map((document) => document.eventId));
-    const runningIds = (await running).ids;
-    // Listed but no longer pending: completed (a burial or retry would have unlisted it). Such a
-    // claim is settled, also when it was completed inside a caller's transaction that committed.
-    // Only this owner's registrations of the lane epochs it read: the same delivery may meanwhile
-    // have been requeued and handed out again, under another owner or lane epoch.
+  }
+
+  /**
+   * Forgets the claims of `owner` that are listed in the held lanes but no longer pending:
+   * completed (a burial or retry would have unlisted it). Such a claim is settled, also when it was
+   * completed inside a caller's transaction that committed. Only this owner's registrations of the
+   * lane epochs it read: the same delivery may meanwhile have been requeued and handed out again,
+   * under another owner or lane epoch.
+   */
+  #forgetSettled(
+    held: readonly LaneDocument[],
+    runningIds: ReadonlySet<string>,
+    owner: string,
+  ): void {
     const gone = new Set(
       held.flatMap((lane) =>
         lane.inFlight
@@ -249,35 +313,12 @@ export class MongoClaims {
     );
     for (const [key, entry] of this.#state.handedOut) {
       if (
-        entry.owner === request.leaseOwner &&
+        entry.owner === owner &&
         gone.has(`${entry.deliveryId}\u0000${entry.laneId}:${entry.epoch}`)
       ) {
         this.#state.handedOut.delete(key);
       }
     }
-    const { recorded, handedBack } = await this.#laneLeases.recordClaim(
-      scope,
-      picked,
-      runningIds,
-      request,
-    );
-    const claimed = await this.#releaseOvertaken(
-      picked.filter((document) => recorded.has(document.laneId)),
-      scope,
-    );
-    await this.#ordering.parkWaiting(scan.waitingBacklogs(PARK_BACKLOG_THRESHOLD, handedBack));
-    return claimed.map((document) => ({
-      deliveryId: document._id,
-      leaseToken: formatLeaseToken(
-        document.laneId,
-        scope.get(document.laneId)!.epoch,
-        document.claims ?? 0,
-      ),
-      handler: document.handler,
-      attempt: document.attempts + 1,
-      leaseExpiresAt: request.leaseExpiresAt,
-      event: events.get(document.eventId)!,
-    }));
   }
 
   /**

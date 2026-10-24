@@ -27,11 +27,7 @@ export class MongoQueries {
   async listDeliveries(query: DeliveryQuery): Promise<DeliveryRecord[]> {
     // Strings only: an object here (say, parsed from an admin request) would be a query operator.
     const status = query.status === undefined ? undefined : String(query.status);
-    const common = {
-      ...(query.handler === undefined ? {} : { handler: String(query.handler) }),
-      ...(query.eventType === undefined ? {} : { eventType: String(query.eventType) }),
-      ...(query.eventId === undefined ? {} : { eventId: String(query.eventId) }),
-    };
+    const common = commonFilter(query);
     const limit = query.limit ?? DEFAULT_LIST_LIMIT;
     const lanes = await this.#state.lanes
       .find({ 'inFlight.0': { $exists: true } }, { projection: { epoch: 0 } })
@@ -159,4 +155,17 @@ export class MongoQueries {
 
 function compareText(left: string, right: string): number {
   return Number(left > right) - Number(left < right);
+}
+
+/** The filters every listed collection shares, as strings: an object would be a query operator. */
+function commonFilter(query: DeliveryQuery): {
+  handler?: string;
+  eventType?: string;
+  eventId?: string;
+} {
+  return {
+    ...(query.handler === undefined ? {} : { handler: String(query.handler) }),
+    ...(query.eventType === undefined ? {} : { eventType: String(query.eventType) }),
+    ...(query.eventId === undefined ? {} : { eventId: String(query.eventId) }),
+  };
 }
