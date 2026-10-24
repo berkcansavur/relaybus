@@ -228,6 +228,25 @@ const DEFAULTS = {
 const TRANSPORT_HANDLER_PREFIX = 'relaybus.transport';
 const WAKE_DELAY_MS = 25;
 
+/** The events of one publish call with what their envelopes and deliveries inherit. */
+type CreateEntriesInput<TTransaction> = {
+  readonly events: readonly DomainEvent[];
+  readonly options: PublishOptions<TTransaction>;
+  readonly id: string | undefined;
+  readonly scope: ExecutionScope | undefined;
+  readonly now: Date;
+  readonly availableAt: Date;
+};
+
+/** The entries of one publish call that have deliveries, and how to append them. */
+type AppendDeliverableInput<TTransaction> = {
+  readonly entries: readonly AppendEntry[];
+  readonly options: PublishOptions<TTransaction>;
+  readonly scope: ExecutionScope | undefined;
+  readonly now: Date;
+  readonly delayMs: number;
+};
+
 /** One event of a publish call with what it inherits from the call and the running handler. */
 type CreateEnvelopeInput<TTransaction> = {
   readonly event: DomainEvent;
@@ -281,19 +300,32 @@ export class RelayBus<TTransaction = unknown> {
       'unroutedEvents',
     );
     this.#transactionResolver = options.transactionResolver;
-    this.#defaults = {
-      retry: createRetryPolicy(options.retry),
-      timeoutMs:
-        options.handlerTimeout === undefined || options.handlerTimeout === false
-          ? null
-          : toTimerMilliseconds(options.handlerTimeout, 'handlerTimeout'),
-    };
+    this.#defaults = createHandlerDefaults(options);
     this.#logger = options.logger ?? console;
     this.#notifier = new Notifier(options.observers ?? [], this.#logger);
     this.#clock = options.clock ?? systemClock;
     this.#generateIdentifier = options.generateIdentifier ?? (() => createUuidV7());
     this.#setupStore = options.setupStore ?? true;
     this.#retention = createRetentionSettings(options.retention);
+    this.#subscriptions = options.subscriptions ?? [];
+    this.#registerConnections(options);
+    this.#dispatcherEnabled = isDispatcherEnabled(options);
+    this.#dispatcher = this.#createDispatcher(options);
+  }
+
+  #createDispatcher(options: RelayBusOptions<TTransaction>): Dispatcher {
+    return new Dispatcher({
+      store: this.#store,
+      registry: this.#registry,
+      clock: this.#clock,
+      random: options.random ?? Math.random,
+      notifier: this.#notifier,
+      settings: createDispatcherSettings(options.dispatcher, this.#generateIdentifier),
+    });
+  }
+
+  /** Registers the transports, then the routes, checks the subscriptions and registers the catalogs. */
+  #registerConnections(options: RelayBusOptions<TTransaction>): void {
     for (const transport of options.transports ?? []) {
       if (this.#transports.has(transport.name)) {
         throw new ConfigurationError(`Transport name '${transport.name}' is used twice`);
@@ -303,7 +335,6 @@ export class RelayBus<TTransaction = unknown> {
     for (const route of options.routes ?? []) {
       this.#registerRoute(route);
     }
-    this.#subscriptions = options.subscriptions ?? [];
     for (const subscription of this.#subscriptions) {
       const transport = this.#requireTransport(subscription.transport);
       if (transport.subscribe === undefined) {
@@ -313,15 +344,6 @@ export class RelayBus<TTransaction = unknown> {
     for (const catalog of options.catalogs ?? []) {
       this.registerCatalog(catalog);
     }
-    this.#dispatcherEnabled = options.dispatcher?.enabled ?? true;
-    this.#dispatcher = new Dispatcher({
-      store: this.#store,
-      registry: this.#registry,
-      clock: this.#clock,
-      random: options.random ?? Math.random,
-      notifier: this.#notifier,
-      settings: createDispatcherSettings(options.dispatcher, this.#generateIdentifier),
-    });
   }
 
   get store(): EventStore<TTransaction> {
@@ -667,6 +689,17 @@ export class RelayBus<TTransaction = unknown> {
     const delayMs = options.delay === undefined ? 0 : toMilliseconds(options.delay, 'delay');
     const availableAt = new Date(now.getTime() + delayMs);
     const scope = getCurrentScope();
+    const entries = await this.#createEntries({ events, options, id, scope, now, availableAt });
+    const deliverable = entries.filter((entry) => entry.deliveries.length > 0);
+    if (deliverable.length > 0) {
+      await this.#appendDeliverable({ entries: deliverable, options, scope, now, delayMs });
+    }
+    return entries.map((entry) => entry.event);
+  }
+
+  /** One entry per event, in order: its envelope and a delivery for every registration of its type. */
+  async #createEntries(input: CreateEntriesInput<TTransaction>): Promise<AppendEntry[]> {
+    const { events, options, id, scope, now, availableAt } = input;
     const entries: AppendEntry[] = [];
     let correlationId = options.correlationId ?? scope?.event?.correlationId ?? scope?.event?.id;
     for (const event of events) {
@@ -690,24 +723,26 @@ export class RelayBus<TTransaction = unknown> {
         ),
       });
     }
-    const deliverable = entries.filter((entry) => entry.deliveries.length > 0);
-    if (deliverable.length > 0) {
-      const result = await this.#appendInTransaction(deliverable, options, scope, now);
-      const appended = new Set(result.appendedEventIds);
-      const published = deliverable
-        .map((entry) => entry.event)
-        .filter((envelope) => appended.has(envelope.id));
-      if (published.length > 0) {
-        this.#notifier.notify('onPublished', {
-          envelopes: published,
-          deliveries: result.appendedDeliveryCount,
-        });
-        if (delayMs === 0) {
-          this.#scheduleWake();
-        }
+    return entries;
+  }
+
+  /** Appends the entries that have deliveries, reports what was new and wakes the dispatcher when it is due now. */
+  async #appendDeliverable(input: AppendDeliverableInput<TTransaction>): Promise<void> {
+    const { entries, options, scope, now, delayMs } = input;
+    const result = await this.#appendInTransaction(entries, options, scope, now);
+    const appended = new Set(result.appendedEventIds);
+    const published = entries
+      .map((entry) => entry.event)
+      .filter((envelope) => appended.has(envelope.id));
+    if (published.length > 0) {
+      this.#notifier.notify('onPublished', {
+        envelopes: published,
+        deliveries: result.appendedDeliveryCount,
+      });
+      if (delayMs === 0) {
+        this.#scheduleWake();
       }
     }
-    return entries.map((entry) => entry.event);
   }
 
   #reportUnrouted(envelope: EventEnvelope): void {
@@ -903,36 +938,62 @@ function oneOf<T extends string>(value: T, allowed: readonly T[], name: string):
   return value;
 }
 
+function isDispatcherEnabled<TTransaction>(options: RelayBusOptions<TTransaction>): boolean {
+  return options.dispatcher?.enabled ?? true;
+}
+
+function createHandlerDefaults<TTransaction>(
+  options: RelayBusOptions<TTransaction>,
+): RegistrationDefaults {
+  return {
+    retry: createRetryPolicy(options.retry),
+    timeoutMs:
+      options.handlerTimeout === undefined || options.handlerTimeout === false
+        ? null
+        : toTimerMilliseconds(options.handlerTimeout, 'handlerTimeout'),
+  };
+}
+
 function createDispatcherSettings(
   options: DispatcherOptions | undefined,
   generateIdentifier: IdentifierGenerator,
 ): DispatcherSettings {
+  const dispatcher: DispatcherOptions = options ?? {};
   const concurrency = assertPositiveInteger(
-    options?.concurrency ?? DEFAULTS.concurrency,
+    dispatcher.concurrency ?? DEFAULTS.concurrency,
     'dispatcher.concurrency',
   );
   return {
     owner: `${hostname()}:${process.pid}:${generateIdentifier()}`,
     concurrency,
-    batchSize: assertPositiveInteger(options?.batchSize ?? concurrency, 'dispatcher.batchSize'),
+    batchSize: assertPositiveInteger(dispatcher.batchSize ?? concurrency, 'dispatcher.batchSize'),
+    ...createDispatcherTimings(dispatcher),
+  };
+}
+
+/** The intervals and completion batching of the dispatcher, validated in declaration order. */
+function createDispatcherTimings(
+  dispatcher: DispatcherOptions,
+): Omit<DispatcherSettings, 'owner' | 'concurrency' | 'batchSize'> {
+  return {
     pollIntervalMs: toTimerMilliseconds(
-      options?.pollInterval ?? DEFAULTS.pollInterval,
+      dispatcher.pollInterval ?? DEFAULTS.pollInterval,
       'dispatcher.pollInterval',
     ),
     leaseDurationMs: toTimerMilliseconds(
-      options?.leaseDuration ?? DEFAULTS.leaseDuration,
+      dispatcher.leaseDuration ?? DEFAULTS.leaseDuration,
       'dispatcher.leaseDuration',
     ),
     shutdownTimeoutMs: toTimerMilliseconds(
-      options?.shutdownTimeout ?? DEFAULTS.shutdownTimeout,
+      dispatcher.shutdownTimeout ?? DEFAULTS.shutdownTimeout,
       'dispatcher.shutdownTimeout',
     ),
     completionBatchWindowMs: toMilliseconds(
-      options?.completionBatchWindow ?? DEFAULTS.completionBatchWindow,
+      dispatcher.completionBatchWindow ?? DEFAULTS.completionBatchWindow,
       'dispatcher.completionBatchWindow',
     ),
     completionBatchSize: assertPositiveInteger(
-      options?.completionBatchSize ?? DEFAULTS.completionBatchSize,
+      dispatcher.completionBatchSize ?? DEFAULTS.completionBatchSize,
       'dispatcher.completionBatchSize',
     ),
   };
