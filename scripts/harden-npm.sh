@@ -7,7 +7,7 @@
 set -uo pipefail
 npm_cli() { npx -y npm@11.20.0 "$@"; }
 message="Bootstrap placeholder. Install the latest version."
-for name in core testing mongodb kafka nestjs postgres rabbitmq; do
+for name in core testing mongodb kafka nestjs postgres rabbitmq eslint-plugin; do
   pkg="@relaybus/$name"
   echo "== $pkg"
   npm_cli access set mfa=publish "$pkg"

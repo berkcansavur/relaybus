@@ -3,7 +3,16 @@ import { defineConfig } from 'vitest/config';
 
 // Used only by Stryker (see stryker.config.json). Mutation testing runs the
 // fast, Docker-free unit project; integration tests are excluded on purpose.
-const packages = ['core', 'nestjs', 'postgres', 'mongodb', 'kafka', 'rabbitmq', 'testing'];
+const packages = [
+  'core',
+  'nestjs',
+  'postgres',
+  'mongodb',
+  'kafka',
+  'rabbitmq',
+  'testing',
+  'eslint-plugin',
+];
 
 // Stryker runs in place (`inPlace: true`), so these paths are the mutated files.
 // Without aliases `@relaybus/*` would resolve through the pnpm workspace symlinks

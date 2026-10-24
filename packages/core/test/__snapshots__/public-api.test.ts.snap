@@ -140,6 +140,14 @@ exports[`public API > @relaybus/core/internal keeps its exported surface 1`] = `
 ]
 `;
 
+exports[`public API > @relaybus/eslint-plugin keeps its exported surface 1`] = `
+[
+  "configs: value",
+  "default: value",
+  "rules: value",
+]
+`;
+
 exports[`public API > @relaybus/kafka keeps its exported surface 1`] = `
 [
   "DecodableMessage: type",

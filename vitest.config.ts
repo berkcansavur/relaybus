@@ -1,7 +1,16 @@
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 
-const packages = ['core', 'nestjs', 'postgres', 'mongodb', 'kafka', 'rabbitmq', 'testing'];
+const packages = [
+  'core',
+  'nestjs',
+  'postgres',
+  'mongodb',
+  'kafka',
+  'rabbitmq',
+  'testing',
+  'eslint-plugin',
+];
 
 const alias = Object.fromEntries([
   // Before `@relaybus/core`, which would otherwise match the subpath as a prefix.

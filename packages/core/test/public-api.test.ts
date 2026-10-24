@@ -2,7 +2,16 @@ import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
-const packages = ['core', 'kafka', 'mongodb', 'nestjs', 'postgres', 'rabbitmq', 'testing'];
+const packages = [
+  'core',
+  'eslint-plugin',
+  'kafka',
+  'mongodb',
+  'nestjs',
+  'postgres',
+  'rabbitmq',
+  'testing',
+];
 const entries: Record<string, string> = {
   ...Object.fromEntries(
     packages.map((name) => [

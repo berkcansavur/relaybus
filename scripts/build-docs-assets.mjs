@@ -149,7 +149,7 @@ emit(
 const summary =
   'relaybus stores every event in the same database transaction as your business data (the transactional outbox pattern), ' +
   'then delivers it to each handler and broker with independent retries, leases and dead letters. ' +
-  'Packages: @relaybus/core, @relaybus/nestjs, @relaybus/postgres, @relaybus/mongodb, @relaybus/kafka, @relaybus/rabbitmq, @relaybus/testing. ' +
+  'Packages: @relaybus/core, @relaybus/nestjs, @relaybus/postgres, @relaybus/mongodb, @relaybus/kafka, @relaybus/rabbitmq, @relaybus/testing, @relaybus/eslint-plugin. ' +
   'Requires Node.js 22.12 or newer; NestJS 11 or 12 for the NestJS module.';
 const header = `# ${siteTitle}\n\n> ${siteDescription}\n\n${summary}\n`;
 

@@ -42,6 +42,7 @@ jobs:
             kafka
             rabbitmq
             testing
+            eslint-plugin
             repo
             ci
             deps

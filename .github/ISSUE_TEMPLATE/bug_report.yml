@@ -20,6 +20,7 @@ body:
         - '@relaybus/kafka'
         - '@relaybus/rabbitmq'
         - '@relaybus/testing'
+        - '@relaybus/eslint-plugin'
     validations:
       required: true
   - type: input

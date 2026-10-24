@@ -2,7 +2,7 @@
 
 > relaybus is a reliable, storage-agnostic event bus for NestJS and Node.js: a transactional outbox with per-handler retries, leases, dead letters and ordering keys for PostgreSQL and MongoDB, with Kafka and RabbitMQ transports.
 
-relaybus stores every event in the same database transaction as your business data (the transactional outbox pattern), then delivers it to each handler and broker with independent retries, leases and dead letters. Packages: @relaybus/core, @relaybus/nestjs, @relaybus/postgres, @relaybus/mongodb, @relaybus/kafka, @relaybus/rabbitmq, @relaybus/testing. Requires Node.js 22.12 or newer; NestJS 11 or 12 for the NestJS module.
+relaybus stores every event in the same database transaction as your business data (the transactional outbox pattern), then delivers it to each handler and broker with independent retries, leases and dead letters. Packages: @relaybus/core, @relaybus/nestjs, @relaybus/postgres, @relaybus/mongodb, @relaybus/kafka, @relaybus/rabbitmq, @relaybus/testing, @relaybus/eslint-plugin. Requires Node.js 22.12 or newer; NestJS 11 or 12 for the NestJS module.
 
 ## Start here
 
@@ -22,7 +22,7 @@ relaybus stores every event in the same database transaction as your business da
 
 ## Packages
 
-- [All packages](https://berkcansavur.github.io/relaybus/packages/index.md): The seven @relaybus packages: core, nestjs, postgres, mongodb, kafka, rabbitmq and testing.
+- [All packages](https://berkcansavur.github.io/relaybus/packages/index.md): The eight @relaybus packages: core, nestjs, postgres, mongodb, kafka, rabbitmq, testing and eslint-plugin.
 - [@relaybus/core](https://berkcansavur.github.io/relaybus/packages/core.md): Reliable event bus for Node.js: a transactional outbox with per-handler deliveries, retries with jitter, dead letters and per-key ordering on top of your own database.
 - [@relaybus/nestjs](https://berkcansavur.github.io/relaybus/packages/nestjs.md): NestJS event bus module for relaybus: @RelayBusConsumer handlers on a transactional outbox, with retries, dead letters and graceful shutdown, so events are never lost between your database and your handlers.
 - [@relaybus/postgres](https://berkcansavur.github.io/relaybus/packages/postgres.md): PostgreSQL event store for relaybus: a transactional outbox written in your own transaction (pg, Prisma, TypeORM, Drizzle, Knex, Kysely) with SKIP LOCKED leasing and per-key ordering.
@@ -30,9 +30,11 @@ relaybus stores every event in the same database transaction as your business da
 - [@relaybus/kafka](https://berkcansavur.github.io/relaybus/packages/kafka.md): Kafka transport for relaybus: forwards committed outbox events to Kafka topics (CloudEvents binding) and consumes them with an idempotent inbox, so events are not lost between database and Kafka.
 - [@relaybus/rabbitmq](https://berkcansavur.github.io/relaybus/packages/rabbitmq.md): RabbitMQ transport for relaybus: publisher-confirmed publishing from the transactional outbox and acknowledged, idempotent consumption with retry queues and dead-letter queues.
 - [@relaybus/testing](https://berkcansavur.github.io/relaybus/packages/testing.md): Testing utilities for relaybus: the EventStore contract suite, a FakeClock and an in-memory transport for deterministic tests of retries, delays and dead letters.
+- [@relaybus/eslint-plugin](https://berkcansavur.github.io/relaybus/packages/eslint-plugin.md): ESLint rules for relaybus: no calls to other services inside a transaction, and no publish outside a transaction, so outbox transactions stay short and events stay atomic with your writes.
 
 ## Recipes
 
+- [Transactions in NestJS](https://berkcansavur.github.io/relaybus/recipes/transactions-in-nestjs.md): Run NestJS service methods in an outbox transaction with @RelayBusTransaction(), share it with repositories, hold it to a time budget and lint external calls out of it.
 - [Prisma](https://berkcansavur.github.io/relaybus/recipes/prisma.md): Publish transactional outbox events from a Prisma interactive transaction with @relaybus/postgres.
 - [TypeORM](https://berkcansavur.github.io/relaybus/recipes/typeorm.md): Publish events in the same TypeORM transaction as your entities using the TypeORM executor.
 - [Mongoose](https://berkcansavur.github.io/relaybus/recipes/mongoose.md): Use the MongoDB transactional outbox with Mongoose sessions and replica sets.

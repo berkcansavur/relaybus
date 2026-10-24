@@ -16,7 +16,7 @@ permissions() {
   node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const t=s.trim();if(!t){console.log("none");return}const v=JSON.parse(t);const a=Array.isArray(v)?v:[v];console.log(a.map(c=>c.permissions.join("+")).join(" | "))})'
 }
 
-for name in core testing mongodb kafka nestjs postgres rabbitmq; do
+for name in core testing mongodb kafka nestjs postgres rabbitmq eslint-plugin; do
   pkg="@relaybus/$name"
   for id in $(list_json "$pkg" | ids_without_publish); do
     npm_cli trust revoke "$pkg" --id="$id" 2>&1 | grep -v '^npm notice' | tail -1

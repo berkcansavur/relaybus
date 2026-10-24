@@ -29,6 +29,10 @@ export const packages = [
     blurb: 'RabbitMQ transport with publisher confirms, quorum queues and dead letters.',
   },
   { name: 'testing', blurb: 'The store contract suite, FakeClock and an in-memory transport.' },
+  {
+    name: 'eslint-plugin',
+    blurb: 'ESLint rules: no external calls inside a transaction, no publish outside one.',
+  },
 ];
 
 /** Ordered sections. `path` is the page path without extension, relative to the site root. */
@@ -110,7 +114,7 @@ export const sections = [
         title: 'All packages',
         path: 'packages/',
         description:
-          'The seven @relaybus packages: core, nestjs, postgres, mongodb, kafka, rabbitmq and testing.',
+          'The eight @relaybus packages: core, nestjs, postgres, mongodb, kafka, rabbitmq, testing and eslint-plugin.',
       },
       ...packages.map((p) => ({
         title: `@relaybus/${p.name}`,
@@ -122,6 +126,12 @@ export const sections = [
   {
     title: 'Recipes',
     items: [
+      {
+        title: 'Transactions in NestJS',
+        path: 'recipes/transactions-in-nestjs',
+        description:
+          'Run NestJS service methods in an outbox transaction with @RelayBusTransaction(), share it with repositories, hold it to a time budget and lint external calls out of it.',
+      },
       {
         title: 'Prisma',
         path: 'recipes/prisma',

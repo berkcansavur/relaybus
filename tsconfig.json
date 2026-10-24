@@ -11,7 +11,8 @@
       "@relaybus/mongodb": ["./packages/mongodb/src/index.ts"],
       "@relaybus/kafka": ["./packages/kafka/src/index.ts"],
       "@relaybus/rabbitmq": ["./packages/rabbitmq/src/index.ts"],
-      "@relaybus/testing": ["./packages/testing/src/index.ts"]
+      "@relaybus/testing": ["./packages/testing/src/index.ts"],
+      "@relaybus/eslint-plugin": ["./packages/eslint-plugin/src/index.ts"]
     }
   },
   "include": [

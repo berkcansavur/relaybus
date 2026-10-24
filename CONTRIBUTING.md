@@ -123,7 +123,7 @@ There are no changesets. The version is computed from Conventional Commits on `m
 | `!` or a `BREAKING CHANGE:` footer                          | minor (major from 1.0.0)    |
 | `docs`, `chore`, `test`, `ci`, `build`, `refactor`, `style` | no release                  |
 
-Allowed scopes: `core`, `nestjs`, `postgres`, `mongodb`, `kafka`, `rabbitmq`, `testing`, `repo`, `ci`, `deps`, `release`. A scope is optional.
+Allowed scopes: `core`, `nestjs`, `postgres`, `mongodb`, `kafka`, `rabbitmq`, `testing`, `eslint-plugin`, `repo`, `ci`, `deps`, `release`. A scope is optional.
 
 All packages always share one version. Contributors never publish and never edit version fields. Dependabot PRs use `chore(deps)` and therefore do not release; a maintainer retitles one to `fix(deps): ...` when a dependency change must ship. See [docs/releasing.md](docs/releasing.md) for how releases work, prerelease channels and troubleshooting.
 
