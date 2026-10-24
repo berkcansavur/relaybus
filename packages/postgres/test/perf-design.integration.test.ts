@@ -894,24 +894,116 @@ describe('lock waits', () => {
     return { store: new PostgresEventStore({ pool, schema }), pool };
   }
 
+  /** Far longer than any lock wait of a busy test database; a wait for a lock the other side holds lasts forever. */
+  const HELD_LOCK_TIMEOUT_MS = 2_000;
+
+  /**
+   * A store whose connections give up on a lock wait after {@link HELD_LOCK_TIMEOUT_MS}. `holdNextClaim`
+   * runs its next claim statement in a transaction that commits only on `release()`: the claim keeps
+   * every lane lock it took while the other worker runs, so any lock the two share makes that worker
+   * wait until it fails, however fast or slow the machine is.
+   */
+  function lockHoldingStore(schema: string): {
+    store: PostgresEventStore;
+    pool: Pool;
+    holdNextClaim(): { locked: Promise<void>; release(): void };
+  } {
+    const pool = createTestPool(
+      `${database.connectionString}?options=-c%20lock_timeout%3D${HELD_LOCK_TIMEOUT_MS}`,
+      4,
+    );
+    pools.push(pool);
+    const inner = new PgExecutor(pool);
+    let hold: { locked(): void; released: Promise<void> } | undefined;
+    const executor: PostgresExecutor<PoolClient> = {
+      transaction: (work) => inner.transaction(work),
+      query: (sql, parameters, transaction, options) => {
+        const held = hold;
+        if (transaction !== undefined || held === undefined || !sql.startsWith('WITH held AS')) {
+          return inner.query(sql, parameters, transaction, options);
+        }
+        hold = undefined;
+        return inner.transaction(async (claimTransaction) => {
+          const rows = await inner.query(sql, parameters, claimTransaction, options);
+          held.locked();
+          await held.released;
+          return rows;
+        });
+      },
+    };
+    return {
+      store: new PostgresEventStore({ executor, schema }),
+      pool,
+      holdNextClaim: () => {
+        let locked!: () => void;
+        let release!: () => void;
+        const lockedPromise = new Promise<void>((resolve) => (locked = resolve));
+        const released = new Promise<void>((resolve) => (release = resolve));
+        hold = { locked, released };
+        return { locked: lockedPromise, release };
+      },
+    };
+  }
+
   it('lets claimers of disjoint lanes and their completions run without waiting for each other', async () => {
     const fixture = await createFixture();
     await publishMany(fixture.store, events(2_000));
-    const first = impatientStore(fixture.schema);
-    const second = impatientStore(fixture.schema);
-    let handled = 0;
-    const work = async (store: PostgresEventStore, owner: string) => {
-      for (;;) {
-        const claimed = await claim(store, 25, ['h'], owner);
-        if (claimed.length === 0) {
-          return;
+    const first = lockHoldingStore(fixture.schema);
+    const second = lockHoldingStore(fixture.schema);
+    const handled = new Set<string>();
+    const claimAndComplete = async (store: PostgresEventStore, owner: string): Promise<number> => {
+      const claimed = await claim(store, 25, ['h'], owner);
+      expect(await store.completeMany(claimed, at(1))).toEqual(claimed.map(() => true));
+      for (const delivery of claimed) {
+        handled.add(delivery.deliveryId);
+      }
+      return claimed.length;
+    };
+    /** Completes `claimed` in a transaction that stays open, holding its locks, while `meanwhile` runs. */
+    const completeHoldingLocks = async (
+      worker: { store: PostgresEventStore; pool: Pool },
+      claimed: readonly ClaimedDelivery[],
+      meanwhile: () => Promise<unknown>,
+    ): Promise<void> => {
+      const client = await worker.pool.connect();
+      try {
+        await client.query('BEGIN');
+        for (const delivery of claimed) {
+          expect(await worker.store.complete(delivery, at(1), client)).toBe(true);
         }
-        expect(await store.completeMany(claimed, at(1))).toEqual(claimed.map(() => true));
-        handled += claimed.length;
+        await meanwhile();
+        await client.query('COMMIT');
+      } finally {
+        client.release();
+      }
+      for (const delivery of claimed) {
+        handled.add(delivery.deliveryId);
       }
     };
-    await Promise.all([work(first.store, 'worker-a'), work(second.store, 'worker-b')]);
-    expect(handled).toBe(2_000);
+
+    // One worker's claim holds its lane locks while the other claims and completes twice.
+    const heldClaim = first.holdNextClaim();
+    const firstClaim = claim(first.store, 25, ['h'], 'worker-a');
+    await heldClaim.locked;
+    expect(await claimAndComplete(second.store, 'worker-b')).toBe(25);
+    expect(await claimAndComplete(second.store, 'worker-b')).toBe(25);
+    heldClaim.release();
+    const firstBatch = await firstClaim;
+    expect(firstBatch).toHaveLength(25);
+    // One worker's completion holds its locks while the other claims and completes, and the other way round.
+    await completeHoldingLocks(first, firstBatch, () => claimAndComplete(second.store, 'worker-b'));
+    const secondBatch = await claim(second.store, 25, ['h'], 'worker-b');
+    await completeHoldingLocks(second, secondBatch, () =>
+      claimAndComplete(first.store, 'worker-a'),
+    );
+    // Both drain the rest side by side.
+    const drain = async (store: PostgresEventStore, owner: string): Promise<void> => {
+      while ((await claimAndComplete(store, owner)) > 0) {
+        // Claim and complete until nothing is left.
+      }
+    };
+    await Promise.all([drain(first.store, 'worker-a'), drain(second.store, 'worker-b')]);
+    expect(handled.size).toBe(2_000);
   });
 
   it("does not make a worker's claim and renewal wait for its own completion in progress", async () => {
