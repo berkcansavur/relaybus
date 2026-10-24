@@ -223,16 +223,9 @@ export class KafkaTransport implements Transport {
     this.#kafka = options.kafka;
     this.#groupId = options.groupId;
     this.#fromBeginning = options.fromBeginning ?? true;
-    this.#maxInFlightRequests = options.maxInFlightRequests ?? DEFAULTS.maxInFlightRequests;
-    if (
-      !Number.isInteger(this.#maxInFlightRequests) ||
-      this.#maxInFlightRequests < 1 ||
-      this.#maxInFlightRequests > 5
-    ) {
-      throw new ConfigurationError(
-        `maxInFlightRequests must be an integer from 1 to 5, received ${this.#maxInFlightRequests}`,
-      );
-    }
+    this.#maxInFlightRequests = assertMaxInFlightRequests(
+      options.maxInFlightRequests ?? DEFAULTS.maxInFlightRequests,
+    );
     this.#producerConfig = options.producerConfig ?? {};
     this.#consumerConfig = options.consumerConfig ?? {};
     this.#invalidPolicy = options.onInvalidMessage ?? 'dead-letter';
@@ -706,18 +699,19 @@ export class KafkaTransport implements Transport {
 }
 
 function resolveSettings(options: KafkaTransportOptions): Settings {
+  const processing: KafkaProcessingOptions = options.processing ?? {};
   const maxAttempts = assertPositiveInteger(
-    options.processing?.maxAttempts ?? DEFAULTS.maxAttempts,
+    processing.maxAttempts ?? DEFAULTS.maxAttempts,
     'processing.maxAttempts',
   );
   return {
     maxAttempts,
     initialBackoffMs: toMilliseconds(
-      options.processing?.initialBackoff ?? DEFAULTS.initialBackoff,
+      processing.initialBackoff ?? DEFAULTS.initialBackoff,
       'processing.initialBackoff',
     ),
     maxBackoffMs: toMilliseconds(
-      options.processing?.maxBackoff ?? DEFAULTS.maxBackoff,
+      processing.maxBackoff ?? DEFAULTS.maxBackoff,
       'processing.maxBackoff',
     ),
     startupTimeoutMs: toMilliseconds(
@@ -731,19 +725,37 @@ function resolveSettings(options: KafkaTransportOptions): Settings {
     heartbeatIntervalMs: Math.max(
       1,
       toMilliseconds(
-        options.processing?.heartbeatInterval ?? DEFAULTS.heartbeatInterval,
+        processing.heartbeatInterval ?? DEFAULTS.heartbeatInterval,
         'processing.heartbeatInterval',
       ),
     ),
+    ...resolveRestartSettings(options.restart ?? {}),
+  };
+}
+
+function resolveRestartSettings(
+  restart: KafkaRestartOptions,
+): Pick<Settings, 'restartInitialBackoffMs' | 'restartMaxBackoffMs'> {
+  return {
     restartInitialBackoffMs: toMilliseconds(
-      options.restart?.initialBackoff ?? DEFAULTS.restartInitialBackoff,
+      restart.initialBackoff ?? DEFAULTS.restartInitialBackoff,
       'restart.initialBackoff',
     ),
     restartMaxBackoffMs: toMilliseconds(
-      options.restart?.maxBackoff ?? DEFAULTS.restartMaxBackoff,
+      restart.maxBackoff ?? DEFAULTS.restartMaxBackoff,
       'restart.maxBackoff',
     ),
   };
+}
+
+/** Returns `value` when it is an integer from 1 to 5. */
+function assertMaxInFlightRequests(value: number): number {
+  if (!Number.isInteger(value) || value < 1 || value > 5) {
+    throw new ConfigurationError(
+      `maxInFlightRequests must be an integer from 1 to 5, received ${value}`,
+    );
+  }
+  return value;
 }
 
 /**
