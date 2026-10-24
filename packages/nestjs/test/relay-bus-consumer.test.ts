@@ -16,7 +16,7 @@ import {
   type PartialHandlersOf,
 } from '@relaybus/core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { EventConsumer, Subscribe } from '../src/index.js';
+import { RelayBusConsumer, RelayBusHandler } from '../src/index.js';
 import { OrderPlaced, createApplication, manualOptions, relayBusRoot } from './helpers.js';
 
 class OrderShipped extends defineEvent<{ orderId: string }>('order.shipped.v1') {}
@@ -40,14 +40,14 @@ function publishPlaced(bus: RelayBus<InMemoryTransaction>, orderId: string): Pro
   );
 }
 
-describe('@EventConsumer discovery', () => {
+describe('@RelayBusConsumer discovery', () => {
   it('registers every on<Key> method under ClassName.method with this bound', async () => {
     @Injectable()
     class Mailer {
       readonly sent: string[] = [];
     }
     @Injectable()
-    @EventConsumer(OrderEvents)
+    @RelayBusConsumer(OrderEvents)
     class ShippingHandlers implements HandlersOf<typeof OrderEvents> {
       readonly seen: string[] = [];
       constructor(@Inject(Mailer) private readonly mailer: Mailer) {}
@@ -90,7 +90,7 @@ describe('@EventConsumer discovery', () => {
 
   it('passes the decorator options to every handler of the class', async () => {
     @Injectable()
-    @EventConsumer(OrderEvents, { transactional: true, concurrency: 2 })
+    @RelayBusConsumer(OrderEvents, { transactional: true, concurrency: 2 })
     class Handlers implements HandlersOf<typeof OrderEvents> {
       onOrderPlaced(): void {}
       onOrderShipped(): void {}
@@ -107,7 +107,7 @@ describe('@EventConsumer discovery', () => {
 
   it('handles the subset it defines, as PartialHandlersOf describes', async () => {
     @Injectable()
-    @EventConsumer(OrderEvents)
+    @RelayBusConsumer(OrderEvents)
     class AuditHandlers implements PartialHandlersOf<typeof OrderEvents, 'OrderShipped'> {
       onOrderShipped(): void {}
     }
@@ -121,9 +121,9 @@ describe('@EventConsumer discovery', () => {
     await moduleRef.close();
   });
 
-  it('works next to @Subscribe methods of the same class', async () => {
+  it('works next to @RelayBusHandler methods of the same class', async () => {
     @Injectable()
-    @EventConsumer(OrderEvents)
+    @RelayBusConsumer(OrderEvents)
     class Handlers {
       readonly seen: string[] = [];
 
@@ -131,12 +131,12 @@ describe('@EventConsumer discovery', () => {
         this.seen.push(`consumer:${event.payload.orderId}`);
       }
 
-      @Subscribe(OrderPlaced)
+      @RelayBusHandler(OrderPlaced)
       audit(event: EventEnvelope<{ orderId: string }>): void {
         this.seen.push(`subscribe:${event.payload.orderId}`);
       }
 
-      @Subscribe(OrderPlaced, { id: 'explicit.placed' })
+      @RelayBusHandler(OrderPlaced, { id: 'explicit.placed' })
       explicitAudit(): void {}
     }
     const moduleRef = await createApplication({ imports: [relayBusRoot()], providers: [Handlers] });
@@ -155,28 +155,28 @@ describe('@EventConsumer discovery', () => {
     await moduleRef.close();
   });
 
-  it('rejects a @Subscribe that claims the id of a consumer method', async () => {
+  it('rejects a @RelayBusHandler that claims the id of a consumer method', async () => {
     @Injectable()
-    @EventConsumer(OrderEvents)
+    @RelayBusConsumer(OrderEvents)
     class Handlers {
-      @Subscribe(OrderPlaced)
+      @RelayBusHandler(OrderPlaced)
       onOrderPlaced(): void {}
     }
     const moduleRef = await createApplication({ imports: [relayBusRoot()], providers: [Handlers] });
 
     await expect(moduleRef.init()).rejects.toThrow(
       new ConfigurationError(
-        "Handler id 'Handlers.onOrderPlaced' of @EventConsumer(OrderEvents) is already used by " +
-          'Handlers.onOrderPlaced; give the @Subscribe a unique { id } or drop it',
+        "Handler id 'Handlers.onOrderPlaced' of @RelayBusConsumer(OrderEvents) is already used by " +
+          'Handlers.onOrderPlaced; give the @RelayBusHandler a unique { id } or drop it',
       ),
     );
   });
 
-  it('accepts the same method with a @Subscribe that has its own id', async () => {
+  it('accepts the same method with a @RelayBusHandler that has its own id', async () => {
     @Injectable()
-    @EventConsumer(OrderEvents)
+    @RelayBusConsumer(OrderEvents)
     class Handlers {
-      @Subscribe(OrderPlaced, { id: 'audit.placed' })
+      @RelayBusHandler(OrderPlaced, { id: 'audit.placed' })
       onOrderPlaced(): void {}
     }
     const moduleRef = await createApplication({ imports: [relayBusRoot()], providers: [Handlers] });
@@ -193,29 +193,29 @@ describe('@EventConsumer discovery', () => {
 
   it('names an unnamed catalog generically when a class defines none of its methods', async () => {
     @Injectable()
-    @EventConsumer(OrderEvents)
+    @RelayBusConsumer(OrderEvents)
     class Misspelled {
       onOrderShiped(): void {}
     }
     @Injectable()
-    @EventConsumer(PaymentEvents)
+    @RelayBusConsumer(PaymentEvents)
     class Unnamed {}
     const named = await createApplication({ imports: [relayBusRoot()], providers: [Misspelled] });
     const unnamed = await createApplication({ imports: [relayBusRoot()], providers: [Unnamed] });
 
     await expect(named.init()).rejects.toThrow(
-      'Misspelled uses @EventConsumer(OrderEvents) but defines none of its handler methods ' +
+      'Misspelled uses @RelayBusConsumer(OrderEvents) but defines none of its handler methods ' +
         '(onOrderPlaced, onOrderShipped)',
     );
     await expect(unnamed.init()).rejects.toThrow(
-      'Unnamed uses @EventConsumer(catalog) but defines none of its handler methods (onPaymentTaken)',
+      'Unnamed uses @RelayBusConsumer(catalog) but defines none of its handler methods (onPaymentTaken)',
     );
   });
 
   it('supports several catalogs on one class and rejects colliding method ids', async () => {
     @Injectable()
-    @EventConsumer(OrderEvents)
-    @EventConsumer(PaymentEvents)
+    @RelayBusConsumer(OrderEvents)
+    @RelayBusConsumer(PaymentEvents)
     class Handlers {
       onOrderPlaced(): void {}
       onPaymentTaken(): void {}
@@ -231,8 +231,8 @@ describe('@EventConsumer discovery', () => {
 
     const SameKeys = defineCatalog({ OrderPlaced: PaymentTaken });
     @Injectable()
-    @EventConsumer(OrderEvents)
-    @EventConsumer(SameKeys)
+    @RelayBusConsumer(OrderEvents)
+    @RelayBusConsumer(SameKeys)
     class Colliding {
       onOrderPlaced(): void {}
     }
@@ -244,7 +244,7 @@ describe('@EventConsumer discovery', () => {
   });
 
   it('inherits the decoration in subclasses and uses the subclass name in ids', async () => {
-    @EventConsumer(OrderEvents)
+    @RelayBusConsumer(OrderEvents)
     class BaseHandlers {
       onOrderPlaced(): void {}
     }
@@ -262,7 +262,7 @@ describe('@EventConsumer discovery', () => {
 
   it('registers once when a useExisting alias points at the provider', async () => {
     @Injectable()
-    @EventConsumer(OrderEvents)
+    @RelayBusConsumer(OrderEvents)
     class Handlers {
       onOrderPlaced(): void {}
     }
@@ -278,12 +278,12 @@ describe('@EventConsumer discovery', () => {
 
   it('rejects request-scoped and transient providers', async () => {
     @Injectable({ scope: Scope.REQUEST })
-    @EventConsumer(OrderEvents)
+    @RelayBusConsumer(OrderEvents)
     class RequestHandlers {
       onOrderPlaced(): void {}
     }
     @Injectable({ scope: Scope.TRANSIENT })
-    @EventConsumer(OrderEvents)
+    @RelayBusConsumer(OrderEvents)
     class TransientHandlers {
       onOrderPlaced(): void {}
     }
@@ -297,22 +297,22 @@ describe('@EventConsumer discovery', () => {
     });
 
     await expect(request.init()).rejects.toThrow(
-      'RequestHandlers uses @EventConsumer but its provider is request-scoped or transient',
+      'RequestHandlers uses @RelayBusConsumer but its provider is request-scoped or transient',
     );
     await expect(transient.init()).rejects.toThrow(
-      /TransientHandlers uses @EventConsumer but its provider is request-scoped or transient/,
+      /TransientHandlers uses @RelayBusConsumer but its provider is request-scoped or transient/,
     );
   });
 
   it('refuses a value that is not a catalog when the class is declared', () => {
-    expect(() => EventConsumer({ OrderPlaced })).toThrow(/created with defineCatalog/);
+    expect(() => RelayBusConsumer({ OrderPlaced })).toThrow(/created with defineCatalog/);
   });
 });
 
 describe('catalogs module option', () => {
   it('fails the boot listing every event nobody handles', async () => {
     @Injectable()
-    @EventConsumer(OrderEvents)
+    @RelayBusConsumer(OrderEvents)
     class Partial {
       onOrderPlaced(): void {}
     }
@@ -330,18 +330,18 @@ describe('catalogs module option', () => {
     );
   });
 
-  it('boots when consumers, @Subscribe methods and routes cover the catalog', async () => {
+  it('boots when consumers, @RelayBusHandler methods and routes cover the catalog', async () => {
     @Injectable()
-    @EventConsumer(OrderEvents)
+    @RelayBusConsumer(OrderEvents)
     class OrderHandlers {
       onOrderPlaced(): void {}
     }
     @Injectable()
     class OtherHandlers {
-      @Subscribe(OrderShipped)
+      @RelayBusHandler(OrderShipped)
       shipped(): void {}
 
-      @Subscribe(PaymentTaken)
+      @RelayBusHandler(PaymentTaken)
       paid(): void {}
     }
     const moduleRef = await createApplication({
@@ -355,7 +355,7 @@ describe('catalogs module option', () => {
 
   it('is not checked when no catalogs are configured', async () => {
     @Injectable()
-    @EventConsumer(OrderEvents)
+    @RelayBusConsumer(OrderEvents)
     class Partial {
       onOrderPlaced(): void {}
     }
@@ -369,10 +369,10 @@ describe('catalogs module option', () => {
   });
 });
 
-describe('@EventConsumer with selected events', () => {
+describe('@RelayBusConsumer with selected events', () => {
   it('registers exactly the selected methods and ignores the others', async () => {
     @Injectable()
-    @EventConsumer(OrderEvents, { events: ['OrderShipped'], concurrency: 3 })
+    @RelayBusConsumer(OrderEvents, { events: ['OrderShipped'], concurrency: 3 })
     class ShippingOnly {
       readonly seen: string[] = [];
       onOrderPlaced(): void {
@@ -404,7 +404,7 @@ describe('@EventConsumer with selected events', () => {
 
   it('fails the boot listing the methods a selected event lacks', async () => {
     @Injectable()
-    @(EventConsumer(OrderEvents, { events: ['OrderPlaced', 'OrderShipped'] }) as ClassDecorator)
+    @(RelayBusConsumer(OrderEvents, { events: ['OrderPlaced', 'OrderShipped'] }) as ClassDecorator)
     class Incomplete {
       onOrderPlaced(): void {}
     }
@@ -415,30 +415,30 @@ describe('@EventConsumer with selected events', () => {
 
     await expect(moduleRef.init()).rejects.toThrow(
       new ConfigurationError(
-        'Incomplete uses @EventConsumer(OrderEvents) but lacks the handler methods of events ' +
+        'Incomplete uses @RelayBusConsumer(OrderEvents) but lacks the handler methods of events ' +
           'it consumes: onOrderShipped',
       ),
     );
   });
 
   it('rejects an invalid selection when the class is declared', () => {
-    expect(() => EventConsumer(OrderEvents, { events: ['OrderRefunded' as never] })).toThrow(
+    expect(() => RelayBusConsumer(OrderEvents, { events: ['OrderRefunded' as never] })).toThrow(
       "Catalog 'OrderEvents' has no event named 'OrderRefunded'",
     );
-    expect(() => EventConsumer(OrderEvents, { events: [] })).toThrow(
+    expect(() => RelayBusConsumer(OrderEvents, { events: [] })).toThrow(
       /must name at least one event/,
     );
   });
 });
 
-describe('@EventConsumer inheritance', () => {
+describe('@RelayBusConsumer inheritance', () => {
   it('registers the catalogs of the base class and of the subclass', async () => {
-    @EventConsumer(OrderEvents)
+    @RelayBusConsumer(OrderEvents)
     class OrderBase {
       onOrderPlaced(): void {}
     }
     @Injectable()
-    @EventConsumer(PaymentEvents)
+    @RelayBusConsumer(PaymentEvents)
     class Derived extends OrderBase {
       onPaymentTaken(): void {}
     }
@@ -453,13 +453,13 @@ describe('@EventConsumer inheritance', () => {
   });
 
   it('lets a subclass replace the inherited declaration of the same catalog', async () => {
-    @EventConsumer(OrderEvents, { transactional: true })
+    @RelayBusConsumer(OrderEvents, { transactional: true })
     class OrderBase {
       onOrderPlaced(): void {}
       onOrderShipped(): void {}
     }
     @Injectable()
-    @EventConsumer(OrderEvents, { events: ['OrderShipped'] })
+    @RelayBusConsumer(OrderEvents, { events: ['OrderShipped'] })
     class ShippingOnly extends OrderBase {}
     const moduleRef = await createApplication({
       imports: [relayBusRoot()],
@@ -475,32 +475,32 @@ describe('@EventConsumer inheritance', () => {
 
   it('rejects the same catalog declared twice on one class', () => {
     expect(() => {
-      @EventConsumer(OrderEvents)
-      @EventConsumer(OrderEvents, { events: ['OrderPlaced'] })
+      @RelayBusConsumer(OrderEvents)
+      @RelayBusConsumer(OrderEvents, { events: ['OrderPlaced'] })
       class Twice {
         onOrderPlaced(): void {}
       }
       return Twice;
     }).toThrow(
       new ConfigurationError(
-        '@EventConsumer(OrderEvents) is declared twice on Twice; merge the declarations into one',
+        '@RelayBusConsumer(OrderEvents) is declared twice on Twice; merge the declarations into one',
       ),
     );
     expect(() => {
-      @EventConsumer(PaymentEvents)
-      @EventConsumer(PaymentEvents)
+      @RelayBusConsumer(PaymentEvents)
+      @RelayBusConsumer(PaymentEvents)
       class Unnamed {
         onPaymentTaken(): void {}
       }
       return Unnamed;
-    }).toThrow('@EventConsumer(catalog) is declared twice on Unnamed');
+    }).toThrow('@RelayBusConsumer(catalog) is declared twice on Unnamed');
   });
 });
 
 describe('catalogs module option with consume and produce', () => {
   it('boots a consumer that handles its part of a shared catalog', async () => {
     @Injectable()
-    @EventConsumer(OrderEvents, { events: ['OrderShipped'] })
+    @RelayBusConsumer(OrderEvents, { events: ['OrderShipped'] })
     class ShippingHandlers {
       onOrderShipped(): void {}
     }
@@ -520,7 +520,7 @@ describe('catalogs module option with consume and produce', () => {
 
   it('fails the boot when a consumed event has no handler or a produced event no route', async () => {
     @Injectable()
-    @EventConsumer(OrderEvents, { events: ['OrderPlaced'] })
+    @RelayBusConsumer(OrderEvents, { events: ['OrderPlaced'] })
     class PlacedHandlers {
       onOrderPlaced(): void {}
     }

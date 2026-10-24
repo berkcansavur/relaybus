@@ -1,6 +1,6 @@
 # @relaybus/nestjs
 
-@relaybus/nestjs is the NestJS module of relaybus, a reliable, storage-agnostic event bus for NestJS and Node.js: declare handlers with `@Subscribe` and publish inside your database transaction, and every committed event reaches every handler at least once.
+@relaybus/nestjs is the NestJS module of relaybus, a reliable, storage-agnostic event bus for NestJS and Node.js: declare handlers with `@RelayBusHandler` and publish inside your database transaction, and every committed event reaches every handler at least once.
 
 NestJS integration for [relaybus](../core): one module, one decorator, correct lifecycle.
 
@@ -24,7 +24,7 @@ export class AppModule {}
 // shipping.handlers.ts - any provider of any module
 @Injectable()
 export class ShippingHandlers {
-  @Subscribe(OrderPlaced)
+  @RelayBusHandler(OrderPlaced)
   async onOrderPlaced(event: EventEnvelope<{ orderId: string }>) {
     /* ... */
   }
@@ -89,43 +89,68 @@ logs through a Nest `Logger` with context `RelayBus`, so `app.useLogger(...)` co
 | `clock`, `generateIdentifier`, `random`       | system                    | Mainly for tests                                                                 |
 | `isGlobal`                                    | `true`                    | Module-level, see above                                                          |
 
-## `@Subscribe(event, options?)`
+## `@RelayBusHandler(event, options?)`
+
+The default way to handle events: put `@RelayBusHandler` on any method of any provider.
 
 ```ts
-@Subscribe(OrderPlaced)                                   // class
-@Subscribe('order.placed.v1', { concurrency: 2 })         // type string
-@Subscribe(OrderPlaced, { id: 'billing.invoice', transactional: true, timeout: '10s' })
+@Injectable()
+export class ShippingHandlers {
+  @RelayBusHandler(OrderPlaced)
+  async shipOrder(event: EventEnvelope<{ orderId: string }>) {}
+
+  @RelayBusHandler(UserRegistered, { id: 'shipping.welcome-pack', retry: { attempts: 5 } })
+  async sendWelcomePack(event: EventOf<typeof UserRegistered>, context: HandlerContext) {}
+}
 ```
 
-Options are core's `SubscribeOptions` with `id` optional. Methods receive `(envelope, context)`;
-with a class argument the envelope payload is typed from the event.
+```ts
+@RelayBusHandler(OrderPlaced)                                   // class
+@RelayBusHandler('order.placed.v1', { concurrency: 2 })         // type string
+@RelayBusHandler(OrderPlaced, { id: 'billing.invoice', transactional: true, timeout: '10s' })
+```
 
-**Why `@Subscribe`:** `@nestjs/event-emitter` already owns `@OnEvent`, and the two are commonly
-installed together. `@Subscribe` mirrors core's `bus.subscribe` and cannot collide.
+- **No class-level setup.** No catalog, interface or base class: method names are free, and one
+  class may handle events of different catalogs (or of none).
+- **Typed at compile time.** With a class argument the first parameter must be the envelope of
+  that event: `@RelayBusHandler(OrderPlaced) ship(event: EventEnvelope<{ userId: number }>)` does
+  not compile.
+- Options are core's `SubscribeOptions` with `id` optional. Methods receive `(envelope, context)`.
+
+**Names.** The relaybus decorators share the `RelayBus` prefix (`@RelayBusHandler`,
+`@RelayBusConsumer`, `@RelayBusTransaction`), so they never collide with `@nestjs/event-emitter`'s
+`@OnEvent` or `@nestjs/cqrs`. `@Subscribe` and `@EventConsumer` are the earlier names of
+`@RelayBusHandler` and `@RelayBusConsumer`: they still work, are the same functions, are marked
+`@deprecated` (editors strike them through) and are removed in 1.0.0.
 
 Rules, all enforced at boot (the application fails to start, no silent skips):
 
 - **Stable ids.** The default id is `ClassName.methodName`. Deliveries are stored under the id, so
   renaming the class or method orphans pending deliveries; pin `{ id }` on handlers that matter.
-- **Duplicate ids** fail init with both locations named. A method with several `@Subscribe`
+- **Duplicate ids** fail init with both locations named. A method with several `@RelayBusHandler`
   decorators must give each an explicit `id`.
 - **Singletons only.** Handlers on request-scoped or transient providers (or default-scoped
   providers that depend on one) are rejected: deliveries run outside any request, so there is no
   request instance to call. This covers class, `useClass` and `useFactory` providers (a factory is
   checked through its class token; a request-scoped factory under a string token cannot be
-  inspected). Providers without `@Subscribe` are never inspected for scope.
+  inspected). Providers without `@RelayBusHandler` are never inspected for scope.
 - `this` is bound to the provider instance. Only providers are scanned, in every module. A handler
   reachable through several tokens (`useExisting`) is registered once. Declarations are stored per
   class and method, so decorators that wrap the method later do not drop them, and subclasses
   inherit the handlers of their base class.
 
-## `@EventConsumer(catalog, options?)`
+## Stricter checking (optional): catalogs and `@RelayBusConsumer(catalog, options?)`
+
+Method-level handlers are enough for most services. When a team wants the compiler and the boot
+to prove that _every_ event of a shared contract is handled, group the events in a catalog and
+let a class consume it. Everything here is optional and can be added later, next to
+`@RelayBusHandler` methods.
 
 ```ts
 export const OrderEvents = defineCatalog({ OrderPlaced, OrderShipped }, { name: 'OrderEvents' });
 
 @Injectable()
-@EventConsumer(OrderEvents, { transactional: true })
+@RelayBusConsumer(OrderEvents, { transactional: true })
 export class ShippingHandlers implements HandlersOf<typeof OrderEvents> {
   onOrderPlaced(event: EventOf<typeof OrderPlaced>, context: HandlerContext) {}
   onOrderShipped(event: EventOf<typeof OrderShipped>) {}
@@ -141,13 +166,13 @@ documents a deliberate subset. Options are core's `SubscribeOptions` without `id
 handler of the class.
 
 - `catalogs: [OrderEvents]` in the module options is the boot check: if no provider (via
-  `@EventConsumer`, `@Subscribe` or a configured route) handles an event, the application fails to
+  `@RelayBusConsumer`, `@RelayBusHandler` or a configured route) handles an event, the application fails to
   start with the list of missing events and the methods they expect.
-- It works next to `@Subscribe` in the same class. A `@Subscribe` that would take the same default
-  id (`@Subscribe(OrderPlaced) onOrderPlaced()`) fails init naming both; give it an explicit `id`.
-- Same rules as `@Subscribe`: singleton providers only, `useExisting` aliases register once,
+- It works next to `@RelayBusHandler` in the same class. A `@RelayBusHandler` that would take the same default
+  id (`@RelayBusHandler(OrderPlaced) onOrderPlaced()`) fails init naming both; give it an explicit `id`.
+- Same rules as `@RelayBusHandler`: singleton providers only, `useExisting` aliases register once,
   subclasses inherit the decoration and use their own class name in ids.
-- A class decorated with `@EventConsumer` that defines none of the catalog's methods fails init,
+- A class decorated with `@RelayBusConsumer` that defines none of the catalog's methods fails init,
   which catches misspelled method names.
 - Declarations are inherited from base classes; a subclass that declares the same catalog again
   replaces the inherited declaration, and one catalog declared twice on one class throws.
@@ -157,7 +182,7 @@ handler of the class.
 ```ts
 // shipping service
 @Injectable()
-@EventConsumer(OrderEvents, { events: ['OrderPlaced'] })
+@RelayBusConsumer(OrderEvents, { events: ['OrderPlaced'] })
 export class ShippingHandlers {
   onOrderPlaced(event: EventOf<typeof OrderPlaced>) {}
 }
@@ -250,7 +275,7 @@ no longer atomic with your writes).
 ### Transactional handlers
 
 ```ts
-@Subscribe(PaymentCaptured, { id: 'ledger.record-capture', transactional: true })
+@RelayBusHandler(PaymentCaptured, { id: 'ledger.record-capture', transactional: true })
 async record(event: EventEnvelope<{ paymentId: string }>, context: HandlerContext<PoolClient>) {
   // Writes through context.transaction commit atomically with the delivery completion:
   // effectively-once processing. Keep these handlers short.
@@ -350,7 +375,7 @@ await moduleRef.close();
   global (`isGlobal: false`) and not imported by the consuming module.
 - **Handler never runs:** the provider is not listed in any module `providers`, the process runs
   with `dispatcher.enabled: false`, or the event type differs (check `bus.handlers()`).
-- **`uses @Subscribe but its provider is request-scoped or transient`:** make the provider a
+- **`uses @RelayBusHandler but its provider is request-scoped or transient`:** make the provider a
   singleton; inject request data through the event payload instead.
 - **Vitest/esbuild:** esbuild does not emit decorator metadata; use explicit `@Inject(Token)` in
   test classes.

@@ -26,7 +26,7 @@ export class OrderPlaced extends defineEvent<{ orderId: string }>('order.placed.
 
 @Injectable()
 export class Shipping {
-  @Subscribe(OrderPlaced)
+  @RelayBusHandler(OrderPlaced)
   async ship(event: EventEnvelope<{ orderId: string }>) {
     /* runs after the order transaction commits, retried until it succeeds */
   }
@@ -108,7 +108,7 @@ database (an HTTP call can repeat; send an idempotency key), or global ordering.
 | Package                                   | Purpose                                                                                    |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------ |
 | [`@relaybus/core`](packages/core)         | The bus, dispatcher, retry policies and the in-memory store.                               |
-| [`@relaybus/nestjs`](packages/nestjs)     | `RelayBusModule`, the `@Subscribe` decorator, lifecycle and health.                        |
+| [`@relaybus/nestjs`](packages/nestjs)     | `RelayBusModule`, the `@RelayBusHandler` decorator, lifecycle and health.                  |
 | [`@relaybus/postgres`](packages/postgres) | PostgreSQL 13+ store for `pg`, Kysely, Knex, TypeORM, Drizzle and Prisma transactions.     |
 | [`@relaybus/mongodb`](packages/mongodb)   | MongoDB 6+ store on multi-document transactions; works with Mongoose sessions.             |
 | [`@relaybus/kafka`](packages/kafka)       | Kafka transport for kafkajs and `@confluentinc/kafka-javascript`, CloudEvents binary mode. |
@@ -184,7 +184,7 @@ transaction opened by `bus.transaction()`, then your `transactionResolver`
 ### Handlers
 
 ```ts
-@Subscribe(OrderPlaced, {
+@RelayBusHandler(OrderPlaced, {
   retry: { attempts: 5, initialDelay: '2s', maxDelay: '5m' },
   timeout: '30s',
   concurrency: 4,

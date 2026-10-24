@@ -8,9 +8,12 @@ import {
   type CatalogEntry,
   type EventHandler,
 } from '@relaybus/core';
-import { readEventConsumerMetadata } from './event-consumer.decorator.js';
+import { readConsumerMetadata } from './relay-bus-consumer.decorator.js';
 import { bindInstance } from './relay-bus-registry.js';
-import { readSubscribeMetadata, type SubscribeMetadata } from './subscribe.decorator.js';
+import {
+  readHandlerMetadata,
+  type RelayBusHandlerMetadata,
+} from './relay-bus-handler.decorator.js';
 
 /** What one discovery pass has registered so far. */
 type Discovery = {
@@ -23,11 +26,11 @@ type Discovery = {
 
 interface SubscribedMethod {
   readonly methodName: string;
-  readonly declarations: readonly SubscribeMetadata[];
+  readonly declarations: readonly RelayBusHandlerMetadata[];
 }
 
 /**
- * Finds every `@Subscribe` method and every `@EventConsumer` class among the
+ * Finds every `@RelayBusHandler` method and every `@RelayBusConsumer` class among the
  * singleton providers of the application and registers them on the bus before
  * the bus starts. Providers that are request-scoped or transient, directly or
  * through a dependency, and use either decorator fail the boot. A request-scoped provider whose
@@ -101,7 +104,7 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
       if (previous !== undefined) {
         throw new ConfigurationError(
           `Handler id '${id}' is used by both ${previous} and ${location}; ` +
-            `pass a unique { id } to @Subscribe`,
+            `pass a unique { id } to @RelayBusHandler`,
         );
       }
       registeredBy.set(id, location);
@@ -122,7 +125,7 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
     }: { readonly className: string; readonly registeredBy: Map<string, string> },
   ): void {
     const lookup = instance as Record<string, unknown>;
-    for (const { catalog, options, selectedEntries } of readEventConsumerMetadata(
+    for (const { catalog, options, selectedEntries } of readConsumerMetadata(
       instance.constructor,
     )) {
       const { name, entries } = describeCatalog(catalog);
@@ -131,13 +134,13 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
       const missing = handlers.filter((entry) => !isMethod(lookup, entry));
       if (missing.length > 0) {
         throw new ConfigurationError(
-          `${className} uses @EventConsumer(${label}) but lacks the handler methods of events ` +
+          `${className} uses @RelayBusConsumer(${label}) but lacks the handler methods of events ` +
             `it consumes: ${missing.map((entry) => entry.handlerName).join(', ')}`,
         );
       }
       if (handlers.length === 0) {
         throw new ConfigurationError(
-          `${className} uses @EventConsumer(${label}) but defines none of its handler ` +
+          `${className} uses @RelayBusConsumer(${label}) but defines none of its handler ` +
             `methods (${entries.map((entry) => entry.handlerName).join(', ')})`,
         );
       }
@@ -146,8 +149,8 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
         const previous = registeredBy.get(id);
         if (previous !== undefined) {
           throw new ConfigurationError(
-            `Handler id '${id}' of @EventConsumer(${label}) is already used by ${previous}; ` +
-              `give the @Subscribe a unique { id } or drop it`,
+            `Handler id '${id}' of @RelayBusConsumer(${label}) is already used by ${previous}; ` +
+              `give the @RelayBusHandler a unique { id } or drop it`,
           );
         }
         registeredBy.set(id, `${className}.${entry.handlerName}`);
@@ -164,7 +167,7 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
   private subscribedMethods(prototype: object): SubscribedMethod[] {
     const methods: SubscribedMethod[] = [];
     for (const methodName of this.metadataScanner.getAllMethodNames(prototype)) {
-      const declarations = readSubscribeMetadata(prototype, methodName);
+      const declarations = readHandlerMetadata(prototype, methodName);
       if (declarations.length > 0) {
         methods.push({ methodName, declarations });
       }
@@ -179,9 +182,9 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
    */
   private assertNoHandlers(wrapper: InstanceWrapper): void {
     const type = (wrapper.isFactory ? wrapper.token : wrapper.metatype) as unknown;
-    if (typeof type === 'function' && readEventConsumerMetadata(type).length > 0) {
+    if (typeof type === 'function' && readConsumerMetadata(type).length > 0) {
       throw new ConfigurationError(
-        `${type.name} uses @EventConsumer but its provider is request-scoped or transient ` +
+        `${type.name} uses @RelayBusConsumer but its provider is request-scoped or transient ` +
           `(directly or through a dependency); handlers must be singleton providers`,
       );
     }
@@ -190,7 +193,7 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
     if (first !== undefined) {
       throw new ConfigurationError(
         `${(prototype as { constructor: { name: string } }).constructor.name}.${first.methodName} ` +
-          `uses @Subscribe but its provider is request-scoped or transient ` +
+          `uses @RelayBusHandler but its provider is request-scoped or transient ` +
           `(directly or through a dependency); handlers must be singleton providers`,
       );
     }

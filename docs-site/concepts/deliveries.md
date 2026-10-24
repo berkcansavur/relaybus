@@ -16,7 +16,7 @@ A delivery is `pending` (waiting for its due time), `processing` (leased by a wo
 Each handler has its own delivery record, so one failing handler never re-runs the others. A slow or broken email handler cannot cause the stock handler to run twice, and each handler can have its own retry policy, timeout and concurrency:
 
 ```ts
-@Subscribe(OrderPlaced, {
+@RelayBusHandler(OrderPlaced, {
   retry: { attempts: 5, initialDelay: '2s', maxDelay: '5m' },
   timeout: '30s',
   concurrency: 4,

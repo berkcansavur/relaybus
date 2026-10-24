@@ -9,7 +9,7 @@ import {
   type InMemoryTransaction,
 } from '@relaybus/core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Subscribe } from '../src/index.js';
+import { RelayBusHandler } from '../src/index.js';
 import { OrderPlaced, createApplication, relayBusRoot } from './helpers.js';
 
 afterEach(() => {
@@ -32,7 +32,7 @@ async function start(moduleRef: TestingModule): Promise<RelayBus<InMemoryTransac
   return moduleRef.get(RelayBus);
 }
 
-describe('@Subscribe discovery', () => {
+describe('@RelayBusHandler discovery', () => {
   it('invokes handlers from several modules with this bound to the provider', async () => {
     @Injectable()
     class Mailer {
@@ -43,7 +43,7 @@ describe('@Subscribe discovery', () => {
       readonly seen: string[] = [];
       constructor(@Inject(Mailer) private readonly mailer: Mailer) {}
 
-      @Subscribe(OrderPlaced)
+      @RelayBusHandler(OrderPlaced)
       onOrderPlaced(event: EventEnvelope<{ orderId: string }>, context: HandlerContext): void {
         this.seen.push(event.payload.orderId);
         this.mailer.sent.push(context.handler);
@@ -53,7 +53,7 @@ describe('@Subscribe discovery', () => {
     class AuditHandlers {
       readonly seen: string[] = [];
 
-      @Subscribe(OrderPlaced, { id: 'audit.order-placed' })
+      @RelayBusHandler(OrderPlaced, { id: 'audit.order-placed' })
       async audit(event: EventEnvelope<{ orderId: string }>): Promise<void> {
         this.seen.push(event.id);
       }
@@ -89,7 +89,7 @@ describe('@Subscribe discovery', () => {
   it('subscribes by event type string and passes options through', async () => {
     @Injectable()
     class Handlers {
-      @Subscribe('order.placed.v1', { concurrency: 2, transactional: true })
+      @RelayBusHandler('order.placed.v1', { concurrency: 2, transactional: true })
       handle(_event: EventEnvelope<unknown>, context: HandlerContext<InMemoryTransaction>): void {
         expect(context.transaction).toBeDefined();
       }
@@ -119,8 +119,8 @@ describe('@Subscribe discovery', () => {
     class Handlers {
       calls = 0;
 
-      @Subscribe(OrderPlaced, { id: 'multi.a' })
-      @Subscribe('order.shipped.v1', { id: 'multi.b' })
+      @RelayBusHandler(OrderPlaced, { id: 'multi.a' })
+      @RelayBusHandler('order.shipped.v1', { id: 'multi.b' })
       handle(): void {
         this.calls += 1;
       }
@@ -157,7 +157,7 @@ describe('@Subscribe discovery', () => {
     const seen: string[] = [];
     @Injectable()
     class Handlers {
-      @Subscribe(OrderPlaced)
+      @RelayBusHandler(OrderPlaced)
       handle(event: EventEnvelope<{ orderId: string }>): void {
         seen.push(event.payload.orderId);
       }
@@ -178,12 +178,12 @@ describe('@Subscribe discovery', () => {
   });
 });
 
-describe('@Subscribe validation', () => {
+describe('@RelayBusHandler validation', () => {
   it('fails init on duplicate default ids with both locations named', async () => {
     @Injectable()
     class Handlers {
-      @Subscribe(OrderPlaced)
-      @Subscribe('order.shipped.v1')
+      @RelayBusHandler(OrderPlaced)
+      @RelayBusHandler('order.shipped.v1')
       handle(): void {}
     }
 
@@ -197,12 +197,12 @@ describe('@Subscribe validation', () => {
   it('fails init when two providers share an explicit id', async () => {
     @Injectable()
     class First {
-      @Subscribe(OrderPlaced, { id: 'shared' })
+      @RelayBusHandler(OrderPlaced, { id: 'shared' })
       handle(): void {}
     }
     @Injectable()
     class Second {
-      @Subscribe(OrderPlaced, { id: 'shared' })
+      @RelayBusHandler(OrderPlaced, { id: 'shared' })
       handle(): void {}
     }
 
@@ -217,7 +217,7 @@ describe('@Subscribe validation', () => {
   it('fails init on an invalid handler id from the core registry', async () => {
     @Injectable()
     class Handlers {
-      @Subscribe(OrderPlaced, { id: 'not valid' })
+      @RelayBusHandler(OrderPlaced, { id: 'not valid' })
       handle(): void {}
     }
 
@@ -229,21 +229,21 @@ describe('@Subscribe validation', () => {
   it('rejects request-scoped providers', async () => {
     @Injectable({ scope: Scope.REQUEST })
     class Handlers {
-      @Subscribe(OrderPlaced)
+      @RelayBusHandler(OrderPlaced)
       handle(): void {}
     }
 
     const moduleRef = await createApplication({ imports: [relayBusRoot()], providers: [Handlers] });
 
     await expect(moduleRef.init()).rejects.toThrow(
-      /Handlers\.handle uses @Subscribe but its provider is request-scoped or transient/,
+      /Handlers\.handle uses @RelayBusHandler but its provider is request-scoped or transient/,
     );
   });
 
   it('rejects transient providers', async () => {
     @Injectable({ scope: Scope.TRANSIENT })
     class Handlers {
-      @Subscribe(OrderPlaced)
+      @RelayBusHandler(OrderPlaced)
       handle(): void {}
     }
 
@@ -259,7 +259,7 @@ describe('@Subscribe validation', () => {
     class Handlers {
       constructor(@Inject(RequestContext) readonly context: RequestContext) {}
 
-      @Subscribe(OrderPlaced)
+      @RelayBusHandler(OrderPlaced)
       handle(): void {}
     }
 
@@ -297,7 +297,7 @@ describe('@Subscribe validation', () => {
       readonly seen: string[] = [];
 
       @wrapMethod()
-      @Subscribe(OrderPlaced)
+      @RelayBusHandler(OrderPlaced)
       handle(event: EventEnvelope<{ orderId: string }>): void {
         this.seen.push(event.payload.orderId);
       }
@@ -306,7 +306,7 @@ describe('@Subscribe validation', () => {
     class WrappedBelow {
       readonly seen: string[] = [];
 
-      @Subscribe(OrderPlaced)
+      @RelayBusHandler(OrderPlaced)
       @wrapMethod()
       handle(event: EventEnvelope<{ orderId: string }>): void {
         this.seen.push(event.payload.orderId);
@@ -330,7 +330,7 @@ describe('@Subscribe validation', () => {
     class BaseHandlers {
       readonly seen: string[] = [];
 
-      @Subscribe(OrderPlaced, { id: 'base.handle' })
+      @RelayBusHandler(OrderPlaced, { id: 'base.handle' })
       handle(event: EventEnvelope<{ orderId: string }>): void {
         this.seen.push(event.payload.orderId);
       }
@@ -355,7 +355,7 @@ describe('@Subscribe validation', () => {
     class Handlers {
       readonly seen: string[] = [];
 
-      @Subscribe(OrderPlaced)
+      @RelayBusHandler(OrderPlaced)
       handle(event: EventEnvelope<{ orderId: string }>): void {
         this.seen.push(event.payload.orderId);
       }
@@ -377,7 +377,7 @@ describe('@Subscribe validation', () => {
   it('rejects factory providers that inject REQUEST', async () => {
     @Injectable()
     class Handlers {
-      @Subscribe(OrderPlaced)
+      @RelayBusHandler(OrderPlaced)
       handle(): void {}
     }
     const moduleRef = await createApplication({
@@ -386,7 +386,7 @@ describe('@Subscribe validation', () => {
     });
 
     await expect(moduleRef.init()).rejects.toThrow(
-      /Handlers\.handle uses @Subscribe but its provider is request-scoped or transient/,
+      /Handlers\.handle uses @RelayBusHandler but its provider is request-scoped or transient/,
     );
   });
 
@@ -395,7 +395,7 @@ describe('@Subscribe validation', () => {
     class RequestContext {}
     @Injectable()
     class Handlers {
-      @Subscribe(OrderPlaced)
+      @RelayBusHandler(OrderPlaced)
       handle(): void {}
     }
     const moduleRef = await createApplication({
@@ -412,7 +412,7 @@ describe('@Subscribe validation', () => {
   it('rejects request-scoped class providers registered under a different token', async () => {
     @Injectable({ scope: Scope.REQUEST })
     class Handlers {
-      @Subscribe(OrderPlaced)
+      @RelayBusHandler(OrderPlaced)
       handle(): void {}
     }
     const moduleRef = await createApplication({
@@ -420,7 +420,7 @@ describe('@Subscribe validation', () => {
       providers: [{ provide: 'HANDLERS', useClass: Handlers }],
     });
 
-    await expect(moduleRef.init()).rejects.toThrow(/Handlers\.handle uses @Subscribe/);
+    await expect(moduleRef.init()).rejects.toThrow(/Handlers\.handle uses @RelayBusHandler/);
   });
 
   it('cannot inspect request-scoped factories with a string token and leaves them alone', async () => {

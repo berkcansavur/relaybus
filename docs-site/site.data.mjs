@@ -11,7 +11,10 @@ export const siteDescription =
 
 export const packages = [
   { name: 'core', blurb: 'The bus, dispatcher, retry policies and the in-memory store.' },
-  { name: 'nestjs', blurb: 'RelayBusModule, the @Subscribe decorator, lifecycle and health.' },
+  {
+    name: 'nestjs',
+    blurb: 'RelayBusModule, the @RelayBusHandler decorator, lifecycle and health.',
+  },
   {
     name: 'postgres',
     blurb: 'PostgreSQL store for pg, Prisma, TypeORM, Drizzle, Knex and Kysely.',

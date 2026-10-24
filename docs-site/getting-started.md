@@ -50,13 +50,13 @@ export class OrderPlaced extends defineEvent<{ orderId: string }>('order.placed.
 ```ts
 // shipping.handlers.ts
 import { Injectable } from '@nestjs/common';
-import { Subscribe } from '@relaybus/nestjs';
+import { RelayBusHandler } from '@relaybus/nestjs';
 import type { EventEnvelope } from '@relaybus/core';
 import { OrderPlaced } from './order.events';
 
 @Injectable()
 export class ShippingHandlers {
-  @Subscribe(OrderPlaced, { retry: { attempts: 5 } })
+  @RelayBusHandler(OrderPlaced, { retry: { attempts: 5 } })
   async ship(event: EventEnvelope<{ orderId: string }>) {
     // runs after the order transaction commits, retried until it succeeds
   }

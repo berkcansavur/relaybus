@@ -1,5 +1,5 @@
 /**
- * Compile-time contract of `@EventConsumer` with selected events. Enforced by
+ * Compile-time contract of `@RelayBusConsumer` with selected events. Enforced by
  * `tsc -p tsconfig.json`: every `@ts-expect-error` line must produce a compile
  * error, otherwise tsc reports an unused directive. The classes are declared
  * inside a function that never runs, so no decorator executes here.
@@ -15,18 +15,18 @@ import {
   type InMemoryTransaction,
 } from '@relaybus/core';
 import { describe, expectTypeOf, it } from 'vitest';
-import { EventConsumer, RelayBusModule, type EventConsumerOptions } from '../src/index.js';
+import { RelayBusConsumer, RelayBusModule, type RelayBusConsumerOptions } from '../src/index.js';
 import { OrderPlaced } from './helpers.js';
 
 class OrderShipped extends defineEvent<{ orderId: string; carrier: string }>('order.shipped.v1') {}
 
 const OrderEvents = defineCatalog({ OrderPlaced, OrderShipped }, { name: 'OrderEvents' });
 
-describe('@EventConsumer types', () => {
+describe('@RelayBusConsumer types', () => {
   it('requires the handler methods of the selected events', () => {
     const compileOnly = (): void => {
       @Injectable()
-      @EventConsumer(OrderEvents, { events: ['OrderPlaced'] })
+      @RelayBusConsumer(OrderEvents, { events: ['OrderPlaced'] })
       class BillingHandlers {
         onOrderPlaced(event: EventOf<typeof OrderPlaced>): void {
           void event.payload.orderId;
@@ -35,20 +35,20 @@ describe('@EventConsumer types', () => {
 
       @Injectable()
       // @ts-expect-error: consumer missing handler, onOrderShipped is required by events
-      @EventConsumer(OrderEvents, { events: ['OrderPlaced', 'OrderShipped'] })
+      @RelayBusConsumer(OrderEvents, { events: ['OrderPlaced', 'OrderShipped'] })
       class MissingShipped {
         onOrderPlaced(): void {}
       }
 
       @Injectable()
       // @ts-expect-error: unknown event name, 'OrderRefunded' is not an event of OrderEvents
-      @EventConsumer(OrderEvents, { events: ['OrderRefunded'] })
+      @RelayBusConsumer(OrderEvents, { events: ['OrderRefunded'] })
       class UnknownEvent {
         onOrderRefunded(): void {}
       }
 
       @Injectable()
-      @EventConsumer(OrderEvents, { events: ['OrderPlaced'] })
+      @RelayBusConsumer(OrderEvents, { events: ['OrderPlaced'] })
       class TransactionalHandlers {
         onOrderPlaced(
           event: EventOf<typeof OrderPlaced>,
@@ -60,7 +60,7 @@ describe('@EventConsumer types', () => {
 
       @Injectable()
       // @ts-expect-error: onOrderShipped receives the OrderShipped envelope, not a number
-      @EventConsumer(OrderEvents, { events: ['OrderShipped'] })
+      @RelayBusConsumer(OrderEvents, { events: ['OrderShipped'] })
       class WrongPayload {
         onOrderShipped(event: number): void {
           void event;
@@ -69,7 +69,7 @@ describe('@EventConsumer types', () => {
 
       @Injectable()
       // @ts-expect-error: a narrower payload is rejected, the OrderShipped envelope has no 'note'
-      @EventConsumer(OrderEvents, { events: ['OrderShipped'] })
+      @RelayBusConsumer(OrderEvents, { events: ['OrderShipped'] })
       class NarrowerPayload {
         onOrderShipped(event: EventOf<typeof OrderShipped> & { payload: { note: string } }): void {
           void event.payload.note;
@@ -79,22 +79,22 @@ describe('@EventConsumer types', () => {
       const selection = { events: ['OrderPlaced'] as const, transactional: true };
       @Injectable()
       // @ts-expect-error: options from a variable are checked too, onOrderPlaced is missing
-      @EventConsumer(OrderEvents, selection)
+      @RelayBusConsumer(OrderEvents, selection)
       class SelectionFromVariable {
         onOrderShipped(): void {}
       }
 
-      // A variable typed EventConsumerOptions is checked when the module initialises.
-      const typedOptions: EventConsumerOptions<typeof OrderEvents> = { transactional: true };
+      // A variable typed RelayBusConsumerOptions is checked when the module initialises.
+      const typedOptions: RelayBusConsumerOptions<typeof OrderEvents> = { transactional: true };
       @Injectable()
-      @EventConsumer(OrderEvents, typedOptions)
+      @RelayBusConsumer(OrderEvents, typedOptions)
       class TypedOptions {
         onOrderPlaced(): void {}
       }
 
       // Without events any subset of methods compiles, as before.
       @Injectable()
-      @EventConsumer(OrderEvents)
+      @RelayBusConsumer(OrderEvents)
       class AnySubset {
         onOrderShipped(): void {}
       }

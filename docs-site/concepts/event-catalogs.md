@@ -7,6 +7,8 @@ description: Group events in a catalog so the TypeScript compiler rejects a miss
 
 An event with no handler is the quietest failure in an event-driven system: the publish succeeds, nothing runs, and nobody notices until a customer asks why the shipping email never arrived. A **catalog** groups the events of one domain so that the compiler, and then the application boot, tell you before production does.
 
+Catalogs are **optional, stricter checking** on top of the default style. Method-level `@RelayBusHandler(Event)` handlers already have their parameter type checked against the event at compile time, need no class-level setup, and can mix events of any domain in one class; start there. Add a catalog when a team wants the compiler and the boot to prove that every event of a shared contract has a handler or a route.
+
 Compiler output below is abridged: `OrderEvents` stands for the expanded type of the catalog that TypeScript prints.
 
 ## Before: nothing connects events and handlers
@@ -17,7 +19,7 @@ class OrderShipped extends defineEvent<{ orderId: string; carrier: string }>('or
 
 @Injectable()
 class ShippingHandlers {
-  @Subscribe(OrderPlaced)
+  @RelayBusHandler(OrderPlaced)
   onOrderPlaced(event: EventEnvelope<{ orderId: string }>) {}
   // OrderShipped is forgotten. Everything compiles, the app boots, shipments are silently ignored.
 }
@@ -29,7 +31,7 @@ class ShippingHandlers {
 export const OrderEvents = defineCatalog({ OrderPlaced, OrderShipped }, { name: 'OrderEvents' });
 
 @Injectable()
-@EventConsumer(OrderEvents)
+@RelayBusConsumer(OrderEvents)
 class ShippingHandlers implements HandlersOf<typeof OrderEvents> {
   onOrderPlaced(event: EventOf<typeof OrderPlaced>) {}
 }
@@ -147,7 +149,7 @@ await orders.publish(new OrderPlaced({ orderId, total }), { transaction, key: or
 
 ```ts
 @Injectable()
-@EventConsumer(OrderEvents, { events: ['OrderPlaced', 'OrderCancelled'], transactional: true })
+@RelayBusConsumer(OrderEvents, { events: ['OrderPlaced', 'OrderCancelled'], transactional: true })
 export class ShippingHandlers {
   onOrderPlaced(event: EventOf<typeof OrderPlaced>, context: HandlerContext<ClientSession>) {}
   onOrderCancelled(event: EventOf<typeof OrderCancelled>, context: HandlerContext<ClientSession>) {}
@@ -185,7 +187,7 @@ error TS2345: Argument of type '{ onOrderPlaced: () => undefined; }' is not assi
 // publishing an event the view does not produce
 error TS2345: Argument of type 'OrderPlaced' is not assignable to parameter of type 'OrderShipped'.
 
-// @EventConsumer(OrderEvents, { events: ['OrderPlaced', 'OrderShipped'] }) on a class without onOrderShipped
+// @RelayBusConsumer(OrderEvents, { events: ['OrderPlaced', 'OrderShipped'] }) on a class without onOrderShipped
 error TS1238: Unable to resolve signature of class decorator when called as an expression.
 ```
 

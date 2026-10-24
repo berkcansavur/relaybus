@@ -13,7 +13,7 @@ pnpm add @relaybus/core @relaybus/nestjs @relaybus/postgres pg
 
 | Package                                                                  | Use it for                                                    |
 | ------------------------------------------------------------------------ | ------------------------------------------------------------- |
-| [`@relaybus/nestjs`](https://www.npmjs.com/package/@relaybus/nestjs)     | `RelayBusModule` and the `@Subscribe` decorator               |
+| [`@relaybus/nestjs`](https://www.npmjs.com/package/@relaybus/nestjs)     | `RelayBusModule` and the `@RelayBusHandler` decorator         |
 | [`@relaybus/postgres`](https://www.npmjs.com/package/@relaybus/postgres) | PostgreSQL store (pg, Prisma, TypeORM, Knex, Kysely, Drizzle) |
 | [`@relaybus/mongodb`](https://www.npmjs.com/package/@relaybus/mongodb)   | MongoDB store (driver or Mongoose sessions)                   |
 | [`@relaybus/kafka`](https://www.npmjs.com/package/@relaybus/kafka)       | Kafka transport between services                              |
@@ -33,7 +33,7 @@ export class AppModule {}
 // shipping.handlers.ts: consume with a decorator
 @Injectable()
 export class ShippingHandlers {
-  @Subscribe(OrderPlaced, { retry: { attempts: 5 } })
+  @RelayBusHandler(OrderPlaced, { retry: { attempts: 5 } })
   async ship(event: EventEnvelope<{ orderId: string }>) {
     /* runs after the order transaction commits */
   }

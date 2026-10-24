@@ -1,9 +1,13 @@
 export {
   EventConsumer,
+  RelayBusConsumer,
   type EventConsumerClass,
   type EventConsumerMetadata,
   type EventConsumerOptions,
-} from './event-consumer.decorator.js';
+  type RelayBusConsumerClass,
+  type RelayBusConsumerMetadata,
+  type RelayBusConsumerOptions,
+} from './relay-bus-consumer.decorator.js';
 export { RelayBusHandlerExplorer } from './handler-explorer.js';
 export type {
   RelayBusModuleExtras,
@@ -21,8 +25,11 @@ export {
   type RelayBusTransactionNeedsAsyncMethod,
 } from './relay-bus-transaction.decorator.js';
 export {
+  RelayBusHandler,
   Subscribe,
+  type RelayBusHandlerMetadata,
+  type RelayBusHandlerOptions,
   type SubscribeDecoratorOptions,
   type SubscribeMetadata,
-} from './subscribe.decorator.js';
+} from './relay-bus-handler.decorator.js';
 export { RelayBus } from '@relaybus/core';
