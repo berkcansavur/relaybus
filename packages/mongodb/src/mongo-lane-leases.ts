@@ -24,8 +24,7 @@ export class MongoLaneLeases {
    */
   async findFreeLanes(
     request: ClaimRequest,
-    laneCount: number,
-    passed: readonly number[],
+    { laneCount, passed }: { readonly laneCount: number; readonly passed: readonly number[] },
   ): Promise<number[]> {
     const lanes = await this.#state.lanes
       .aggregate<{ _id: number }>([
@@ -162,9 +161,15 @@ export class MongoLaneLeases {
    */
   async recordClaim(
     scope: ReadonlyMap<number, ScopeLane>,
-    picked: readonly DeliveryDocument[],
-    runningIds: ReadonlySet<string>,
-    request: ClaimRequest,
+    {
+      picked,
+      runningIds,
+      request,
+    }: {
+      readonly picked: readonly DeliveryDocument[];
+      readonly runningIds: ReadonlySet<string>;
+      readonly request: ClaimRequest;
+    },
   ): Promise<{ readonly recorded: Set<number>; readonly handedBack: Set<number> }> {
     const picksByLane = new Map<number, string[]>();
     const handedBack = new Set<number>();
@@ -180,7 +185,9 @@ export class MongoLaneLeases {
           recordInFlight({ lane, ids, gone, request, instanceId: this.#state.instanceId }),
         );
       } else if (gone.length === lane.listed.length) {
-        operations.push(freeLane(lane.laneId, lane.epoch, lane.revision, gone));
+        operations.push(
+          freeLane(lane.laneId, { epoch: lane.epoch, revision: lane.revision, finished: gone }),
+        );
         handedBack.add(lane.laneId);
       }
     }
@@ -192,7 +199,7 @@ export class MongoLaneLeases {
       return { recorded: new Set(picksByLane.keys()), handedBack };
     }
     return {
-      recorded: await this.#readRecorded(scope, [...picksByLane.keys()], request),
+      recorded: await this.#readRecorded(scope, { laneIds: [...picksByLane.keys()], request }),
       handedBack,
     };
   }
@@ -200,8 +207,7 @@ export class MongoLaneLeases {
   /** The lanes of `laneIds` whose record of this claim applied, read back after a partial bulk write. */
   async #readRecorded(
     scope: ReadonlyMap<number, ScopeLane>,
-    laneIds: readonly number[],
-    request: ClaimRequest,
+    { laneIds, request }: { readonly laneIds: readonly number[]; readonly request: ClaimRequest },
   ): Promise<Set<number>> {
     const current = await this.#state.lanes
       .find(
@@ -235,7 +241,13 @@ export class MongoLaneLeases {
     const idle = held.filter((lane) => lane.inFlight.every((id) => !runningIds.has(id)));
     if (idle.length > 0) {
       await this.#state.lanes.bulkWrite(
-        idle.map((lane) => freeLane(lane._id, lane.epoch, lane.revision ?? 0, lane.inFlight)),
+        idle.map((lane) =>
+          freeLane(lane._id, {
+            epoch: lane.epoch,
+            revision: lane.revision ?? 0,
+            finished: lane.inFlight,
+          }),
+        ),
         { ordered: false },
       );
     }
@@ -294,9 +306,11 @@ function recordInFlight(input: RecordInFlightInput): AnyBulkWriteOperation<LaneD
  */
 function freeLane(
   laneId: number,
-  epoch: number,
-  revision: number,
-  finished: readonly string[],
+  {
+    epoch,
+    revision,
+    finished,
+  }: { readonly epoch: number; readonly revision: number; readonly finished: readonly string[] },
 ): AnyBulkWriteOperation<LaneDocument> {
   return {
     updateOne: {

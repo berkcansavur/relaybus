@@ -19,7 +19,10 @@ export class PostgresMaintenance<TTransaction> {
 
   /** Implements {@link PostgresEventStore.relinquish}. */
   async relinquish(leaseOwner: string): Promise<void> {
-    await this.#state.query(this.#state.statements.claim.relinquish, [leaseOwner]);
+    await this.#state.query({
+      sql: this.#state.statements.claim.relinquish,
+      parameters: [leaseOwner],
+    });
   }
 
   /** Implements {@link PostgresEventStore.listDeliveries}. */
@@ -31,32 +34,39 @@ export class PostgresMaintenance<TTransaction> {
 
   /** Implements {@link PostgresEventStore.requeue}. */
   async requeue(deliveryIds: readonly string[], now: Date): Promise<number> {
-    const rows = await this.#state.query(this.#state.statements.queries.requeue, [
-      JSON.stringify(deliveryIds),
-      now.toISOString(),
-    ]);
+    const rows = await this.#state.query({
+      sql: this.#state.statements.queries.requeue,
+      parameters: [JSON.stringify(deliveryIds), now.toISOString()],
+    });
     return readCount(rows[0]!, 'count');
   }
 
   /** Implements {@link PostgresEventStore.statistics}. */
   async statistics(now: Date): Promise<EventStoreStatistics> {
     const stored: Record<string, number> = { pending: 0, dead: 0, completed: 0 };
-    for (const row of await this.#state.query(this.#state.statements.queries.countByStatus, [])) {
+    for (const row of await this.#state.query({
+      sql: this.#state.statements.queries.countByStatus,
+      parameters: [],
+    })) {
       stored[row['status'] as string] = readCount(row, 'count');
     }
-    const [running] = await this.#state.query(this.#state.statements.queries.countRunning, []);
+    const [running] = await this.#state.query({
+      sql: this.#state.statements.queries.countRunning,
+      parameters: [],
+    });
     const processing = readCount(running!, 'count');
     let completed = stored['completed']!;
     if (this.#state.completionHistory) {
-      const [history] = await this.#state.query(
-        this.#state.statements.queries.countCompletionHistory,
-        [],
-      );
+      const [history] = await this.#state.query({
+        sql: this.#state.statements.queries.countCompletionHistory,
+        parameters: [],
+      });
       completed += readCount(history!, 'count');
     }
-    const oldestDue = await this.#state.query(this.#state.statements.queries.oldestDue, [
-      now.toISOString(),
-    ]);
+    const oldestDue = await this.#state.query({
+      sql: this.#state.statements.queries.oldestDue,
+      parameters: [now.toISOString()],
+    });
     return {
       // The counts come from separate statements; a delivery that finishes in between must not make this negative.
       pending: Math.max(0, stored['pending']! - processing),
@@ -95,7 +105,7 @@ export class PostgresMaintenance<TTransaction> {
       }
       let deletedInBatch = this.#state.purgeBatchSize;
       while (deletedInBatch === this.#state.purgeBatchSize) {
-        const batch = await this.#purgeBatch(sql, cutoff, deleteOrphans);
+        const batch = await this.#purgeBatch(sql, { cutoff, deleteOrphans });
         deletedInBatch = batch.deletedDeliveries;
         total.deletedDeliveries += batch.deletedDeliveries;
         total.deletedEvents += batch.deletedEvents;
@@ -107,17 +117,21 @@ export class PostgresMaintenance<TTransaction> {
     if (orphanCutoff !== undefined) {
       total.deletedEvents += await this.#purgeOrphanEvents(
         this.#state.statements.purge.lockOrphanEventsBatch,
-        this.#state.statements.purge.deleteOrphanEventsWithoutCompletion,
-        orphanCutoff,
-        false,
+        {
+          deleteStatement: this.#state.statements.purge.deleteOrphanEventsWithoutCompletion,
+          cutoff: orphanCutoff,
+          recheckCutoff: false,
+        },
       );
     }
     if (request.completedBefore !== undefined) {
       total.deletedEvents += await this.#purgeOrphanEvents(
         this.#state.statements.purge.lockCompletedOrphanEventsBatch,
-        this.#state.statements.purge.deleteExpiredCompletedOrphanEvents,
-        request.completedBefore,
-        true,
+        {
+          deleteStatement: this.#state.statements.purge.deleteExpiredCompletedOrphanEvents,
+          cutoff: request.completedBefore,
+          recheckCutoff: true,
+        },
       );
     }
     return total;
@@ -125,25 +139,27 @@ export class PostgresMaintenance<TTransaction> {
 
   async #purgeOrphanEvents(
     lockStatement: string,
-    deleteStatement: string,
-    cutoff: Date,
-    recheckCutoff: boolean,
+    {
+      deleteStatement,
+      cutoff,
+      recheckCutoff,
+    }: { readonly deleteStatement: string; readonly cutoff: Date; readonly recheckCutoff: boolean },
   ): Promise<number> {
     let deletedEvents = 0;
     let removedInBatch = this.#state.purgeBatchSize;
     while (removedInBatch === this.#state.purgeBatchSize) {
       removedInBatch = await this.#state.executor.transaction(async (transaction) => {
-        const locked = await this.#state.query(
-          lockStatement,
-          [cutoff.toISOString(), this.#state.purgeBatchSize],
+        const locked = await this.#state.query({
+          sql: lockStatement,
+          parameters: [cutoff.toISOString(), this.#state.purgeBatchSize],
           transaction,
-        );
+        });
         const ids = JSON.stringify(locked.map((row: PostgresRow) => row['id'] as string));
-        const removed = await this.#state.query(
-          deleteStatement,
-          recheckCutoff ? [ids, cutoff.toISOString()] : [ids],
+        const removed = await this.#state.query({
+          sql: deleteStatement,
+          parameters: recheckCutoff ? [ids, cutoff.toISOString()] : [ids],
           transaction,
-        );
+        });
         return readCount(removed[0]!, 'count');
       });
       deletedEvents += removedInBatch;
@@ -153,31 +169,30 @@ export class PostgresMaintenance<TTransaction> {
 
   async #purgeBatch(
     sql: string,
-    cutoff: Date,
-    deleteOrphans: string,
+    { cutoff, deleteOrphans }: { readonly cutoff: Date; readonly deleteOrphans: string },
   ): Promise<{ deletedDeliveries: number; deletedEvents: number }> {
     return this.#state.executor.transaction(async (transaction) => {
-      const deleted = await this.#state.query(
+      const deleted = await this.#state.query({
         sql,
-        [cutoff.toISOString(), this.#state.purgeBatchSize],
+        parameters: [cutoff.toISOString(), this.#state.purgeBatchSize],
         transaction,
-      );
+      });
       if (deleted.length === 0) {
         return { deletedDeliveries: 0, deletedEvents: 0 };
       }
       const eventIds = JSON.stringify([
         ...new Set(deleted.map((row) => row['event_id'] as string)),
       ]);
-      const locked = await this.#state.query(
-        this.#state.statements.purge.lockEvents,
-        [eventIds],
+      const locked = await this.#state.query({
+        sql: this.#state.statements.purge.lockEvents,
+        parameters: [eventIds],
         transaction,
-      );
-      const removed = await this.#state.query(
-        deleteOrphans,
-        [JSON.stringify(locked.map((row: PostgresRow) => row['id'] as string))],
+      });
+      const removed = await this.#state.query({
+        sql: deleteOrphans,
+        parameters: [JSON.stringify(locked.map((row: PostgresRow) => row['id'] as string))],
         transaction,
-      );
+      });
       return { deletedDeliveries: deleted.length, deletedEvents: readCount(removed[0]!, 'count') };
     });
   }

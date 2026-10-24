@@ -18,6 +18,7 @@ export interface KnexLike extends KnexQueryable {
 export function createKnexExecutor(knex: KnexLike): PostgresExecutor<KnexQueryable> {
   return {
     transaction: (work) => knex.transaction(work),
+    // eslint-disable-next-line relaybus/max-two-params -- PostgresExecutor port signature
     async query(sql, parameters: readonly PostgresParameter[], transaction) {
       const parts = splitPositionalSql(sql);
       const knexSql = parts.map((part) => (typeof part === 'string' ? part : '?')).join('');

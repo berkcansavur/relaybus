@@ -59,8 +59,7 @@ export function buildRetryLadder(policy: RetryPolicy): readonly number[] {
  */
 export function chooseRetryTier(
   ladder: readonly number[],
-  delayMs: number,
-  random: () => number,
+  { delayMs, random }: { readonly delayMs: number; readonly random: () => number },
 ): number {
   const upperIndex = ladder.findIndex((tier) => tier >= delayMs);
   if (upperIndex === -1) {

@@ -63,6 +63,7 @@ export class PgExecutor implements PostgresExecutor<PoolClient> {
     }
   }
 
+  // eslint-disable-next-line relaybus/max-two-params -- PostgresExecutor port signature
   async query(
     sql: string,
     parameters: readonly PostgresParameter[],

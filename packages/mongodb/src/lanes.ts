@@ -42,7 +42,10 @@ export interface LaneLease {
  * The fencing token of a claimed delivery: `<laneId>:<epoch>:<claims>`. Every
  * state change checks the lane epoch and the delivery's claim generation.
  */
-export function formatLeaseToken(laneId: number, epoch: number, claims: number): string {
+export function formatLeaseToken(
+  laneId: number,
+  { epoch, claims }: { readonly epoch: number; readonly claims: number },
+): string {
   return `${laneId}:${epoch}:${claims}`;
 }
 

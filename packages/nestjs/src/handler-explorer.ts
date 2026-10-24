@@ -67,18 +67,20 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
     }
     const className = instance.constructor.name;
     for (const subscribed of this.subscribedMethods(prototype)) {
-      this.registerSubscribedMethod(instance, subscribed, discovery);
+      this.registerSubscribedMethod(instance, { subscribedMethod: subscribed, discovery });
     }
     if (!discovery.consumers.has(instance)) {
       discovery.consumers.add(instance);
-      this.registerEventConsumers(instance, className, discovery.registeredBy);
+      this.registerEventConsumers(instance, { className, registeredBy: discovery.registeredBy });
     }
   }
 
   private registerSubscribedMethod(
     instance: object,
-    { methodName, declarations }: SubscribedMethod,
-    { registeredBy, visited }: Discovery,
+    {
+      subscribedMethod: { methodName, declarations },
+      discovery: { registeredBy, visited },
+    }: { readonly subscribedMethod: SubscribedMethod; readonly discovery: Discovery },
   ): void {
     // A `useExisting` alias exposes the same instance under another token.
     const seen = visited.get(instance) ?? new Set<string>();
@@ -112,8 +114,10 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
 
   private registerEventConsumers(
     instance: object,
-    className: string,
-    registeredBy: Map<string, string>,
+    {
+      className,
+      registeredBy,
+    }: { readonly className: string; readonly registeredBy: Map<string, string> },
   ): void {
     const lookup = instance as Record<string, unknown>;
     for (const { catalog, options, selectedEntries } of readEventConsumerMetadata(

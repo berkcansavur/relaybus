@@ -579,9 +579,9 @@ export class Dispatcher {
     let stopHeartbeat = (): void => undefined;
     try {
       stopHeartbeat = registration.transactional
-        ? await this.#guardTransactionalLease(registration, delivery, controller)
+        ? await this.#guardTransactionalLease(registration, { delivery, controller })
         : this.#startHeartbeat(delivery, controller);
-      const outcome = await this.#runHandler(registration, delivery, controller);
+      const outcome = await this.#runHandler(registration, { delivery, controller });
       const durationMs = clock.now().getTime() - startedAt;
       if (outcome === 'completed') {
         notifier.notify('onDeliverySucceeded', { delivery, durationMs });
@@ -597,12 +597,12 @@ export class Dispatcher {
       if (error instanceof LeaseLostError) {
         notifier.notify('onLeaseLost', { delivery });
         if (!error.storeConfirmed) {
-          await this.#giveBack(registration, delivery, error);
+          await this.#giveBack(registration, { delivery, error });
         }
       } else if (error instanceof DispatcherStoppedError) {
         await this.#release(delivery);
       } else {
-        await this.#fail(registration, delivery, error);
+        await this.#fail(registration, { delivery, error });
       }
       return false;
     } finally {
@@ -612,8 +612,10 @@ export class Dispatcher {
 
   async #runHandler(
     registration: HandlerRegistration,
-    delivery: ClaimedDelivery,
-    controller: AbortController,
+    {
+      delivery,
+      controller,
+    }: { readonly delivery: ClaimedDelivery; readonly controller: AbortController },
   ): Promise<HandlerOutcome> {
     const { store, clock } = this.#dependencies;
     const payload = await validatePayload(
@@ -711,7 +713,10 @@ export class Dispatcher {
     try {
       await Promise.race([work, rejectOnAbort(controller.signal)]);
     } catch (error) {
-      await this.#awaitAbandonedHandler(work, error, transaction !== undefined);
+      await this.#awaitAbandonedHandler(work, {
+        reason: error,
+        transactional: transaction !== undefined,
+      });
       throw error;
     } finally {
       cancelTimeout?.();
@@ -727,8 +732,7 @@ export class Dispatcher {
    */
   async #awaitAbandonedHandler(
     work: Promise<unknown>,
-    reason: unknown,
-    transactional: boolean,
+    { reason, transactional }: { readonly reason: unknown; readonly transactional: boolean },
   ): Promise<void> {
     const settledWork = work.then(
       () => undefined,
@@ -754,8 +758,10 @@ export class Dispatcher {
    */
   async #guardTransactionalLease(
     registration: HandlerRegistration,
-    delivery: ClaimedDelivery,
-    controller: AbortController,
+    {
+      delivery,
+      controller,
+    }: { readonly delivery: ClaimedDelivery; readonly controller: AbortController },
   ): Promise<() => void> {
     const { store, clock, settings } = this.#dependencies;
     const now = clock.now();
@@ -825,22 +831,20 @@ export class Dispatcher {
 
   async #fail(
     registration: HandlerRegistration,
-    delivery: ClaimedDelivery,
-    error: unknown,
+    { delivery, error }: { readonly delivery: ClaimedDelivery; readonly error: unknown },
   ): Promise<void> {
     const policy = registration.retry;
     if (delivery.attempt >= policy.attempts || !isRetryableError(policy, error)) {
       await this.#bury(delivery, error);
       return;
     }
-    await this.#reschedule(registration, delivery, error);
+    await this.#reschedule(registration, { delivery, error });
   }
 
   /** Schedules the next attempt with the retry policy's backoff. */
   async #reschedule(
     registration: HandlerRegistration,
-    delivery: ClaimedDelivery,
-    error: unknown,
+    { delivery, error }: { readonly delivery: ClaimedDelivery; readonly error: unknown },
   ): Promise<void> {
     const { store, clock, random, notifier } = this.#dependencies;
     const policy = registration.retry;
@@ -901,13 +905,12 @@ export class Dispatcher {
    */
   async #giveBack(
     registration: HandlerRegistration,
-    delivery: ClaimedDelivery,
-    error: LeaseLostError,
+    { delivery, error }: { readonly delivery: ClaimedDelivery; readonly error: LeaseLostError },
   ): Promise<void> {
     if (delivery.attempt >= registration.retry.attempts) {
       await this.#bury(delivery, error);
     } else {
-      await this.#reschedule(registration, delivery, error);
+      await this.#reschedule(registration, { delivery, error });
     }
   }
 

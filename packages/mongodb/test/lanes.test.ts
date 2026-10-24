@@ -37,10 +37,14 @@ describe('laneOf', () => {
 
 describe('lease tokens', () => {
   it('round-trips the lane, the epoch and the claim generation', () => {
-    expect(formatLeaseToken(7, 12, 3)).toBe('7:12:3');
+    expect(formatLeaseToken(7, { epoch: 12, claims: 3 })).toBe('7:12:3');
     expect(parseLeaseToken('7:12:3')).toEqual({ laneId: 7, epoch: 12, claims: 3 });
     expect(parseLeaseToken('255:0:0')).toEqual({ laneId: 255, epoch: 0, claims: 0 });
-    expect(parseLeaseToken(formatLeaseToken(0, 999_999_999_999_999, 999_999_999_999_999))).toEqual({
+    expect(
+      parseLeaseToken(
+        formatLeaseToken(0, { epoch: 999_999_999_999_999, claims: 999_999_999_999_999 }),
+      ),
+    ).toEqual({
       laneId: 0,
       epoch: 999_999_999_999_999,
       claims: 999_999_999_999_999,

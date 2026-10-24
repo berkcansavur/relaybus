@@ -265,7 +265,8 @@ export class KafkaTransport implements Transport {
     const consumer = this.#kafka.consumer({ ...this.#consumerConfig, groupId: this.#groupId! });
     this.#consumer = consumer;
     this.#observeConsumer(consumer);
-    const start = (): Promise<void> => this.#startConsumer(consumer, [...destinations], onMessage);
+    const start = (): Promise<void> =>
+      this.#startConsumer(consumer, { destinations: [...destinations], onMessage });
     this.#startConsuming = start;
     try {
       await start();
@@ -285,8 +286,10 @@ export class KafkaTransport implements Transport {
 
   async #startConsumer(
     consumer: KafkaConsumerLike,
-    destinations: string[],
-    onMessage: TransportMessageHandler,
+    {
+      destinations,
+      onMessage,
+    }: { readonly destinations: string[]; readonly onMessage: TransportMessageHandler },
   ): Promise<void> {
     await consumer.connect();
     await consumer.subscribe({ topics: destinations, fromBeginning: this.#fromBeginning });
@@ -422,19 +425,25 @@ export class KafkaTransport implements Transport {
       if (this.#decode === undefined && !(error instanceof InvalidKafkaMessageError)) {
         throw toHandlerFailure(error);
       }
-      await this.#withRetries(payload, 'handleInvalid', () => this.#handleInvalid(payload, error));
+      await this.#withRetries(payload, {
+        method: 'handleInvalid',
+        operation: () => this.#handleInvalid(payload, error),
+      });
       return;
     }
-    await this.#withRetries(payload, 'deliver', async () => {
-      try {
-        await onMessage(envelope);
-      } catch (error) {
-        // The bus rejected the event for good; redelivering it would block the partition forever.
-        if (!(error instanceof NonRetryableError)) {
-          throw error;
+    await this.#withRetries(payload, {
+      method: 'deliver',
+      operation: async () => {
+        try {
+          await onMessage(envelope);
+        } catch (error) {
+          // The bus rejected the event for good; redelivering it would block the partition forever.
+          if (!(error instanceof NonRetryableError)) {
+            throw error;
+          }
+          await this.#handleInvalid(payload, error);
         }
-        await this.#handleInvalid(payload, error);
-      }
+      },
     });
   }
 
@@ -513,8 +522,7 @@ export class KafkaTransport implements Transport {
    */
   async #withRetries(
     payload: KafkaEachMessagePayload,
-    method: string,
-    operation: () => Promise<void>,
+    { method, operation }: { readonly method: string; readonly operation: () => Promise<void> },
   ): Promise<void> {
     const { maxAttempts, initialBackoffMs, maxBackoffMs } = this.#settings;
     const location = `topic=${payload.topic} partition=${payload.partition} offset=${payload.message.offset}`;

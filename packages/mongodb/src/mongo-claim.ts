@@ -163,7 +163,10 @@ export class MongoClaims {
       const unclaimed = held.map((lane) => ({
         lane,
         ids: lane.inFlight.filter((id) => {
-          const key = leaseKey(id, formatLeaseToken(lane._id, lane.epoch, claimsById.get(id) ?? 0));
+          const key = leaseKey(
+            id,
+            formatLeaseToken(lane._id, { epoch: lane.epoch, claims: claimsById.get(id) ?? 0 }),
+          );
           current.add(key);
           return !this.#state.handedOut.has(key);
         }),
@@ -217,13 +220,12 @@ export class MongoClaims {
     // Read before recording: a failure from here on must not leave picks listed as running.
     const events = await this.#queries.readEnvelopes(picked.map((document) => document.eventId));
     const runningIds = (await running).ids;
-    this.#forgetSettled(held, runningIds, request.leaseOwner);
-    const { recorded, handedBack } = await this.#laneLeases.recordClaim(
-      scope,
+    this.#forgetSettled(held, { runningIds, owner: request.leaseOwner });
+    const { recorded, handedBack } = await this.#laneLeases.recordClaim(scope, {
       picked,
       runningIds,
       request,
-    );
+    });
     const claimed = await this.#releaseOvertaken(
       picked.filter((document) => recorded.has(document.laneId)),
       scope,
@@ -231,11 +233,10 @@ export class MongoClaims {
     await this.#ordering.parkWaiting(scan.waitingBacklogs(PARK_BACKLOG_THRESHOLD, handedBack));
     return claimed.map((document) => ({
       deliveryId: document._id,
-      leaseToken: formatLeaseToken(
-        document.laneId,
-        scope.get(document.laneId)!.epoch,
-        document.claims ?? 0,
-      ),
+      leaseToken: formatLeaseToken(document.laneId, {
+        epoch: scope.get(document.laneId)!.epoch,
+        claims: document.claims ?? 0,
+      }),
       handler: document.handler,
       attempt: document.attempts + 1,
       leaseExpiresAt: request.leaseExpiresAt,
@@ -277,7 +278,10 @@ export class MongoClaims {
     await pickFrom([...scope.values()]);
     const passed = new Set(scope.keys());
     for (let laneCount = INITIAL_LANES_PER_ROUND; picked.length < request.limit; laneCount *= 2) {
-      const free = await this.#laneLeases.findFreeLanes(request, laneCount, [...passed]);
+      const free = await this.#laneLeases.findFreeLanes(request, {
+        laneCount,
+        passed: [...passed],
+      });
       if (free.length === 0) {
         break;
       }
@@ -301,8 +305,7 @@ export class MongoClaims {
    */
   #forgetSettled(
     held: readonly LaneDocument[],
-    runningIds: ReadonlySet<string>,
-    owner: string,
+    { runningIds, owner }: { readonly runningIds: ReadonlySet<string>; readonly owner: string },
   ): void {
     const gone = new Set(
       held.flatMap((lane) =>

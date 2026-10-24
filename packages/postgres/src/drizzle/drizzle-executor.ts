@@ -19,6 +19,7 @@ export interface DrizzleLike extends DrizzleQueryable {
 export function createDrizzleExecutor(database: DrizzleLike): PostgresExecutor<DrizzleQueryable> {
   return {
     transaction: (work) => database.transaction(work),
+    // eslint-disable-next-line relaybus/max-two-params -- PostgresExecutor port signature
     async query(sql, parameters: readonly PostgresParameter[], transaction) {
       const chunks = splitPositionalSql(sql).map((part) =>
         typeof part === 'string'

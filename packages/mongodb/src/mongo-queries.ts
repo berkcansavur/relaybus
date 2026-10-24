@@ -60,7 +60,10 @@ export class MongoQueries {
         const lane = laneById.get(document.laneId);
         const runs =
           document.status === 'pending' && lane?.inFlight.includes(document._id) === true;
-        return toDeliveryRecord(document, events.get(document.eventId)!, runs ? lane : undefined);
+        return toDeliveryRecord(document, {
+          event: events.get(document.eventId)!,
+          runningIn: runs ? lane : undefined,
+        });
       }),
       ...history.map((document) =>
         toCompletedDeliveryRecord(document, events.get(document.eventId)!),

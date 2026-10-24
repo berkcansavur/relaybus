@@ -1,6 +1,7 @@
 import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import logPrefix from './eslint-rules/log-prefix.js';
+import maxTwoParams from './eslint-rules/max-two-params.js';
 
 const ENUM_BAN = {
   selector: 'TSEnumDeclaration',
@@ -110,8 +111,13 @@ export default tseslint.config(
   {
     // Owner's logging rule: a log line names the class and method it is written in.
     files: ['packages/*/src/**/*.ts'],
-    plugins: { relaybus: { rules: { 'log-prefix': logPrefix } } },
-    rules: { 'relaybus/log-prefix': 'error' },
+    plugins: { relaybus: { rules: { 'log-prefix': logPrefix, 'max-two-params': maxTwoParams } } },
+    rules: { 'relaybus/log-prefix': 'error', 'relaybus/max-two-params': 'error' },
+  },
+  {
+    // The store contract suite is a test suite shipped as a function: its test helpers keep their shape.
+    files: ['packages/testing/src/event-store-contract.ts'],
+    rules: { 'relaybus/max-two-params': 'off' },
   },
   {
     files: ['packages/*/test/**/*.ts'],

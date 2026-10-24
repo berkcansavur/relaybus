@@ -91,6 +91,14 @@ written in (`#` dropped; outside a class, the module's main class and the enclos
 by `| key=value` fields. The `relaybus/log-prefix` lint rule (`eslint-rules/log-prefix.js`) enforces it,
 so a log moved into another method must be renamed with it.
 
+## Parameters and timers
+
+A function takes at most two positional parameters (`relaybus/max-two-params`); further ones travel
+in one typed input object. Only public port and API signatures (EventStore, Transport and executor
+methods, published functions) keep more, each exempted on its line with the reason. Timers start
+through `schedule()`/`sleep()` of `@relaybus/core/internal`, never with `setTimeout`/`setInterval`
+directly, so a `Clock` can control them.
+
 ## Commit and PR conventions
 
 Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages and PR titles:

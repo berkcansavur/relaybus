@@ -162,13 +162,19 @@ export function readHeaders(incoming: KafkaIncomingHeaders | undefined): Map<str
     if (typeof raw !== 'string' && !(raw instanceof Uint8Array)) {
       throw invalid(`Header '${name}' is repeated`);
     }
-    headers.set(name, decodeText(raw, PROTOCOL_HEADERS.has(name), `Header '${name}'`));
+    headers.set(
+      name,
+      decodeText(raw, { strict: PROTOCOL_HEADERS.has(name), label: `Header '${name}'` }),
+    );
   }
   return headers;
 }
 
 /** Decodes header or value bytes as UTF-8; `strict` rejects invalid sequences. */
-export function decodeText(raw: KafkaBytes | string, strict: boolean, label: string): string {
+export function decodeText(
+  raw: KafkaBytes | string,
+  { strict, label }: { readonly strict: boolean; readonly label: string },
+): string {
   if (typeof raw === 'string') {
     return raw;
   }
@@ -227,7 +233,7 @@ export function parsePayload(value: KafkaBytes | null): unknown {
   if (value === null) {
     throw invalid('Message has no value');
   }
-  const text = decodeText(value, true, 'Message value');
+  const text = decodeText(value, { strict: true, label: 'Message value' });
   try {
     return JSON.parse(text) as unknown;
   } catch {
@@ -245,7 +251,7 @@ function resolveKey(subject: string | undefined, recordKey: KafkaBytes | null): 
 
 /** The record key as UTF-8 text, or null when the record has none. Invalid UTF-8 is invalid. */
 export function readRecordKey(recordKey: KafkaBytes | null): string | null {
-  return recordKey === null ? null : decodeText(recordKey, true, 'Message key');
+  return recordKey === null ? null : decodeText(recordKey, { strict: true, label: 'Message key' });
 }
 
 /** Headers that are not CloudEvents attributes, with escaped names restored. */

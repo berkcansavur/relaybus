@@ -55,6 +55,7 @@ export class InMemoryTransport implements Transport {
    * a subscriber that rejects up to `maxRedeliveries` times. Resolves with the
    * total number of handler calls.
    */
+  // eslint-disable-next-line relaybus/max-two-params -- public InMemoryTransport.deliver signature
   async deliver(
     destination: string,
     envelope: EventEnvelope,

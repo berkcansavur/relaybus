@@ -293,8 +293,10 @@ export function requireCatalogEntry(catalog: Catalog, event: DomainEvent): Catal
  */
 export function resolveCatalogHandlers<TCatalog extends Catalog, TName extends keyof TCatalog>(
   catalog: TCatalog,
-  handlers: object,
-  options: SubscribeCatalogOptions<TCatalog, TName>,
+  {
+    handlers,
+    options,
+  }: { readonly handlers: object; readonly options: SubscribeCatalogOptions<TCatalog, TName> },
 ): CatalogHandlerBinding[] {
   const { name } = describeCatalog(catalog);
   const { idPrefix, events, ...subscribeOptions } = options;
@@ -336,8 +338,7 @@ function classNameOf(handlers: object): string | undefined {
  */
 function assertExactHandlers(
   catalog: Catalog,
-  entries: readonly CatalogEntry[],
-  handlers: object,
+  { entries, handlers }: { readonly entries: readonly CatalogEntry[]; readonly handlers: object },
 ): void {
   const expected = new Set(entries.map((entry) => entry.handlerName));
   const present = Object.keys(handlers);
@@ -433,12 +434,16 @@ export function defineHandlers<
   handlers: THandlers & MatchingHandlers<TCatalog, keyof TCatalog, THandlers>,
   options?: { readonly events?: undefined },
 ): THandlers;
+// eslint-disable-next-line relaybus/max-two-params -- exported API defineHandlers keeps its public signature
 export function defineHandlers(
   catalog: Catalog,
   handlers: object,
   options: { readonly events?: readonly PropertyKey[] | undefined } = {},
 ): object {
-  assertExactHandlers(catalog, selectCatalogEntries(catalog, options.events), handlers);
+  assertExactHandlers(catalog, {
+    entries: selectCatalogEntries(catalog, options.events),
+    handlers,
+  });
   return handlers;
 }
 

@@ -1,11 +1,3 @@
-import { hostname } from 'node:os';
-import {
-  resolveCatalogHandlers,
-  type Catalog,
-  type CatalogEventSelection,
-  type HandlersOf,
-  type SubscribeCatalogOptions,
-} from './catalog.js';
 import {
   assertCatalogsCovered,
   toCatalogRequirement,
@@ -14,28 +6,24 @@ import {
   type EventTypeRegistrations,
 } from './catalog-coverage.js';
 import { CatalogPublisher } from './catalog-publisher.js';
+import {
+  resolveCatalogHandlers,
+  type Catalog,
+  type CatalogEventSelection,
+  type HandlersOf,
+  type SubscribeCatalogOptions,
+} from './catalog.js';
 import { systemClock, type Clock } from './clock.js';
-import { Dispatcher, type DispatcherSettings } from './dispatcher.js';
-import { assertPositiveInteger } from './internal/validation.js';
-import { schedule, type CancelTimer } from './internal/timers.js';
-import { toMilliseconds, toTimerMilliseconds, type Duration } from './duration.js';
+import { Dispatcher } from './dispatcher.js';
+import { toMilliseconds, type Duration } from './duration.js';
 import {
   ConfigurationError,
-  InvalidEnvelopeError,
   DrainIncompleteError,
+  InvalidEnvelopeError,
   LifecycleError,
   TransactionRequiredError,
   toErrorInfo,
 } from './errors.js';
-import {
-  assertEventType,
-  validatePayload,
-  type DomainEvent,
-  type EventClass,
-  type EventEnvelope,
-  type EventHeaders,
-  type EventReference,
-} from './event.js';
 import type {
   AppendEntry,
   DeliveryQuery,
@@ -45,6 +33,15 @@ import type {
   NewDelivery,
   PurgeResult,
 } from './event-store.js';
+import {
+  assertEventType,
+  validatePayload,
+  type DomainEvent,
+  type EventClass,
+  type EventEnvelope,
+  type EventHeaders,
+  type EventReference,
+} from './event.js';
 import { getCurrentScope, runInScope, type ExecutionScope } from './execution-scope.js';
 import {
   HandlerRegistry,
@@ -55,13 +52,18 @@ import {
   type SubscribeOptions,
 } from './handler-registry.js';
 import { createUuidV7, type IdentifierGenerator } from './identifier.js';
+import { schedule, type CancelTimer } from './internal/timers.js';
 import { Notifier } from './notifier.js';
 import type { RelayBusLogger, RelayBusObserver } from './observer.js';
 import {
-  DEFAULT_ROUTE_RETRY_POLICY,
-  createRetryPolicy,
-  type RetryPolicyOptions,
-} from './retry-policy.js';
+  DEFAULTS,
+  createDispatcherSettings,
+  createHandlerDefaults,
+  createRetentionSettings,
+  isDispatcherEnabled,
+  oneOf,
+} from './relay-bus-settings.js';
+import { DEFAULT_ROUTE_RETRY_POLICY, type RetryPolicyOptions } from './retry-policy.js';
 import type { StandardSchemaV1 } from './standard-schema.js';
 import type { Transport } from './transport.js';
 
@@ -214,18 +216,6 @@ export type ReceiveStatus = 'accepted' | 'duplicate' | 'ignored';
 
 type BusState = 'idle' | 'starting' | 'running' | 'stopping' | 'stopped';
 
-const DEFAULTS = {
-  concurrency: 10,
-  pollInterval: '1s',
-  leaseDuration: '30s',
-  shutdownTimeout: '30s',
-  completionBatchWindow: '2ms',
-  completionBatchSize: 200,
-  completedRetention: '7d',
-  retentionInterval: '1h',
-  routeTimeoutMs: 30_000,
-} as const;
-
 const TRANSPORT_HANDLER_PREFIX = 'relaybus.transport';
 /** Batches `drain` runs at most before it gives up. */
 const DEFAULT_DRAIN_BATCHES = 1_000;
@@ -292,16 +282,14 @@ export class RelayBus<TTransaction = unknown> {
   constructor(options: RelayBusOptions<TTransaction>) {
     this.#store = options.store;
     this.#source = options.source ?? 'relaybus';
-    this.#transactionMode = oneOf(
-      options.transactionMode ?? 'required',
-      ['required', 'optional'],
-      'transactionMode',
-    );
-    this.#unroutedEvents = oneOf(
-      options.unroutedEvents ?? 'warn',
-      ['warn', 'throw'],
-      'unroutedEvents',
-    );
+    this.#transactionMode = oneOf(options.transactionMode ?? 'required', {
+      allowed: ['required', 'optional'],
+      name: 'transactionMode',
+    });
+    this.#unroutedEvents = oneOf(options.unroutedEvents ?? 'warn', {
+      allowed: ['warn', 'throw'],
+      name: 'unroutedEvents',
+    });
     this.#transactionResolver = options.transactionResolver;
     this.#defaults = createHandlerDefaults(options);
     this.#logger = options.logger ?? console;
@@ -385,6 +373,7 @@ export class RelayBus<TTransaction = unknown> {
     handler: EventHandler<unknown, TTransaction>,
     options: SubscribeOptions,
   ): void;
+  // eslint-disable-next-line relaybus/max-two-params -- public RelayBus.subscribe signature
   subscribe(
     event: EventClass<unknown> | string,
     handler: EventHandler<unknown, TTransaction>,
@@ -430,12 +419,13 @@ export class RelayBus<TTransaction = unknown> {
     handlers: HandlersOf<TCatalog, keyof TCatalog, TTransaction>,
     options?: SubscribeCatalogOptions<NoInfer<TCatalog>>,
   ): void;
+  // eslint-disable-next-line relaybus/max-two-params -- public RelayBus.subscribeCatalog signature
   subscribeCatalog<TCatalog extends Catalog>(
     catalog: TCatalog,
     handlers: object,
     options: SubscribeCatalogOptions<TCatalog, keyof TCatalog> = {},
   ): void {
-    for (const binding of resolveCatalogHandlers(catalog, handlers, options)) {
+    for (const binding of resolveCatalogHandlers(catalog, { handlers, options })) {
       this.subscribe(binding.eventClass as EventClass<unknown>, binding.handle, binding.options);
     }
   }
@@ -476,7 +466,7 @@ export class RelayBus<TTransaction = unknown> {
     event: DomainEvent<TPayload>,
     options: PublishOneOptions<TTransaction> = {},
   ): Promise<EventEnvelope<TPayload>> {
-    const [envelope] = await this.#publish([event], options, options.id);
+    const [envelope] = await this.#publish([event], { options, id: options.id });
     return envelope as EventEnvelope<TPayload>;
   }
 
@@ -485,7 +475,7 @@ export class RelayBus<TTransaction = unknown> {
     events: readonly DomainEvent[],
     options: PublishOptions<TTransaction> = {},
   ): Promise<EventEnvelope[]> {
-    return this.#publish(events, options, undefined);
+    return this.#publish(events, { options, id: undefined });
   }
 
   /**
@@ -686,8 +676,10 @@ export class RelayBus<TTransaction = unknown> {
 
   async #publish(
     events: readonly DomainEvent[],
-    options: PublishOptions<TTransaction>,
-    id: string | undefined,
+    {
+      options,
+      id,
+    }: { readonly options: PublishOptions<TTransaction>; readonly id: string | undefined },
   ): Promise<EventEnvelope[]> {
     if (events.length === 0) {
       return [];
@@ -736,7 +728,7 @@ export class RelayBus<TTransaction = unknown> {
   /** Appends the entries that have deliveries, reports what was new and wakes the dispatcher when it is due now. */
   async #appendDeliverable(input: AppendDeliverableInput<TTransaction>): Promise<void> {
     const { entries, options, scope, now, delayMs } = input;
-    const result = await this.#appendInTransaction(entries, options, scope, now);
+    const result = await this.#appendInTransaction(entries, { options, scope, now });
     const appended = new Set(result.appendedEventIds);
     const published = entries
       .map((entry) => entry.event)
@@ -762,9 +754,15 @@ export class RelayBus<TTransaction = unknown> {
 
   async #appendInTransaction(
     entries: readonly AppendEntry[],
-    options: PublishOptions<TTransaction>,
-    scope: ExecutionScope | undefined,
-    now: Date,
+    {
+      options,
+      scope,
+      now,
+    }: {
+      readonly options: PublishOptions<TTransaction>;
+      readonly scope: ExecutionScope | undefined;
+      readonly now: Date;
+    },
   ): Promise<{ appendedEventIds: readonly string[]; appendedDeliveryCount: number }> {
     const transaction =
       options.transaction ??
@@ -938,91 +936,4 @@ function toDate(value: Date | string): Date | undefined {
 
 function optionalText(value: string | null | undefined): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
-}
-
-function oneOf<T extends string>(value: T, allowed: readonly T[], name: string): T {
-  if (!allowed.includes(value)) {
-    throw new ConfigurationError(
-      `${name} must be one of ${allowed.map((option) => `'${option}'`).join(', ')}, received '${String(value)}'`,
-    );
-  }
-  return value;
-}
-
-function isDispatcherEnabled<TTransaction>(options: RelayBusOptions<TTransaction>): boolean {
-  return options.dispatcher?.enabled ?? true;
-}
-
-function createHandlerDefaults<TTransaction>(
-  options: RelayBusOptions<TTransaction>,
-): RegistrationDefaults {
-  return {
-    retry: createRetryPolicy(options.retry),
-    timeoutMs:
-      options.handlerTimeout === undefined || options.handlerTimeout === false
-        ? null
-        : toTimerMilliseconds(options.handlerTimeout, 'handlerTimeout'),
-  };
-}
-
-function createDispatcherSettings(
-  options: DispatcherOptions | undefined,
-  generateIdentifier: IdentifierGenerator,
-): DispatcherSettings {
-  const dispatcher: DispatcherOptions = options ?? {};
-  const concurrency = assertPositiveInteger(
-    dispatcher.concurrency ?? DEFAULTS.concurrency,
-    'dispatcher.concurrency',
-  );
-  return {
-    owner: `${hostname()}:${process.pid}:${generateIdentifier()}`,
-    concurrency,
-    batchSize: assertPositiveInteger(dispatcher.batchSize ?? concurrency, 'dispatcher.batchSize'),
-    ...createDispatcherTimings(dispatcher),
-  };
-}
-
-/** The intervals and completion batching of the dispatcher, validated in declaration order. */
-function createDispatcherTimings(
-  dispatcher: DispatcherOptions,
-): Omit<DispatcherSettings, 'owner' | 'concurrency' | 'batchSize'> {
-  return {
-    pollIntervalMs: toTimerMilliseconds(
-      dispatcher.pollInterval ?? DEFAULTS.pollInterval,
-      'dispatcher.pollInterval',
-    ),
-    leaseDurationMs: toTimerMilliseconds(
-      dispatcher.leaseDuration ?? DEFAULTS.leaseDuration,
-      'dispatcher.leaseDuration',
-    ),
-    shutdownTimeoutMs: toTimerMilliseconds(
-      dispatcher.shutdownTimeout ?? DEFAULTS.shutdownTimeout,
-      'dispatcher.shutdownTimeout',
-    ),
-    completionBatchWindowMs: toMilliseconds(
-      dispatcher.completionBatchWindow ?? DEFAULTS.completionBatchWindow,
-      'dispatcher.completionBatchWindow',
-    ),
-    completionBatchSize: assertPositiveInteger(
-      dispatcher.completionBatchSize ?? DEFAULTS.completionBatchSize,
-      'dispatcher.completionBatchSize',
-    ),
-  };
-}
-
-function createRetentionSettings(options: RetentionOptions | undefined): {
-  completedMs: number | null;
-  deadMs: number | null;
-  intervalMs: number;
-} {
-  const completed = options?.completed ?? DEFAULTS.completedRetention;
-  const dead = options?.dead ?? false;
-  return {
-    completedMs: completed === false ? null : toMilliseconds(completed, 'retention.completed'),
-    deadMs: dead === false ? null : toMilliseconds(dead, 'retention.dead'),
-    intervalMs: toTimerMilliseconds(
-      options?.interval ?? DEFAULTS.retentionInterval,
-      'retention.interval',
-    ),
-  };
 }

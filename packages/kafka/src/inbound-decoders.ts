@@ -212,23 +212,26 @@ export function plainJsonDecoder(options: PlainJsonDecoderOptions): KafkaMessage
       payload: parsePayload(record.value),
       timestamp: record.timestamp,
     };
-    const type = resolveText(options.type, plain, 'type');
+    const type = resolveText(options.type, { record: plain, name: 'type' });
     if (type === undefined) {
       throw invalid('Record has no event type: the type option found none');
     }
     assertValidType(type, 'The event type');
     return {
       id:
-        resolveText(options.id, plain, 'id') ??
+        resolveText(options.id, { record: plain, name: 'id' }) ??
         `kafka:${record.topic}:${record.partition}:${record.offset}`,
       type,
-      source: resolveText(options.source, plain, 'source') ?? record.topic,
-      key: options.key === undefined ? plain.key : (resolveText(options.key, plain, 'key') ?? null),
+      source: resolveText(options.source, { record: plain, name: 'source' }) ?? record.topic,
+      key:
+        options.key === undefined
+          ? plain.key
+          : (resolveText(options.key, { record: plain, name: 'key' }) ?? null),
       payload: plain.payload,
       headers,
       correlationId: null,
       causationId: null,
-      occurredAt: resolveOccurredAt(options.occurredAt, plain, record),
+      occurredAt: resolveOccurredAt(options.occurredAt, { plain, record }),
     };
   };
 }
@@ -320,8 +323,7 @@ function readKeyLeniently(key: KafkaBytes | null): string | null {
 
 function resolveText<TValue extends string | null>(
   option: TValue | ((record: PlainJsonRecord) => TValue | undefined) | undefined,
-  record: PlainJsonRecord,
-  name: string,
+  { record, name }: { readonly record: PlainJsonRecord; readonly name: string },
 ): string | undefined {
   const value: unknown = typeof option === 'function' ? option(record) : option;
   if (value === undefined || value === null) {
@@ -336,8 +338,7 @@ function resolveText<TValue extends string | null>(
 
 function resolveOccurredAt(
   option: PlainJsonDecoderOptions['occurredAt'],
-  plain: PlainJsonRecord,
-  record: KafkaInboundRecord,
+  { plain, record }: { readonly plain: PlainJsonRecord; readonly record: KafkaInboundRecord },
 ): Date {
   const value: unknown = option?.(plain);
   if (value === undefined) {

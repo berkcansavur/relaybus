@@ -177,9 +177,15 @@ export interface KeySequenceDocument {
  */
 export function toEventDocument(
   event: EventEnvelope,
-  sequence: number | null,
-  handlers: readonly string[],
-  createdAt: Date,
+  {
+    sequence,
+    handlers,
+    createdAt,
+  }: {
+    readonly sequence: number | null;
+    readonly handlers: readonly string[];
+    readonly createdAt: Date;
+  },
 ): EventDocument {
   const payloadJson = serializeWellFormed(event.payload, 'payload');
   const headersJson = serializeWellFormed(event.headers, 'headers')!;
@@ -239,9 +245,15 @@ export function toEnvelope(document: EventDocument): EventEnvelope {
 /** A new pending delivery of `event`, placed in the lane of the event's key (or id). */
 export function toDeliveryDocument(
   delivery: NewDelivery,
-  event: Pick<EventEnvelope, 'id' | 'type'>,
-  ordering: { readonly key: string | null; readonly sequence: number | null },
-  now: Date,
+  {
+    event,
+    ordering,
+    now,
+  }: {
+    readonly event: Pick<EventEnvelope, 'id' | 'type'>;
+    readonly ordering: { readonly key: string | null; readonly sequence: number | null };
+    readonly now: Date;
+  },
 ): DeliveryDocument {
   return {
     _id: delivery.id,
@@ -269,8 +281,10 @@ export function toDeliveryDocument(
  */
 export function toDeliveryRecord(
   document: DeliveryDocument,
-  event: EventEnvelope,
-  runningIn: LaneDocument | undefined,
+  {
+    event,
+    runningIn,
+  }: { readonly event: EventEnvelope; readonly runningIn: LaneDocument | undefined },
 ): DeliveryRecord {
   return {
     id: document._id,

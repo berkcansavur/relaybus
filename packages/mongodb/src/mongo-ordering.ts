@@ -102,7 +102,7 @@ export class MongoOrdering {
       offset += slice.length;
       await this.#notePredecessors(slice, scan);
       for (const candidate of slice) {
-        if (isClaimable(candidate, scan, keys)) {
+        if (isClaimable(candidate, { scan, blockedKeys: keys })) {
           picked.push(candidate);
         }
       }
@@ -133,11 +133,10 @@ export class MongoOrdering {
     }
     await Promise.all(
       [...earliest].map(async ([orderingId, candidate]) => {
-        const predecessor = await this.#findUnfinishedPredecessor(
-          candidate.handler,
-          candidate.key!,
-          candidate.sequence!,
-        );
+        const predecessor = await this.#findUnfinishedPredecessor(candidate.handler, {
+          key: candidate.key!,
+          sequence: candidate.sequence!,
+        });
         scan.noteOpen(orderingId, predecessor ?? candidate.sequence!);
       }),
     );
@@ -161,8 +160,7 @@ export class MongoOrdering {
   /** Sequence of the lowest unfinished delivery of the handler and key before `sequence`, if any. */
   async #findUnfinishedPredecessor(
     handler: string,
-    key: string,
-    sequence: number,
+    { key, sequence }: { readonly key: string; readonly sequence: number },
   ): Promise<number | undefined> {
     const predecessor = await this.#state.deliveries.findOne(
       { handler, key, sequence: { $lt: sequence }, dueAt: { $exists: true } },
@@ -227,8 +225,10 @@ export class MongoOrdering {
     ).flat();
     const next = await Promise.all(
       lowest.map(async (parked) =>
-        (await this.#findUnfinishedPredecessor(parked.handler, parked._id, parked.sequence)) ===
-        undefined
+        (await this.#findUnfinishedPredecessor(parked.handler, {
+          key: parked._id,
+          sequence: parked.sequence,
+        })) === undefined
           ? [parked.id]
           : [],
       ),
@@ -251,8 +251,7 @@ export class MongoOrdering {
  */
 function isClaimable(
   candidate: DeliveryDocument,
-  scan: ClaimScan,
-  blockedKeys: Set<string>,
+  { scan, blockedKeys }: { readonly scan: ClaimScan; readonly blockedKeys: Set<string> },
 ): boolean {
   const { key, sequence } = candidate;
   if (key === undefined) {
@@ -260,7 +259,7 @@ function isClaimable(
   }
   const orderingId = orderingIdentity(candidate.handler, key);
   if (scan.waits(orderingId, sequence!)) {
-    scan.noteWaiting(orderingId, candidate._id, candidate.laneId);
+    scan.noteWaiting(orderingId, { deliveryId: candidate._id, laneId: candidate.laneId });
     return false;
   }
   if (blockedKeys.has(orderingId)) {

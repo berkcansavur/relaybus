@@ -49,8 +49,7 @@ export class MongoAppend {
   /** Implements {@link MongoEventStore.append}. */
   async append(
     session: ClientSession,
-    entries: readonly AppendEntry[],
-    now: Date,
+    { entries, now }: { readonly entries: readonly AppendEntry[]; readonly now: Date },
   ): Promise<AppendResult> {
     assertInTransaction(session, 'append');
     const eventIds = [...new Set(entries.map((entry) => entry.event.id))];
@@ -120,7 +119,7 @@ export class MongoAppend {
         }
         handlers.add(delivery.handler);
         addedHandlers.set(event.id, [...(addedHandlers.get(event.id) ?? []), delivery.handler]);
-        newDeliveries.push(toDeliveryDocument(delivery, event, ordering, now));
+        newDeliveries.push(toDeliveryDocument(delivery, { event, ordering, now }));
       }
     }
     return { appendedEventIds, duplicateEventIds, newEvents, newDeliveries, addedHandlers };
@@ -135,7 +134,11 @@ export class MongoAppend {
       // whereas a concurrent writer of the same id surfaces as a retryable write conflict.
       await this.#state.events.bulkWrite(
         newEvents.map(({ event, sequence }) => {
-          const document = toEventDocument(event, sequence, addedHandlers.get(event.id) ?? [], now);
+          const document = toEventDocument(event, {
+            sequence,
+            handlers: addedHandlers.get(event.id) ?? [],
+            createdAt: now,
+          });
           return {
             updateOne: {
               filter: { _id: document._id },

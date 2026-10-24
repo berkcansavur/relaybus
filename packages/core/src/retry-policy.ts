@@ -118,6 +118,7 @@ function assertValidRetryPolicy(policy: RetryPolicy): void {
  * Delay before the next attempt after `failedAttempts` failures (1-based):
  * capped exponential backoff with the policy's jitter.
  */
+// eslint-disable-next-line relaybus/max-two-params -- exported API computeRetryDelay keeps its public signature
 export function computeRetryDelay(
   policy: RetryPolicy,
   failedAttempts: number,

@@ -161,7 +161,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       logger,
       queryOptions,
       notifies: wakeUp === 'notify',
-      query: (sql, parameters, transaction) =>
+      query: ({ sql, parameters, transaction }) =>
         executor.query(sql, parameters, transaction, queryOptions),
       handedOut: new Map(),
       unreconciled: new Set(),
@@ -249,12 +249,13 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
    * A duplicate event id still consumes a sequence number; gaps are harmless
    * because only the order of sequences matters.
    */
+  // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   append(
     transaction: TTransaction,
     entries: readonly AppendEntry[],
     now: Date,
   ): Promise<AppendResult> {
-    return this.#appender.append(transaction, entries, now);
+    return this.#appender.append(transaction, { entries, now });
   }
 
   /**
@@ -277,25 +278,28 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     return this.#completion.extendLease(lease, leaseExpiresAt);
   }
 
+  // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   complete(lease: LeaseReference, now: Date, transaction?: TTransaction): Promise<boolean> {
-    return this.#completion.complete(lease, now, transaction);
+    return this.#completion.complete(lease, { now, transaction });
   }
 
   completeMany(leases: readonly LeaseReference[], now: Date): Promise<boolean[]> {
     return this.#completion.completeMany(leases, now);
   }
 
+  // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   reschedule(
     lease: LeaseReference,
     availableAt: Date,
     error: ErrorInfo,
     now: Date,
   ): Promise<boolean> {
-    return this.#completion.reschedule(lease, availableAt, error, now);
+    return this.#completion.reschedule(lease, { availableAt, error, now });
   }
 
+  // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   bury(lease: LeaseReference, error: ErrorInfo, now: Date): Promise<boolean> {
-    return this.#completion.bury(lease, error, now);
+    return this.#completion.bury(lease, { error, now });
   }
 
   /** Returns a leased delivery to pending, due now, without counting the attempt. */

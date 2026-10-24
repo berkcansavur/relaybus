@@ -223,12 +223,13 @@ export class MongoEventStore implements EventStore<ClientSession> {
    * together with a `revision` increment, a real write that makes a concurrent
    * purge of the event conflict with this transaction.
    */
+  // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   append(
     session: ClientSession,
     entries: readonly AppendEntry[],
     now: Date,
   ): Promise<AppendResult> {
-    return this.#appender.append(session, entries, now);
+    return this.#appender.append(session, { entries, now });
   }
 
   /**
@@ -260,8 +261,9 @@ export class MongoEventStore implements EventStore<ClientSession> {
    * never shrinks, so a repeated renewal with the same value still holds. An
    * expired lease nobody took over is still renewed, so `_now` is not needed.
    */
+  // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   extendLease(lease: LeaseReference, leaseExpiresAt: Date, _now?: Date): Promise<boolean> {
-    return this.#completion.extendLease(lease, leaseExpiresAt, _now);
+    return this.#completion.extendLease(lease, leaseExpiresAt);
   }
 
   /**
@@ -269,8 +271,9 @@ export class MongoEventStore implements EventStore<ClientSession> {
    * With `session` the deletion commits with the caller's transaction; without,
    * it runs in a transaction of its own. Returns false when the lease was lost.
    */
+  // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   complete(lease: LeaseReference, now: Date, session?: ClientSession): Promise<boolean> {
-    return this.#completion.complete(lease, now, session);
+    return this.#completion.complete(lease, { now, session });
   }
 
   /**
@@ -285,13 +288,14 @@ export class MongoEventStore implements EventStore<ClientSession> {
   }
 
   /** Returns a running delivery to pending, due at `availableAt`, and counts the attempt that ended. */
+  // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   reschedule(
     lease: LeaseReference,
     availableAt: Date,
     error: ErrorInfo,
     now: Date,
   ): Promise<boolean> {
-    return this.#completion.reschedule(lease, availableAt, error, now);
+    return this.#completion.reschedule(lease, { availableAt, error, now });
   }
 
   /** Gives a running delivery back without counting the attempt: pending, due `now`. */
@@ -300,8 +304,9 @@ export class MongoEventStore implements EventStore<ClientSession> {
   }
 
   /** Moves a running delivery to dead and counts the attempt that ended. */
+  // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   bury(lease: LeaseReference, error: ErrorInfo, now: Date): Promise<boolean> {
-    return this.#completion.bury(lease, error, now);
+    return this.#completion.bury(lease, { error, now });
   }
 
   /**

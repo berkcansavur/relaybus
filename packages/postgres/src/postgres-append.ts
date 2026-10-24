@@ -60,24 +60,23 @@ export class PostgresAppend<TTransaction> {
   /** Implements {@link PostgresEventStore.append}. */
   async append(
     transaction: TTransaction,
-    entries: readonly AppendEntry[],
-    now: Date,
+    { entries, now }: { readonly entries: readonly AppendEntry[]; readonly now: Date },
   ): Promise<AppendResult> {
     const plan = planAppend(entries);
     if (plan.events.length === 0) {
       return { appendedEventIds: [], duplicateEventIds: [], appendedDeliveryCount: 0 };
     }
     const createdAt = now.toISOString();
-    const wakeAt = this.#wakeAt(plan.deliveries, now, transaction);
+    const wakeAt = this.#wakeAt(plan.deliveries, { now, transaction });
     const handlersByEvent = handlersByEventOf(plan.deliveries);
     const keyCounts = keyCountsOf(plan.events);
-    const fresh = await this.#state.query(
-      this.#state.statements.append.insertFreshEvents,
-      [
+    const fresh = await this.#state.query({
+      sql: this.#state.statements.append.insertFreshEvents,
+      parameters: [
         JSON.stringify(
           plan.events.map((event, ordinal) => ({
             ordinal,
-            ...toEventRow(event, null, handlersByEvent.get(event.id) ?? []),
+            ...toEventRow(event, { sequence: null, handlers: handlersByEvent.get(event.id) ?? [] }),
           })),
         ),
         createdAt,
@@ -86,7 +85,7 @@ export class PostgresAppend<TTransaction> {
         wakeAt,
       ],
       transaction,
-    );
+    });
     const insertedEventIds = new Set(
       fresh.filter((row) => row['inserted'] === true).map((row) => row['id'] as string),
     );
@@ -115,7 +114,10 @@ export class PostgresAppend<TTransaction> {
    * does; the others leave the wake-up to {@link #wakeAfterCommit}, which runs once their transaction
    * committed, so no committed delivery waits for the poll.
    */
-  #wakeAt(deliveries: readonly DeliveryRow[], now: Date, transaction: TTransaction): string | null {
+  #wakeAt(
+    deliveries: readonly DeliveryRow[],
+    { now, transaction }: { readonly now: Date; readonly transaction: TTransaction },
+  ): string | null {
     if (
       !this.#state.notifies ||
       !deliveries.some((delivery) => Date.parse(delivery.available_at) <= now.getTime())
@@ -152,11 +154,13 @@ export class PostgresAppend<TTransaction> {
           return;
         }
         this.#state.lastNotificationAt = Date.now();
-        this.#state.query(this.#state.statements.append.notify, []).catch((error: unknown) => {
-          this.#state.logger.error(
-            `[PostgresAppend](wakeAfterCommit) Waking the dispatchers failed, they find the deliveries when they poll | error=${error instanceof Error ? error.message : String(error)}`,
-          );
-        });
+        this.#state
+          .query({ sql: this.#state.statements.append.notify, parameters: [] })
+          .catch((error: unknown) => {
+            this.#state.logger.error(
+              `[PostgresAppend](wakeAfterCommit) Waking the dispatchers failed, they find the deliveries when they poll | error=${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
       },
       delayMs: Math.max(0, this.#state.lastNotificationAt + NOTIFICATION_INTERVAL_MS - Date.now()),
     });
@@ -182,25 +186,28 @@ export class PostgresAppend<TTransaction> {
     let existing = plan.events
       .filter((event) => !insertedEventIds.has(event.id))
       .map((event) =>
-        toEventRow(event, sequences.get(event.id)!, handlersByEvent.get(event.id) ?? []),
+        toEventRow(event, {
+          sequence: sequences.get(event.id)!,
+          handlers: handlersByEvent.get(event.id) ?? [],
+        }),
       );
     while (existing.length > 0) {
       const locked = new Set(
         (
-          await this.#state.query(
-            this.#state.statements.append.lockExistingEvents,
-            [JSON.stringify(existing.map((row) => row.id).sort())],
+          await this.#state.query({
+            sql: this.#state.statements.append.lockExistingEvents,
+            parameters: [JSON.stringify(existing.map((row) => row.id).sort())],
             transaction,
-          )
+          })
         ).map((row) => row['id'] as string),
       );
       const gone = existing.filter((row) => !locked.has(row.id));
       if (gone.length > 0) {
-        const inserted = await this.#state.query(
-          this.#state.statements.append.insertEvents,
-          [JSON.stringify(gone), createdAt],
+        const inserted = await this.#state.query({
+          sql: this.#state.statements.append.insertEvents,
+          parameters: [JSON.stringify(gone), createdAt],
           transaction,
-        );
+        });
         for (const row of inserted) {
           insertedEventIds.add(row['id'] as string);
           reinserted.push(row['id'] as string);
@@ -208,11 +215,11 @@ export class PostgresAppend<TTransaction> {
       }
       existing = gone.filter((row) => !insertedEventIds.has(row.id));
     }
-    const inserted = await this.#state.query(
-      this.#state.statements.append.insertDeliveries,
-      [JSON.stringify(deliveries), createdAt, JSON.stringify(reinserted), wakeAt],
+    const inserted = await this.#state.query({
+      sql: this.#state.statements.append.insertDeliveries,
+      parameters: [JSON.stringify(deliveries), createdAt, JSON.stringify(reinserted), wakeAt],
       transaction,
-    );
+    });
     return inserted.length;
   }
 }
@@ -256,8 +263,10 @@ function planAppend(entries: readonly AppendEntry[]): AppendPlan {
 
 function toEventRow(
   event: EventEnvelope,
-  sequence: string | null,
-  handlers: readonly string[],
+  {
+    sequence,
+    handlers,
+  }: { readonly sequence: string | null; readonly handlers: readonly string[] },
 ): EventRow {
   return {
     id: event.id,

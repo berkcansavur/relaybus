@@ -26,29 +26,26 @@ export class MongoPurge {
     const { completedBefore, deadBefore } = request;
     if (completedBefore !== undefined) {
       steps.push(() =>
-        this.#purgeMatching(
-          this.#purgeable(this.#state.deliveries.collectionName),
-          { status: 'completed', completedAt: { $lt: completedBefore } },
+        this.#purgeMatching(this.#purgeable(this.#state.deliveries.collectionName), {
+          filter: { status: 'completed', completedAt: { $lt: completedBefore } },
           completedBefore,
-        ),
+        }),
       );
       if (this.#state.completionHistory) {
         steps.push(() =>
-          this.#purgeMatching(
-            this.#purgeable(this.#state.completions.collectionName),
-            { completedAt: { $lt: completedBefore } },
+          this.#purgeMatching(this.#purgeable(this.#state.completions.collectionName), {
+            filter: { completedAt: { $lt: completedBefore } },
             completedBefore,
-          ),
+          }),
         );
       }
     }
     if (deadBefore !== undefined) {
       steps.push(() =>
-        this.#purgeMatching(
-          this.#purgeable(this.#state.deliveries.collectionName),
-          { status: 'dead', updatedAt: { $lt: deadBefore } },
+        this.#purgeMatching(this.#purgeable(this.#state.deliveries.collectionName), {
+          filter: { status: 'dead', updatedAt: { $lt: deadBefore } },
           completedBefore,
-        ),
+        }),
       );
     }
     for (const step of steps) {
@@ -76,8 +73,10 @@ export class MongoPurge {
    */
   async #purgeMatching(
     collection: Collection<PurgeableDocument>,
-    filter: Filter<PurgeableDocument>,
-    completedBefore: Date | undefined,
+    {
+      filter,
+      completedBefore,
+    }: { readonly filter: Filter<PurgeableDocument>; readonly completedBefore: Date | undefined },
   ): Promise<PurgeResult> {
     let deletedDeliveries = 0;
     let deletedEvents = 0;

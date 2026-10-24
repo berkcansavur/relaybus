@@ -16,27 +16,24 @@ export class PurgeStatements {
    * on, or being waited on by, anything.
    */
   purgeCompletedBatch(): string {
-    return this.#purgeBatch(
-      this.#names.deliveries,
-      `status = 'completed' AND completed_at < $1::timestamptz`,
-      'completed_at',
-    );
+    return this.#purgeBatch(this.#names.deliveries, {
+      condition: `status = 'completed' AND completed_at < $1::timestamptz`,
+      orderColumn: 'completed_at',
+    });
   }
 
   purgeCompletionHistoryBatch(): string {
-    return this.#purgeBatch(
-      this.#names.completions,
-      `completed_at < $1::timestamptz`,
-      'completed_at',
-    );
+    return this.#purgeBatch(this.#names.completions, {
+      condition: `completed_at < $1::timestamptz`,
+      orderColumn: 'completed_at',
+    });
   }
 
   purgeDeadBatch(): string {
-    return this.#purgeBatch(
-      this.#names.deliveries,
-      `status = 'dead' AND updated_at < $1::timestamptz`,
-      'updated_at',
-    );
+    return this.#purgeBatch(this.#names.deliveries, {
+      condition: `status = 'dead' AND updated_at < $1::timestamptz`,
+      orderColumn: 'updated_at',
+    });
   }
 
   /**
@@ -120,7 +117,10 @@ WHERE event.id = ANY (ARRAY(SELECT jsonb_array_elements_text($1::jsonb)))
     return `NOT EXISTS (SELECT 1 FROM ${this.#names.deliveries} AS delivery WHERE delivery.event_id = ${eventAlias}.id)${history}`;
   }
 
-  #purgeBatch(table: string, condition: string, orderColumn: string): string {
+  #purgeBatch(
+    table: string,
+    { condition, orderColumn }: { readonly condition: string; readonly orderColumn: string },
+  ): string {
     return `WITH batch AS MATERIALIZED (
   SELECT id FROM ${table}
   WHERE ${condition}

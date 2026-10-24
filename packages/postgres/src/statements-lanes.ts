@@ -134,7 +134,7 @@ export class LaneStatements {
   CROSS JOIN LATERAL unnest(held_scope.in_flight) AS flying (id)
   JOIN ${deliveries} AS delivery ON delivery.id = flying.id
   WHERE delivery.status = 'pending' AND delivery.key IS NOT NULL
-), ${this.#candidates('held', 'held_scope', 'held_running', '$3::int')}, wanted AS MATERIALIZED (
+), ${this.#candidates('held', { scope: 'held_scope', running: 'held_running', limit: '$3::int' })}, wanted AS MATERIALIZED (
   SELECT CASE WHEN (SELECT value FROM stale) THEN 0
     ELSE $3::int - (SELECT count(*) FROM held_candidates)::int END AS count
 `;
@@ -226,7 +226,7 @@ export class LaneStatements {
   WHERE locked.epoch = seen.epoch AND locked.in_flight = seen.in_flight
     AND locked.lease_owner IS NOT DISTINCT FROM seen.lease_owner
     AND locked.lease_expires_at IS NOT DISTINCT FROM seen.lease_expires_at
-), ${this.#candidates('free', 'free_scope', null, '(SELECT count FROM wanted)')}`;
+), ${this.#candidates('free', { scope: 'free_scope', running: null, limit: '(SELECT count FROM wanted)' })}`;
   }
 
   /** The picked deliveries of held and taken lanes with their events, and the picks per lane. */
@@ -330,7 +330,14 @@ ORDER BY picked.due_at, picked.delivery_id`;
    * scan over the heads of all their keys. `running` names the CTE of the keyed deliveries running in the
    * lanes, or is null when nothing runs there.
    */
-  #candidates(prefix: string, scope: string, running: string | null, limit: string): string {
+  #candidates(
+    prefix: string,
+    {
+      scope,
+      running,
+      limit,
+    }: { readonly scope: string; readonly running: string | null; readonly limit: string },
+  ): string {
     const spec: CandidateSpec = { prefix, scope, running, limit };
     return this.#fastCandidates(spec) + this.#slowCandidates(spec);
   }

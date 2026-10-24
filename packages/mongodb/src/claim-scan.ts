@@ -35,7 +35,10 @@ export class ClaimScan {
   }
 
   /** Remembers a pending delivery of lane `laneId` that waited behind an unfinished predecessor. */
-  noteWaiting(orderingId: string, deliveryId: string, laneId: number): void {
+  noteWaiting(
+    orderingId: string,
+    { deliveryId, laneId }: { readonly deliveryId: string; readonly laneId: number },
+  ): void {
     const known = this.#know(orderingId);
     known.waiting.push(deliveryId);
     known.laneId = laneId;

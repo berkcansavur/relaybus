@@ -178,7 +178,7 @@ export class RabbitMqTransport implements Transport {
         cancelTimeout();
         const returned = takeUnroutable(publisher.unroutable, returnKey);
         if (error) {
-          reject(this.#toPublishError(error, eventId, routingKey));
+          reject(this.#toPublishError(error, { eventId, destination: routingKey }));
         } else if (returned) {
           reject(
             new UnroutableMessageError(
@@ -199,7 +199,7 @@ export class RabbitMqTransport implements Transport {
         );
       } catch (error) {
         cancelTimeout();
-        reject(this.#toPublishError(error, eventId, routingKey));
+        reject(this.#toPublishError(error, { eventId, destination: routingKey }));
       }
     });
   }
@@ -242,7 +242,7 @@ export class RabbitMqTransport implements Transport {
         redeliveryMaxAgeMs: this.#settings.redeliveryMaxAgeMs,
         ordered: this.#settings.ordered,
         deadLetterExchange: this.#settings.deadLetterExchange,
-        republish: (exchange, routingKey, content, options) =>
+        republish: ({ exchange, routingKey }, { content, options }) =>
           this.#publishConfirmed({ exchange, routingKey, content, options, mandatory: true }),
         shutdownTimeoutMs: this.#settings.shutdownTimeoutMs,
         onMessage,
@@ -326,7 +326,10 @@ export class RabbitMqTransport implements Transport {
     this.#subscription?.consumer.detach();
   }
 
-  #toPublishError(error: unknown, eventId: string, destination: string): Error {
+  #toPublishError(
+    error: unknown,
+    { eventId, destination }: { readonly eventId: string; readonly destination: string },
+  ): Error {
     const { message } = toErrorInfo(error);
     const detail = `transport=${this.name} eventId=${eventId} destination=${destination} error=${message}`;
     return message === NACK_MESSAGE

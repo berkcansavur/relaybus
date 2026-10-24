@@ -25,21 +25,26 @@ export class PostgresCompletion<TTransaction> {
   }
 
   /** Implements {@link PostgresEventStore.complete}. */
-  async complete(lease: LeaseReference, now: Date, transaction?: TTransaction): Promise<boolean> {
-    return (await this.#completeLeases([lease], now, transaction))[0]!;
+  async complete(
+    lease: LeaseReference,
+    { now, transaction }: { readonly now: Date; readonly transaction?: TTransaction | undefined },
+  ): Promise<boolean> {
+    return (await this.#completeLeases([lease], { now, transaction }))[0]!;
   }
 
   /** Implements {@link PostgresEventStore.completeMany}. */
   completeMany(leases: readonly LeaseReference[], now: Date): Promise<boolean[]> {
-    return this.#completeLeases(leases, now, undefined);
+    return this.#completeLeases(leases, { now, transaction: undefined });
   }
 
   /** Implements {@link PostgresEventStore.reschedule}. */
   reschedule(
     lease: LeaseReference,
-    availableAt: Date,
-    error: ErrorInfo,
-    now: Date,
+    {
+      availableAt,
+      error,
+      now,
+    }: { readonly availableAt: Date; readonly error: ErrorInfo; readonly now: Date },
   ): Promise<boolean> {
     return this.#settled(
       lease,
@@ -58,7 +63,10 @@ export class PostgresCompletion<TTransaction> {
   }
 
   /** Implements {@link PostgresEventStore.bury}. */
-  bury(lease: LeaseReference, error: ErrorInfo, now: Date): Promise<boolean> {
+  bury(
+    lease: LeaseReference,
+    { error, now }: { readonly error: ErrorInfo; readonly now: Date },
+  ): Promise<boolean> {
     return this.#settled(
       lease,
       this.#whenIssued(lease, (held) =>
@@ -98,7 +106,7 @@ export class PostgresCompletion<TTransaction> {
   }
 
   async #changed(sql: string, parameters: readonly PostgresParameter[]): Promise<boolean> {
-    const rows = await this.#state.query(sql, parameters);
+    const rows = await this.#state.query({ sql, parameters });
     return readCount(rows[0]!, 'count') > 0;
   }
 
@@ -119,8 +127,7 @@ export class PostgresCompletion<TTransaction> {
    */
   async #completeLeases(
     leases: readonly LeaseReference[],
-    now: Date,
-    transaction: TTransaction | undefined,
+    { now, transaction }: { readonly now: Date; readonly transaction: TTransaction | undefined },
   ): Promise<boolean[]> {
     const issued: Array<{ ord: number; id: string } & LaneLease> = [];
     const seen = new Set<string>();
@@ -134,11 +141,11 @@ export class PostgresCompletion<TTransaction> {
     });
     const completed = new Set<number>();
     if (issued.length > 0) {
-      const rows = await this.#state.query(
-        this.#state.statements.completion.complete,
-        [JSON.stringify(issued), now.toISOString()],
+      const rows = await this.#state.query({
+        sql: this.#state.statements.completion.complete,
+        parameters: [JSON.stringify(issued), now.toISOString()],
         transaction,
-      );
+      });
       for (const row of rows) {
         completed.add(readCount(row, 'ord'));
       }

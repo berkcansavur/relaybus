@@ -191,12 +191,13 @@ export function plainJsonDecoder(options: PlainJsonDecoderOptions): RabbitMqMess
       headers: readForeignHeaders(properties),
       payload: parseJsonBody(message.content),
     };
-    const type = resolveText(options.type, plain, 'type');
+    const type = resolveText(options.type, { message: plain, name: 'type' });
     if (type === undefined) {
       throw new MalformedMessageError('Message has no event type: the type option found none');
     }
     assertValidType(type, 'The event type');
-    const id = resolveText(options.id, plain, 'id') ?? nonEmptyText(properties.messageId);
+    const id =
+      resolveText(options.id, { message: plain, name: 'id' }) ?? nonEmptyText(properties.messageId);
     if (id === undefined) {
       throw new MalformedMessageError(
         'Message has no id: set the messageId property on the producer or configure the id option',
@@ -205,8 +206,9 @@ export function plainJsonDecoder(options: PlainJsonDecoderOptions): RabbitMqMess
     return {
       id,
       type,
-      source: resolveText(options.source, plain, 'source') ?? defaultSource(message),
-      key: resolveText(options.key, plain, 'key') ?? null,
+      source:
+        resolveText(options.source, { message: plain, name: 'source' }) ?? defaultSource(message),
+      key: resolveText(options.key, { message: plain, name: 'key' }) ?? null,
       payload: plain.payload,
       headers: plain.headers,
       correlationId: null,
@@ -302,8 +304,7 @@ function readForeignHeaders(properties: AmqpMessageProperties): Record<string, s
 
 function resolveText<TValue extends string | null>(
   option: TValue | ((message: PlainJsonMessage) => TValue | undefined) | undefined,
-  message: PlainJsonMessage,
-  name: string,
+  { message, name }: { readonly message: PlainJsonMessage; readonly name: string },
 ): string | undefined {
   const value: unknown = typeof option === 'function' ? option(message) : option;
   if (value === undefined || value === null) {

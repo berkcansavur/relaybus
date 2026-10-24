@@ -47,18 +47,18 @@ describe('chooseRetryTier', () => {
   const ladder = [100, 200, 400];
 
   it('uses the nearest tier at the ends and exact matches', () => {
-    expect(chooseRetryTier(ladder, 0, () => 0.5)).toBe(100);
-    expect(chooseRetryTier(ladder, 100, () => 0.5)).toBe(100);
-    expect(chooseRetryTier(ladder, 400, () => 0.5)).toBe(400);
-    expect(chooseRetryTier(ladder, 9_999, () => 0.5)).toBe(400);
+    expect(chooseRetryTier(ladder, { delayMs: 0, random: () => 0.5 })).toBe(100);
+    expect(chooseRetryTier(ladder, { delayMs: 100, random: () => 0.5 })).toBe(100);
+    expect(chooseRetryTier(ladder, { delayMs: 400, random: () => 0.5 })).toBe(400);
+    expect(chooseRetryTier(ladder, { delayMs: 9_999, random: () => 0.5 })).toBe(400);
   });
 
   it('rounds a delay between two tiers up or down so the expected delay is preserved', () => {
     // 150 is halfway between 100 and 200.
-    expect(chooseRetryTier(ladder, 150, () => 0.49)).toBe(200);
-    expect(chooseRetryTier(ladder, 150, () => 0.5)).toBe(100);
-    expect(chooseRetryTier(ladder, 300, () => 0.1)).toBe(400);
-    expect(chooseRetryTier(ladder, 300, () => 0.9)).toBe(200);
+    expect(chooseRetryTier(ladder, { delayMs: 150, random: () => 0.49 })).toBe(200);
+    expect(chooseRetryTier(ladder, { delayMs: 150, random: () => 0.5 })).toBe(100);
+    expect(chooseRetryTier(ladder, { delayMs: 300, random: () => 0.1 })).toBe(400);
+    expect(chooseRetryTier(ladder, { delayMs: 300, random: () => 0.9 })).toBe(200);
   });
 });
 

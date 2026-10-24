@@ -32,11 +32,11 @@ export type PostgresStoreState<TTransaction> = {
   readonly queryOptions: PostgresQueryOptions | undefined;
   readonly notifies: boolean;
   /** Runs a statement of {@link PostgresStatements} whose text never changes, prepared when `preparedStatements` is on. */
-  readonly query: (
-    sql: string,
-    parameters: readonly PostgresParameter[],
-    transaction?: TTransaction,
-  ) => Promise<readonly PostgresRow[]>;
+  readonly query: (input: {
+    readonly sql: string;
+    readonly parameters: readonly PostgresParameter[];
+    readonly transaction?: TTransaction | undefined;
+  }) => Promise<readonly PostgresRow[]>;
   /** Every claim handed to a caller and not settled yet, by delivery id and exact lease token. */
   readonly handedOut: Map<string, HandedOutClaim>;
   readonly unreconciled: Set<string>;

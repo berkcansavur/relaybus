@@ -32,7 +32,7 @@ export class MongoCompletion {
   }
 
   /** Implements {@link MongoEventStore.extendLease}. */
-  async extendLease(lease: LeaseReference, leaseExpiresAt: Date, _now?: Date): Promise<boolean> {
+  async extendLease(lease: LeaseReference, leaseExpiresAt: Date): Promise<boolean> {
     const held = parseLeaseToken(lease.leaseToken);
     if (held === undefined) {
       return false;
@@ -58,24 +58,29 @@ export class MongoCompletion {
   }
 
   /** Implements {@link MongoEventStore.complete}. */
-  async complete(lease: LeaseReference, now: Date, session?: ClientSession): Promise<boolean> {
+  async complete(
+    lease: LeaseReference,
+    { now, session }: { readonly now: Date; readonly session?: ClientSession | undefined },
+  ): Promise<boolean> {
     if (session !== undefined) {
       assertInTransaction(session, 'complete');
     }
-    return (await this.#completeLeases([lease], now, session))[0]!;
+    return (await this.#completeLeases([lease], { now, session }))[0]!;
   }
 
   /** Implements {@link MongoEventStore.completeMany}. */
   completeMany(leases: readonly LeaseReference[], now: Date): Promise<boolean[]> {
-    return this.#completeLeases(leases, now, undefined);
+    return this.#completeLeases(leases, { now, session: undefined });
   }
 
   /** Implements {@link MongoEventStore.reschedule}. */
   async reschedule(
     lease: LeaseReference,
-    availableAt: Date,
-    error: ErrorInfo,
-    now: Date,
+    {
+      availableAt,
+      error,
+      now,
+    }: { readonly availableAt: Date; readonly error: ErrorInfo; readonly now: Date },
   ): Promise<boolean> {
     return this.#leaveFlight(lease, {
       $set: { availableAt, dueAt: availableAt, lastError: toErrorInfo(error), updatedAt: now },
@@ -92,7 +97,10 @@ export class MongoCompletion {
   }
 
   /** Implements {@link MongoEventStore.bury}. */
-  async bury(lease: LeaseReference, error: ErrorInfo, now: Date): Promise<boolean> {
+  async bury(
+    lease: LeaseReference,
+    { error, now }: { readonly error: ErrorInfo; readonly now: Date },
+  ): Promise<boolean> {
     return this.#leaveFlight(lease, {
       $set: { status: 'dead', lastError: toErrorInfo(error), updatedAt: now },
       $unset: FINISHED_FIELDS,
@@ -121,20 +129,18 @@ export class MongoCompletion {
    */
   async #completeLeases(
     leases: readonly LeaseReference[],
-    now: Date,
-    session: ClientSession | undefined,
+    { now, session }: { readonly now: Date; readonly session: ClientSession | undefined },
   ): Promise<boolean[]> {
     // Inside the caller's transaction the completion may still be retried or rolled back, so it
     // stays registered until a later claim finds the delivery gone.
     return session === undefined
-      ? this.#settle(leases, () => this.#completeIssued(leases, now, undefined))
-      : this.#completeIssued(leases, now, session);
+      ? this.#settle(leases, () => this.#completeIssued(leases, { now, session: undefined }))
+      : this.#completeIssued(leases, { now, session });
   }
 
   async #completeIssued(
     leases: readonly LeaseReference[],
-    now: Date,
-    session: ClientSession | undefined,
+    { now, session }: { readonly now: Date; readonly session: ClientSession | undefined },
   ): Promise<boolean[]> {
     const parsed = leases.map((lease) => parseLeaseToken(lease.leaseToken));
     const issued = leases.flatMap((lease, index) =>
@@ -145,10 +151,10 @@ export class MongoCompletion {
     let completed = new Set<string>();
     if (issued.length > 0) {
       if (session !== undefined) {
-        completed = await this.#deleteCompleted(issued, now, session);
+        completed = await this.#deleteCompleted(issued, { now, session });
       } else if (this.#state.completionHistory) {
         completed = await runInTransaction(this.#state, (own) =>
-          this.#deleteCompleted(issued, now, own),
+          this.#deleteCompleted(issued, { now, session: own }),
         );
       } else {
         completed = await this.#deleteFenced(issued, now);
@@ -191,11 +197,11 @@ export class MongoCompletion {
           .toArray()
       ).map((lane) => [lane._id, lane]),
     );
-    const fenced = fencedLeases(issued, lanes, documents);
+    const fenced = fencedLeases(issued, { lanes, documents });
     if (fenced.length === 0) {
       return new Set();
     }
-    await this.#markEventsCompleted(fenced, documents, now);
+    await this.#markEventsCompleted(fenced, { documents, now });
     const deleted = await this.#state.deliveries.deleteMany({ $or: fenced.map(ofClaim) });
     // Each branch of the delete matches at most one document of exactly that claim, so all of
     // them deleting proves every completion. When fewer did, a claim ended or changed hands after
@@ -215,8 +221,7 @@ export class MongoCompletion {
    */
   async #deleteCompleted(
     issued: readonly IssuedLease[],
-    now: Date,
-    session: ClientSession,
+    { now, session }: { readonly now: Date; readonly session: ClientSession },
   ): Promise<Set<string>> {
     const lanes = new Map(
       (
@@ -234,11 +239,11 @@ export class MongoCompletion {
         { session },
       )
       .toArray();
-    const fenced = fencedLeases(issued, lanes, documents);
+    const fenced = fencedLeases(issued, { lanes, documents });
     if (fenced.length === 0) {
       return new Set();
     }
-    await this.#markEventsCompleted(fenced, documents, now, session);
+    await this.#markEventsCompleted(fenced, { documents, now, session });
     await this.#state.deliveries.deleteMany({ $or: fenced.map(ofClaim) }, { session });
     if (this.#state.completionHistory) {
       const completedIds = new Set(fenced.map((lease) => lease.deliveryId));
@@ -265,9 +270,15 @@ export class MongoCompletion {
    */
   async #markEventsCompleted(
     fenced: readonly IssuedLease[],
-    documents: readonly Pick<DeliveryDocument, '_id' | 'eventId'>[],
-    now: Date,
-    session?: ClientSession,
+    {
+      documents,
+      now,
+      session,
+    }: {
+      readonly documents: readonly Pick<DeliveryDocument, '_id' | 'eventId'>[];
+      readonly now: Date;
+      readonly session?: ClientSession | undefined;
+    },
   ): Promise<void> {
     const completedIds = new Set(fenced.map((lease) => lease.deliveryId));
     const eventIds = [
@@ -299,14 +310,22 @@ export class MongoCompletion {
     }
     const deliveryId = String(lease.deliveryId);
     const ofThisClaim = ofClaim({ ...held, deliveryId });
-    return this.#settle([lease], () => this.#leaveFlightNow(held, deliveryId, ofThisClaim, update));
+    return this.#settle([lease], () =>
+      this.#leaveFlightNow(held, { deliveryId, ofThisClaim, update }),
+    );
   }
 
   async #leaveFlightNow(
     held: LaneLease,
-    deliveryId: string,
-    ofThisClaim: Filter<DeliveryDocument>,
-    update: UpdateFilter<DeliveryDocument>,
+    {
+      deliveryId,
+      ofThisClaim,
+      update,
+    }: {
+      readonly deliveryId: string;
+      readonly ofThisClaim: Filter<DeliveryDocument>;
+      readonly update: UpdateFilter<DeliveryDocument>;
+    },
   ): Promise<boolean> {
     return runInTransaction(this.#state, async (session) => {
       // The claim generation is checked before the lane is touched: a later claim of the same
@@ -334,8 +353,13 @@ export class MongoCompletion {
 /** The leases whose lane still has their epoch and lists the delivery, and whose delivery is still in their claim. */
 function fencedLeases(
   issued: readonly IssuedLease[],
-  lanes: ReadonlyMap<number, Pick<LaneDocument, 'epoch' | 'inFlight'>>,
-  documents: readonly Pick<DeliveryDocument, '_id' | 'claims'>[],
+  {
+    lanes,
+    documents,
+  }: {
+    readonly lanes: ReadonlyMap<number, Pick<LaneDocument, 'epoch' | 'inFlight'>>;
+    readonly documents: readonly Pick<DeliveryDocument, '_id' | 'claims'>[];
+  },
 ): IssuedLease[] {
   const claimsById = new Map(documents.map((document) => [document._id, document.claims ?? 0]));
   const fenced = new Map<string, IssuedLease>();
@@ -359,5 +383,5 @@ function ofClaim(lease: IssuedLease): Filter<DeliveryDocument> {
 }
 
 function leaseIdentity(lease: IssuedLease): string {
-  return `${lease.deliveryId}\u0000${formatLeaseToken(lease.laneId, lease.epoch, lease.claims)}`;
+  return `${lease.deliveryId}\u0000${formatLeaseToken(lease.laneId, { epoch: lease.epoch, claims: lease.claims })}`;
 }

@@ -59,14 +59,14 @@ export class PostgresClaims<TTransaction> {
     if (heldFirst && claimed.length < request.limit && rows[0]!['stale'] !== true) {
       const freeRows = await this.#claimFreeLanesAfterHeld(request, claimed);
       if (freeRows === undefined) {
-        return this.#handOutInDueOrder(claimed, request, heldLanes);
+        return this.#handOutInDueOrder(claimed, { request, heldLanes });
       }
       rows = freeRows;
     }
     if (claimed.length < request.limit && leftWorkBehind(rows[0]!)) {
       await this.#claimMoreLanes(request, claimed);
     }
-    return this.#handOutInDueOrder(claimed, request, heldLanes);
+    return this.#handOutInDueOrder(claimed, { request, heldLanes });
   }
 
   /** Reconciles first when an earlier reconciliation of `owner` failed; refuses to claim while it still fails. */
@@ -144,15 +144,17 @@ export class PostgresClaims<TTransaction> {
   /** The deliveries a claim statement picked, registered as handed out to `leaseOwner`. */
   #takeClaimed(rows: readonly PostgresRow[], leaseOwner: string): PostgresRow[] {
     const claimed = rows.filter((row) => row['delivery_id'] !== null);
-    this.#forgetFinished(rows[0]!, leaseOwner, claimed);
+    this.#forgetFinished(rows[0]!, { leaseOwner, claimed });
     this.#handOut(claimed, leaseOwner);
     return claimed;
   }
 
   #handOutInDueOrder(
     claimed: PostgresRow[],
-    request: ClaimRequest,
-    heldLanes: ReadonlySet<number>,
+    {
+      request,
+      heldLanes,
+    }: { readonly request: ClaimRequest; readonly heldLanes: ReadonlySet<number> },
   ): ClaimedDelivery[] {
     if (
       claimed.length >= request.limit &&
@@ -184,13 +186,13 @@ export class PostgresClaims<TTransaction> {
       request.leaseExpiresAt.toISOString(),
       this.#generation(request.leaseOwner).toString(),
     ];
-    let rows = await this.#state.query(statement, parameters);
+    let rows = await this.#state.query({ sql: statement, parameters });
     for (
       let attempt = 1;
       attempt < MAXIMUM_STALE_CLAIM_ATTEMPTS && rows[0]!['stale'] === true;
       attempt += 1
     ) {
-      rows = await this.#state.query(statement, parameters);
+      rows = await this.#state.query({ sql: statement, parameters });
     }
     return rows;
   }
@@ -211,11 +213,11 @@ export class PostgresClaims<TTransaction> {
       const remaining = (): number => request.limit - alreadyClaimed - claimed.length;
       const takenLanes = new Set<number>();
       for (let laneCount = INITIAL_LANES_PER_ROUND; remaining() > 0;) {
-        const taken = await this.#state.query(
-          this.#state.statements.lanes.takeFreeLanes,
-          [now, handlers, laneCount, request.leaseOwner, leaseExpiresAt, generation],
+        const taken = await this.#state.query({
+          sql: this.#state.statements.lanes.takeFreeLanes,
+          parameters: [now, handlers, laneCount, request.leaseOwner, leaseExpiresAt, generation],
           transaction,
-        );
+        });
         if (taken.length === 0) {
           break;
         }
@@ -231,7 +233,7 @@ export class PostgresClaims<TTransaction> {
         );
         laneCount *= 2;
       }
-      await this.#recordClaim(claimed, takenLanes, request, transaction);
+      await this.#recordClaim(claimed, { lanes: takenLanes, request, transaction });
       return claimed;
     });
   }
@@ -268,7 +270,13 @@ export class PostgresClaims<TTransaction> {
    * (completed inside the caller's transaction, deleted, or listed no more). Registrations of
    * lanes this claim did not see stay: their tokens may still be valid.
    */
-  #forgetFinished(row: PostgresRow, leaseOwner: string, claimed: readonly PostgresRow[]): void {
+  #forgetFinished(
+    row: PostgresRow,
+    {
+      leaseOwner,
+      claimed,
+    }: { readonly leaseOwner: string; readonly claimed: readonly PostgresRow[] },
+  ): void {
     // Lanes the statement freed are examined too: nothing runs there any more.
     const heldLanes = new Set(JSON.parse(row['examined_lanes'] as string) as number[]);
     const running = new Set([
@@ -299,11 +307,10 @@ export class PostgresClaims<TTransaction> {
       .filter((entry) => entry.owner === leaseOwner)
       .map(({ deliveryId, lane, epoch, claims }) => ({ id: deliveryId, lane, epoch, claims }));
     try {
-      await this.#state.query(this.#state.statements.claim.reconcileClaims, [
-        leaseOwner,
-        JSON.stringify(handedOut),
-        generation.toString(),
-      ]);
+      await this.#state.query({
+        sql: this.#state.statements.claim.reconcileClaims,
+        parameters: [leaseOwner, JSON.stringify(handedOut), generation.toString()],
+      });
       this.#state.unreconciled.delete(leaseOwner);
       return true;
     } catch (error) {
@@ -321,18 +328,18 @@ export class PostgresClaims<TTransaction> {
     transaction: TTransaction,
   ): Promise<PostgresRow[]> {
     const limit = parameters[2] as number;
-    const fastRows = await this.#state.query(
-      this.#state.statements.claim.claim,
+    const fastRows = await this.#state.query({
+      sql: this.#state.statements.claim.claim,
       parameters,
       transaction,
-    );
+    });
     const picked = fastRows.filter((row) => row['delivery_id'] !== null);
     if (picked.length < limit && fastRows[0]!['window_saturated'] === true) {
-      const slowRows = await this.#state.query(
-        this.#state.statements.claim.claimBehindBlockedKeys,
+      const slowRows = await this.#state.query({
+        sql: this.#state.statements.claim.claimBehindBlockedKeys,
         parameters,
         transaction,
-      );
+      });
       // Nothing was written, so the slow statement sees the fast statement's picks again.
       // Both pick at most the head of a key, so the union is still one delivery per key.
       const pickedIds = new Set(picked.map((row) => row['delivery_id']));
@@ -362,9 +369,15 @@ export class PostgresClaims<TTransaction> {
   /** Writes the picked ids into their lane rows and frees the lanes that picked nothing. */
   async #recordClaim(
     claimed: readonly PostgresRow[],
-    lanes: ReadonlySet<number>,
-    request: ClaimRequest,
-    transaction: TTransaction,
+    {
+      lanes,
+      request,
+      transaction,
+    }: {
+      readonly lanes: ReadonlySet<number>;
+      readonly request: ClaimRequest;
+      readonly transaction: TTransaction;
+    },
   ): Promise<void> {
     const idsByLane = new Map<number, string[]>();
     for (const row of claimed) {
@@ -375,16 +388,16 @@ export class PostgresClaims<TTransaction> {
     if (idsByLane.size === 0 && idleLanes.length === 0) {
       return;
     }
-    await this.#state.query(
-      this.#state.statements.claim.recordClaim,
-      [
+    await this.#state.query({
+      sql: this.#state.statements.claim.recordClaim,
+      parameters: [
         JSON.stringify([...idsByLane].map(([lane, ids]) => ({ lane, ids }))),
         JSON.stringify(idleLanes),
         request.leaseOwner,
         request.leaseExpiresAt.toISOString(),
       ],
       transaction,
-    );
+    });
   }
 }
 

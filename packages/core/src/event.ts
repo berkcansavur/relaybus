@@ -88,6 +88,7 @@ export function defineEvent(
 }
 
 /** Runs a Standard Schema and returns its output, or throws {@link EventValidationError}. */
+// eslint-disable-next-line relaybus/max-two-params -- exported API validatePayload keeps its public signature
 export async function validatePayload<TPayload>(
   type: string,
   schema: StandardSchemaV1<unknown, TPayload> | undefined,

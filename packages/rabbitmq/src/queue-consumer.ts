@@ -27,10 +27,8 @@ import { retryQueueName } from './topology.js';
 
 /** Publishes a message and resolves only after the broker confirmed it was routed to a queue. */
 export type ConfirmedRepublish = (
-  exchange: string,
-  routingKey: string,
-  content: Buffer,
-  options: AmqpPublishOptions,
+  destination: { readonly exchange: string; readonly routingKey: string },
+  copy: { readonly content: Buffer; readonly options: AmqpPublishOptions },
 ) => Promise<void>;
 
 export interface QueueConsumerSettings {
@@ -221,10 +219,10 @@ export class QueueConsumer {
     for (let attempt = 1; ; attempt += 1) {
       try {
         await this.#settings.onMessage(envelope);
-        this.#settle(channel, message, 'ack');
+        this.#settle(channel, { message, settlement: 'ack' });
         return;
       } catch (error) {
-        if ((await this.#afterFailure(delivery, attempt, error)) === 'settled') {
+        if ((await this.#afterFailure(delivery, { attempt, error })) === 'settled') {
           return;
         }
       }
@@ -253,8 +251,7 @@ export class QueueConsumer {
    */
   async #afterFailure(
     delivery: ProcessedMessage,
-    attempt: number,
-    error: unknown,
+    { attempt, error }: { readonly attempt: number; readonly error: unknown },
   ): Promise<'retry' | 'settled'> {
     const { channel, message, envelope } = delivery;
     const { queue, handlerRetry } = this.#settings;
@@ -277,7 +274,7 @@ export class QueueConsumer {
       );
       return this.#waitOrRequeue(delivery, delayMs);
     }
-    return this.#afterSpentAttempts(delivery, failure, error);
+    return this.#afterSpentAttempts(delivery, { failure, error });
   }
 
   /**
@@ -286,8 +283,7 @@ export class QueueConsumer {
    */
   async #afterSpentAttempts(
     delivery: ProcessedMessage,
-    failure: string,
-    error: unknown,
+    { failure, error }: { readonly failure: string; readonly error: unknown },
   ): Promise<'retry' | 'settled'> {
     const { channel, message } = delivery;
     delivery.redeliveries += 1;
@@ -319,7 +315,7 @@ export class QueueConsumer {
   /** Waits `delayMs` before the next attempt; requeues instead when the consumer stops meanwhile. */
   async #waitOrRequeue(delivery: ProcessedMessage, delayMs: number): Promise<'retry' | 'settled'> {
     if (await this.#interrupted(delayMs)) {
-      this.#settle(delivery.channel, delivery.message, 'requeue');
+      this.#settle(delivery.channel, { message: delivery.message, settlement: 'requeue' });
       return 'settled';
     }
     return 'retry';
@@ -329,7 +325,7 @@ export class QueueConsumer {
   #redeliveryDelay(redeliveries: number): number {
     const { redelivery, retryLadder, ordered, random } = this.#settings;
     const delayMs = computeRetryDelay(redelivery, redeliveries, random);
-    return ordered ? delayMs : chooseRetryTier(retryLadder, delayMs, random);
+    return ordered ? delayMs : chooseRetryTier(retryLadder, { delayMs, random });
   }
 
   /** Sleeps; true when the consumer is stopping, so the caller must give the message back. */
@@ -353,20 +349,18 @@ export class QueueConsumer {
     });
     try {
       await this.#settings.republish(
-        '',
-        retryQueueName(this.#settings.queue, delayMs),
-        content,
-        options,
+        { exchange: '', routingKey: retryQueueName(this.#settings.queue, delayMs) },
+        { content, options },
       );
     } catch (error) {
       this.#settings.logger.warn(
         `[QueueConsumer](redeliverLater) Could not park the message in the retry queue, requeueing it | queue=${this.#settings.queue} delayMs=${delayMs} error=${toErrorInfo(error).message}`,
       );
       await this.#interrupted(delayMs);
-      this.#settle(channel, message, 'requeue');
+      this.#settle(channel, { message, settlement: 'requeue' });
       return;
     }
-    this.#settle(channel, message, 'ack');
+    this.#settle(channel, { message, settlement: 'ack' });
   }
 
   /**
@@ -385,22 +379,23 @@ export class QueueConsumer {
     });
     try {
       await this.#settings.republish(
-        this.#settings.deadLetterExchange,
-        this.#settings.queue,
-        content,
-        options,
+        { exchange: this.#settings.deadLetterExchange, routingKey: this.#settings.queue },
+        { content, options },
       );
     } catch (error) {
       this.#settings.logger.warn(
         `[QueueConsumer](deadLetter) Could not publish to the dead-letter exchange, leaving it to the broker | queue=${this.#settings.queue} error=${toErrorInfo(error).message}`,
       );
-      this.#settle(channel, message, 'dead-letter');
+      this.#settle(channel, { message, settlement: 'dead-letter' });
       return;
     }
-    this.#settle(channel, message, 'ack');
+    this.#settle(channel, { message, settlement: 'ack' });
   }
 
-  #settle(channel: AmqpChannel, message: AmqpMessage, settlement: Settlement): void {
+  #settle(
+    channel: AmqpChannel,
+    { message, settlement }: { readonly message: AmqpMessage; readonly settlement: Settlement },
+  ): void {
     try {
       if (settlement === 'ack') {
         channel.ack(message);

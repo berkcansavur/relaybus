@@ -150,7 +150,7 @@ describe('QueueConsumer', () => {
       expect(channel.ack).not.toHaveBeenCalled();
       expect(channel.nack).not.toHaveBeenCalled();
 
-      const [exchange, routingKey, content, options] = republish.mock.calls[0]!;
+      const [{ exchange, routingKey }, { content, options }] = republish.mock.calls[0]!;
       expect(exchange).toBe('');
       expect(routingKey).toBe('relaybus.billing.retry.100');
       expect(content).toBe(message.content);
@@ -202,7 +202,7 @@ describe('QueueConsumer', () => {
       );
       await waitFor(() => republish.mock.calls.length === 2);
       const byQueue = Object.fromEntries(
-        republish.mock.calls.map(([, routingKey, , options]) => [routingKey, options.headers]),
+        republish.mock.calls.map(([{ routingKey }, { options }]) => [routingKey, options.headers]),
       );
       expect(byQueue['relaybus.billing.retry.200']).toMatchObject({
         [REDELIVERIES_HEADER]: '2',
@@ -220,8 +220,8 @@ describe('QueueConsumer', () => {
         withHeaders(message, { [REDELIVERIES_HEADER]: 'many', [FIRST_FAILURE_HEADER]: -5 }),
       );
       await waitFor(() => republish.mock.calls.length === 1);
-      expect(republish.mock.calls[0]![1]).toBe('relaybus.billing.retry.100');
-      expect(republish.mock.calls[0]![3].headers[REDELIVERIES_HEADER]).toBe('1');
+      expect(republish.mock.calls[0]![0].routingKey).toBe('relaybus.billing.retry.100');
+      expect(republish.mock.calls[0]![1].options.headers[REDELIVERIES_HEADER]).toBe('1');
     });
 
     it('requeues the original, not acknowledging it, when the copy cannot be confirmed', async () => {
@@ -270,7 +270,7 @@ describe('QueueConsumer', () => {
       );
       await waitFor(() => channel.ack.mock.calls.length === 1);
       expect(republish).toHaveBeenCalledTimes(1);
-      const [exchange, routingKey, , options] = republish.mock.calls[0]!;
+      const [{ exchange, routingKey }, { options }] = republish.mock.calls[0]!;
       expect(exchange).toBe('relaybus.dead');
       expect(routingKey).toBe('relaybus.billing');
       expect(options.headers[DEAD_LETTER_REASON_HEADER]).toBe('redelivery window exhausted');
@@ -293,11 +293,11 @@ describe('QueueConsumer', () => {
       channel.deliver!(message);
       await waitFor(() => channel.ack.mock.calls.length === 1);
       expect(handler).toHaveBeenCalledTimes(1);
-      expect(republish.mock.calls[0]![0]).toBe('relaybus.dead');
-      expect(republish.mock.calls[0]![3].headers[DEAD_LETTER_REASON_HEADER]).toBe(
+      expect(republish.mock.calls[0]![0].exchange).toBe('relaybus.dead');
+      expect(republish.mock.calls[0]![1].options.headers[DEAD_LETTER_REASON_HEADER]).toBe(
         'non-retryable handler error',
       );
-      expect(republish.mock.calls[0]![3].headers).toMatchObject({
+      expect(republish.mock.calls[0]![1].options.headers).toMatchObject({
         [DEAD_LETTER_ERROR_NAME_HEADER]: 'InvalidEnvelopeError',
         [DEAD_LETTER_ERROR_CODE_HEADER]: 'RELAYBUS_INVALID_ENVELOPE',
       });
@@ -318,14 +318,14 @@ describe('QueueConsumer', () => {
       channel.deliver!(malformed);
       await waitFor(() => channel.ack.mock.calls.length === 1);
       expect(handler).not.toHaveBeenCalled();
-      expect(republish.mock.calls[0]![2]).toBe(malformed.content);
-      expect(republish.mock.calls[0]![3].headers[DEAD_LETTER_REASON_HEADER]).toBe(
+      expect(republish.mock.calls[0]![1].content).toBe(malformed.content);
+      expect(republish.mock.calls[0]![1].options.headers[DEAD_LETTER_REASON_HEADER]).toBe(
         'malformed message',
       );
       expect(logger.error).toHaveBeenCalledWith(
         '[QueueConsumer](decodeOrDeadLetter) Dead-lettering malformed message | queue=relaybus.billing routingKey=order.placed.v1 error=Message body is not valid JSON errorName=MalformedMessageError code=RELAYBUS_RABBITMQ_MALFORMED_MESSAGE',
       );
-      expect(republish.mock.calls[0]![3].headers).toMatchObject({
+      expect(republish.mock.calls[0]![1].options.headers).toMatchObject({
         [DEAD_LETTER_ERROR_NAME_HEADER]: 'MalformedMessageError',
         [DEAD_LETTER_ERROR_CODE_HEADER]: 'RELAYBUS_RABBITMQ_MALFORMED_MESSAGE',
       });
@@ -345,14 +345,18 @@ describe('QueueConsumer', () => {
       await waitFor(() => channel.ack.mock.calls.length === 2);
       expect(handler).toHaveBeenCalledTimes(1);
       expect(republish).toHaveBeenCalledTimes(1);
-      expect(republish.mock.calls[0]![3].headers[DEAD_LETTER_REASON_HEADER]).toBe(
+      expect(republish.mock.calls[0]![1].options.headers[DEAD_LETTER_REASON_HEADER]).toBe(
         'malformed message',
       );
       expect(logger.error).toHaveBeenCalledWith(
         expect.stringContaining('error=cannot read properties of undefined errorName=TypeError'),
       );
-      expect(republish.mock.calls[0]![3].headers[DEAD_LETTER_ERROR_NAME_HEADER]).toBe('TypeError');
-      expect(republish.mock.calls[0]![3].headers).not.toHaveProperty(DEAD_LETTER_ERROR_CODE_HEADER);
+      expect(republish.mock.calls[0]![1].options.headers[DEAD_LETTER_ERROR_NAME_HEADER]).toBe(
+        'TypeError',
+      );
+      expect(republish.mock.calls[0]![1].options.headers).not.toHaveProperty(
+        DEAD_LETTER_ERROR_CODE_HEADER,
+      );
     });
 
     it('hands the decoder a retry copy with its original routing key and keeps that key on the next copy', async () => {
@@ -371,7 +375,7 @@ describe('QueueConsumer', () => {
       channel.deliver!(retryCopy);
       await waitFor(() => republish.mock.calls.length === 1);
       expect(decode.mock.calls[0]![0].fields.routingKey).toBe('orders.placed');
-      expect(republish.mock.calls[0]![3].headers[ORIGINAL_ROUTING_KEY_HEADER]).toBe(
+      expect(republish.mock.calls[0]![1].options.headers[ORIGINAL_ROUTING_KEY_HEADER]).toBe(
         'orders.placed',
       );
     });
@@ -389,7 +393,7 @@ describe('QueueConsumer', () => {
       await consumer.attach(channel);
       channel.deliver!({ content: Buffer.from('x'), fields: { routingKey: 'x' }, properties: {} });
       await waitFor(() => channel.ack.mock.calls.length === 1);
-      expect(republish.mock.calls[0]![3]).toEqual({
+      expect(republish.mock.calls[0]![1].options).toEqual({
         contentType: 'application/json',
         persistent: true,
         headers: {
@@ -476,7 +480,7 @@ describe('QueueConsumer', () => {
       channel.deliver!(message);
       await waitFor(() => channel.ack.mock.calls.length === 1);
       expect(republish).toHaveBeenCalledTimes(1);
-      expect(republish.mock.calls[0]![0]).toBe('relaybus.dead');
+      expect(republish.mock.calls[0]![0].exchange).toBe('relaybus.dead');
     });
   });
 

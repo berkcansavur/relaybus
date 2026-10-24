@@ -123,6 +123,7 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
     }
   }
 
+  // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   async append(
     transaction: InMemoryTransaction,
     entries: readonly AppendEntry[],
@@ -247,6 +248,7 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
     return claimed;
   }
 
+  // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   async extendLease(lease: LeaseReference, leaseExpiresAt: Date, now: Date): Promise<boolean> {
     return this.#updateLeased(lease, (delivery) => {
       delivery.leaseExpiresAt = leaseExpiresAt;
@@ -254,6 +256,7 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
     });
   }
 
+  // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   async complete(
     lease: LeaseReference,
     now: Date,
@@ -278,6 +281,7 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
     return Promise.all(leases.map((lease) => this.complete(lease, now)));
   }
 
+  // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   async reschedule(
     lease: LeaseReference,
     availableAt: Date,
@@ -303,6 +307,7 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
     });
   }
 
+  // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   async bury(lease: LeaseReference, error: ErrorInfo, now: Date): Promise<boolean> {
     return this.#updateLeased(lease, (delivery) => {
       delivery.status = 'dead';
@@ -315,7 +320,9 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
   async listDeliveries(query: DeliveryQuery): Promise<DeliveryRecord[]> {
     const limit = query.limit ?? DEFAULT_LIST_LIMIT;
     return [...this.#deliveries.values()]
-      .filter((delivery) => matchesQuery(delivery, this.#events.get(delivery.eventId)!, query))
+      .filter((delivery) =>
+        matchesQuery(delivery, { event: this.#events.get(delivery.eventId)!, query }),
+      )
       .sort(
         (left, right) =>
           left.createdAt.getTime() - right.createdAt.getTime() || compareIds(left.id, right.id),
@@ -467,7 +474,7 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
       return false;
     }
     for (const other of this.#deliveries.values()) {
-      if (blocksKey(other, delivery, now)) {
+      if (blocksKey(other, { delivery, now })) {
         return true;
       }
     }
@@ -515,7 +522,10 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
 }
 
 /** Whether `other`, another delivery of the same handler and key, holds `delivery` back. */
-function blocksKey(other: StoredDelivery, delivery: StoredDelivery, now: Date): boolean {
+function blocksKey(
+  other: StoredDelivery,
+  { delivery, now }: { readonly delivery: StoredDelivery; readonly now: Date },
+): boolean {
   if (other === delivery || other.handler !== delivery.handler || other.key !== delivery.key) {
     return false;
   }
@@ -571,7 +581,10 @@ function clearLease(delivery: StoredDelivery): void {
   delivery.leaseExpiresAt = null;
 }
 
-function matchesQuery(delivery: StoredDelivery, event: StoredEvent, query: DeliveryQuery): boolean {
+function matchesQuery(
+  delivery: StoredDelivery,
+  { event, query }: { readonly event: StoredEvent; readonly query: DeliveryQuery },
+): boolean {
   return (
     (query.status === undefined || delivery.status === query.status) &&
     (query.handler === undefined || delivery.handler === query.handler) &&

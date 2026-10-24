@@ -107,7 +107,10 @@ export class HandlerRegistry {
       schema: input.schema,
       handle: input.handle,
       retry: createRetryPolicy(options.retry, defaults.retry),
-      timeoutMs: resolveTimeout(options.timeout, defaults.timeoutMs, options.id),
+      timeoutMs: resolveTimeout(options.timeout, {
+        fallback: defaults.timeoutMs,
+        handlerId: options.id,
+      }),
       concurrency: options.concurrency ?? null,
       transactional: options.transactional ?? false,
       forwardsToTransport: input.forwardsToTransport,
@@ -134,8 +137,7 @@ export class HandlerRegistry {
 
 function resolveTimeout(
   timeout: Duration | false | undefined,
-  fallback: number | null,
-  handlerId: string,
+  { fallback, handlerId }: { readonly fallback: number | null; readonly handlerId: string },
 ): number | null {
   if (timeout === undefined) {
     return fallback;
