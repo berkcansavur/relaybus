@@ -106,6 +106,10 @@ ConfigurationError: Catalog events without a handler or route:
 
 The check runs before the store is set up or any transport connects, so a failed check has no side effects and the NestJS application simply does not boot.
 
+## NestJS: module contracts
+
+In NestJS the recommended form is a contract per feature module: `RelayBusModule.forFeature({ consumes: [OrderEvents], produces: [produce(BillingEvents)] })` in the module's `imports`. At boot every consumed event needs a method-level `@RelayBusConsumer` handler among the providers of that module (free method names, any number of classes), and every produced event a route; otherwise the application fails to start naming the module and each missing event. See [@relaybus/nestjs](/packages/nestjs#module-contracts-relaybusmodule-forfeature).
+
 ## Microservices: shared catalogs
 
 Between services, a catalog is a contract: it lives in a shared package, one service produces an event and another consumes it. Each service only covers its part, so instead of a bare catalog (every event needs a handler or route here) it declares its role per event.

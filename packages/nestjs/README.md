@@ -142,6 +142,35 @@ Rules, all enforced at boot (the application fails to start, no silent skips):
   class and method, so decorators that wrap the method later do not drop them, and subclasses
   inherit the handlers of their base class.
 
+## Module contracts: `RelayBusModule.forFeature(...)`
+
+The recommended way to use catalogs in NestJS. A feature module states which events it consumes
+and produces; the method-level `@RelayBusConsumer` handlers of its providers fulfil the contract,
+spread over any classes and method names.
+
+```ts
+@Module({
+  imports: [
+    RelayBusModule.forFeature({
+      consumes: [OrderEvents], // or consume(OrderEvents, { events: ['OrderPlaced'] })
+      produces: [produce(BillingEvents, { events: ['InvoiceIssued'] })],
+    }),
+  ],
+  providers: [ChargeHandlers, RefundHandlers],
+})
+export class BillingModule {}
+```
+
+When the application initialises:
+
+- every consumed event needs a `@RelayBusConsumer` method (or a `@RelayBusCatalogConsumer` class)
+  among the providers **of that module**; consumers in other modules do not count;
+- every produced event needs a route to a transport (`routes` of `forRoot`).
+
+Otherwise the application fails to start with one line per gap, for example
+`[RelayBusHandlerExplorer](assertModuleContracts) BillingModule: OrderEvents.OrderCancelled (order.cancelled.v1) has no consumer`.
+`forRoot({ catalogs })` keeps working as the application-wide check (handlers anywhere).
+
 ## Stricter checking (optional): catalogs and `@RelayBusCatalogConsumer(catalog, options?)`
 
 Method-level handlers are enough for most services. When a team wants the compiler and the boot

@@ -17,6 +17,12 @@ export type {
 export { RelayBusHealth, type RelayBusHealthReport } from './relay-bus-health.js';
 export { RelayBusLifecycle } from './relay-bus-lifecycle.js';
 export { RelayBusModule } from './relay-bus.module.js';
+export {
+  RelayBusFeatureContract,
+  type ContractEvent,
+  type RelayBusFeatureOptions,
+} from './relay-bus-feature-contract.js';
+export { RelayBusFeatureModule } from './relay-bus-feature.module.js';
 export { RelayBusTransactionHost } from './relay-bus-transaction-host.js';
 export {
   RelayBusTransaction,

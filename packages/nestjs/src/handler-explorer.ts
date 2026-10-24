@@ -1,6 +1,7 @@
 import { Inject, Injectable, type OnModuleInit } from '@nestjs/common';
-import { DiscoveryService, MetadataScanner } from '@nestjs/core';
+import { DiscoveryService, MetadataScanner, ModulesContainer } from '@nestjs/core';
 import type { InstanceWrapper } from '@nestjs/core/injector/instance-wrapper.js';
+import type { Module } from '@nestjs/core/injector/module.js';
 import {
   ConfigurationError,
   RelayBus,
@@ -9,6 +10,7 @@ import {
   type EventHandler,
 } from '@relaybus/core';
 import { readCatalogConsumerMetadata } from './relay-bus-catalog-consumer.decorator.js';
+import { RelayBusFeatureContract } from './relay-bus-feature-contract.js';
 import { bindInstance } from './relay-bus-registry.js';
 import {
   readConsumerMetadata,
@@ -22,6 +24,8 @@ type Discovery = {
   /** Methods already registered per instance: a `useExisting` alias shows an instance twice. */
   readonly visited: Map<object, Set<string>>;
   readonly consumers: WeakSet<object>;
+  /** Event types the providers of each module consume, for the `forFeature` contracts. */
+  readonly consumedByModule: Map<Module | undefined, Set<string>>;
 };
 
 interface SubscribedMethod {
@@ -43,6 +47,7 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
     @Inject(DiscoveryService) private readonly discovery: DiscoveryService,
     @Inject(MetadataScanner) private readonly metadataScanner: MetadataScanner,
     @Inject(RelayBus) private readonly bus: RelayBus,
+    @Inject(ModulesContainer) private readonly modules: ModulesContainer,
   ) {}
 
   onModuleInit(): void {
@@ -50,9 +55,75 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
       registeredBy: new Map<string, string>(),
       visited: new Map<object, Set<string>>(),
       consumers: new WeakSet<object>(),
+      consumedByModule: new Map<Module | undefined, Set<string>>(),
     };
     for (const wrapper of this.discovery.getProviders()) {
       this.registerProvider(wrapper, discovery);
+    }
+    this.assertModuleContracts(discovery.consumedByModule);
+  }
+
+  /** Checks the `RelayBusModule.forFeature` contract of every module that imports one. */
+  private assertModuleContracts(consumedByModule: Map<Module | undefined, Set<string>>): void {
+    const routed = new Set(
+      this.bus
+        .handlers()
+        .filter((handler) => handler.forwardsToTransport)
+        .map((handler) => handler.eventType),
+    );
+    const violations: string[] = [];
+    for (const wrapper of this.discovery.getProviders()) {
+      const contract = wrapper.instance as unknown;
+      if (!(contract instanceof RelayBusFeatureContract)) {
+        continue;
+      }
+      for (const module of this.importersOf(wrapper.host)) {
+        // Every module has a set: Nest registers the module class as one of its providers.
+        const consumed = consumedByModule.get(module)!;
+        for (const event of contract.consumes.filter(({ type }) => !consumed.has(type))) {
+          violations.push(`${module.name}: ${event.label} (${event.type}) has no consumer`);
+        }
+        for (const event of contract.produces.filter(({ type }) => !routed.has(type))) {
+          violations.push(
+            `${module.name}: ${event.label} (${event.type}) has no route to a transport`,
+          );
+        }
+      }
+    }
+    if (violations.length > 0) {
+      throw new ConfigurationError(
+        `[RelayBusHandlerExplorer](assertModuleContracts) ${violations.join('; ')}`,
+      );
+    }
+  }
+
+  private importersOf(contractModule: Module | undefined): Module[] {
+    // A provider always has a host module; `has(undefined)` is false for the type's sake.
+    return [...this.modules.values()].filter((module) => module.imports.has(contractModule!));
+  }
+
+  /** Records the event types the provider of `wrapper` consumes under the provider's module. */
+  private recordConsumedTypes(
+    wrapper: InstanceWrapper,
+    { instance, discovery }: { readonly instance: object; readonly discovery: Discovery },
+  ): void {
+    const types = discovery.consumedByModule.get(wrapper.host) ?? new Set<string>();
+    discovery.consumedByModule.set(wrapper.host, types);
+    const lookup = instance as Record<string, unknown>;
+    for (const { declarations } of this.subscribedMethods(
+      Object.getPrototypeOf(instance) as object,
+    )) {
+      for (const { event } of declarations) {
+        types.add(typeof event === 'string' ? event : event.type);
+      }
+    }
+    for (const { catalog, selectedEntries } of readCatalogConsumerMetadata(instance.constructor)) {
+      const entries =
+        selectedEntries ??
+        describeCatalog(catalog).entries.filter((entry) => isMethod(lookup, entry));
+      for (const entry of entries) {
+        types.add(entry.eventClass.type);
+      }
     }
   }
 
@@ -70,6 +141,7 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
       return;
     }
     bindInstance(instance, this.bus);
+    this.recordConsumedTypes(wrapper, { instance, discovery });
     const className = instance.constructor.name;
     for (const subscribed of this.subscribedMethods(prototype)) {
       this.registerSubscribedMethod(instance, { subscribedMethod: subscribed, discovery });
