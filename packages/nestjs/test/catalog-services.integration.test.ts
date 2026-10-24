@@ -130,8 +130,10 @@ function ledgerModule(
 async function boot(module: DynamicModule): Promise<TestingModule> {
   vi.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
   const application = await Test.createTestingModule({ imports: [module] }).compile();
-  applications.push(application);
   await application.init();
+  // Only applications that booted are closed afterwards: NestJS 11 runs the bootstrap hooks again when
+  // an application whose init failed is closed, which throws the boot error a second time.
+  applications.push(application);
   return application;
 }
 
