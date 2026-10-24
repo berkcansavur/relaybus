@@ -1,7 +1,6 @@
 import {
   ConfigurationError,
   NonRetryableError,
-  RelayBusError,
   toErrorInfo,
   toMilliseconds,
   type Duration,
@@ -11,12 +10,14 @@ import {
   type TransportMessageHandler,
 } from '@relaybus/core';
 import { assertPositiveInteger } from '@relaybus/core/internal';
+import { decodeEnvelope, encodeEnvelope, toOutgoingHeaders } from './cloudevents-codec.js';
 import {
+  GroupJoinTimeoutError,
+  HandlerFailedError,
   InvalidKafkaMessageError,
-  decodeEnvelope,
-  encodeEnvelope,
-  toOutgoingHeaders,
-} from './cloudevents-codec.js';
+  PublishTimeoutError,
+  TransportClosedError,
+} from './errors.js';
 import { completeDecodedEvent, type KafkaMessageDecoder } from './inbound-decoders.js';
 import type {
   KafkaClientLike,
@@ -59,30 +60,6 @@ export type InvalidMessagePolicy =
   | 'skip'
   | ((message: InvalidKafkaMessage) => void | Promise<void>)
   | { readonly deadLetterTopic: string | ((sourceTopic: string) => string) };
-
-/** `publish` did not get a broker ack within `publishTimeout`. The outbox retries it. */
-export class PublishTimeoutError extends RelayBusError {
-  override name = 'PublishTimeoutError';
-  override readonly code: string = 'RELAYBUS_KAFKA_PUBLISH_TIMEOUT';
-}
-
-/** The transport was closed: it no longer publishes or subscribes. */
-export class TransportClosedError extends RelayBusError {
-  override name = 'TransportClosedError';
-  override readonly code: string = 'RELAYBUS_KAFKA_TRANSPORT_CLOSED';
-}
-
-/** The consumer did not join its group within `startupTimeout`. */
-export class GroupJoinTimeoutError extends RelayBusError {
-  override name = 'GroupJoinTimeoutError';
-  override readonly code: string = 'RELAYBUS_KAFKA_GROUP_JOIN_TIMEOUT';
-}
-
-/** A handler failure re-thrown to the Kafka client, stripped of anything that could make it fatal. */
-export class HandlerFailedError extends RelayBusError {
-  override name = 'HandlerFailedError';
-  override readonly code: string = 'RELAYBUS_KAFKA_HANDLER_FAILED';
-}
 
 /** Bounded in-process retries around the inbound handler (the bus's `receive`). */
 export interface KafkaProcessingOptions {

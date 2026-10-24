@@ -1,5 +1,4 @@
 import { ConfigurationError, type ErrorInfo } from './errors.js';
-import type { EventEnvelope } from './event.js';
 import type {
   AppendEntry,
   AppendResult,
@@ -15,7 +14,9 @@ import type {
   PurgeRequest,
   PurgeResult,
 } from './event-store.js';
+import type { EventEnvelope } from './event.js';
 import { createUuidV7, type IdentifierGenerator } from './identifier.js';
+import { InMemoryTransaction } from './in-memory-transaction.js';
 
 const DEFAULT_LIST_LIMIT = 100;
 
@@ -29,48 +30,6 @@ export interface InMemoryEventStoreOptions {
    * is deleted, like in the database stores.
    */
   readonly retainCompleted?: boolean;
-}
-
-/** Transaction handle of {@link InMemoryEventStore}. Writes apply on commit only. */
-export class InMemoryTransaction {
-  readonly #operations: Array<() => void> = [];
-  readonly #finishers: Array<() => void> = [];
-  #state: 'open' | 'committed' | 'rolled-back' = 'open';
-
-  get state(): 'open' | 'committed' | 'rolled-back' {
-    return this.#state;
-  }
-
-  enqueue(operation: () => void): void {
-    if (this.#state !== 'open') {
-      throw new ConfigurationError(`Cannot write through a ${this.#state} in-memory transaction`);
-    }
-    this.#operations.push(operation);
-  }
-
-  /** Runs `finisher` once the transaction commits or rolls back, like a lock release. */
-  onFinish(finisher: () => void): void {
-    this.#finishers.push(finisher);
-  }
-
-  commit(): void {
-    this.#state = 'committed';
-    for (const operation of this.#operations) {
-      operation();
-    }
-    this.#finish();
-  }
-
-  rollback(): void {
-    this.#state = 'rolled-back';
-    this.#finish();
-  }
-
-  #finish(): void {
-    for (const finisher of this.#finishers.splice(0)) {
-      finisher();
-    }
-  }
 }
 
 interface HeldLock {

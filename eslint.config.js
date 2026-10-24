@@ -2,6 +2,22 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import logPrefix from './eslint-rules/log-prefix.js';
 
+const ENUM_BAN = {
+  selector: 'TSEnumDeclaration',
+  message: 'Use a union of string literals, not an enum.',
+};
+
+/** R33: a file exports at most one class; flags the second and every later exported class. */
+const ONE_EXPORTED_CLASS_PER_FILE = {
+  selector:
+    ':matches(ExportNamedDeclaration, ExportDefaultDeclaration):has(> ClassDeclaration) ~ ' +
+    ':matches(ExportNamedDeclaration, ExportDefaultDeclaration):has(> ClassDeclaration)',
+  message:
+    'R33: a file exports at most one class; move the second exported class into its own file.',
+};
+
+const SOURCE_SYNTAX_BANS = [ENUM_BAN, ONE_EXPORTED_CLASS_PER_FILE];
+
 export default tseslint.config(
   {
     ignores: [
@@ -61,9 +77,16 @@ export default tseslint.config(
       ],
       'no-else-return': ['error', { allowElseIf: false }],
       '@typescript-eslint/no-explicit-any': 'error',
+      'no-restricted-syntax': ['error', ...SOURCE_SYNTAX_BANS],
+    },
+  },
+  {
+    // Each package keeps its error classes together in errors.ts: they are one family of small classes.
+    files: ['packages/*/src/errors.ts'],
+    rules: {
       'no-restricted-syntax': [
         'error',
-        { selector: 'TSEnumDeclaration', message: 'Use a union of string literals, not an enum.' },
+        ...SOURCE_SYNTAX_BANS.filter((ban) => ban !== ONE_EXPORTED_CLASS_PER_FILE),
       ],
     },
   },

@@ -1,27 +1,6 @@
-import {
-  NonRetryableError,
-  RelayBusError,
-  assertEventType,
-  type EventEnvelope,
-} from '@relaybus/core';
+import { assertEventType, type EventEnvelope } from '@relaybus/core';
+import { InvalidKafkaMessageError, UnencodableEventError } from './errors.js';
 import type { KafkaBytes, KafkaIncomingHeaders, KafkaOutgoingHeaders } from './kafka-client.js';
-
-/** A Kafka record that cannot be turned into an {@link EventEnvelope}. Never retried. */
-export class InvalidKafkaMessageError extends RelayBusError {
-  override name = 'InvalidKafkaMessageError';
-  override readonly code: string = 'RELAYBUS_KAFKA_INVALID_MESSAGE';
-}
-
-/**
- * An event that cannot be written to Kafka: its payload is not representable as
- * JSON (`undefined`, a function, a symbol, a `BigInt`, a circular structure) or
- * its `occurredAt` is not an RFC 3339 instant (invalid date, year outside 0..9999).
- * Retrying cannot help, so it is a {@link NonRetryableError}.
- */
-export class UnencodableEventError extends NonRetryableError {
-  override name = 'UnencodableEventError';
-  override readonly code: string = 'RELAYBUS_KAFKA_UNENCODABLE_EVENT';
-}
 
 /** The wire form of one event: a Kafka record in CloudEvents binary content mode. */
 export interface EncodedMessage {

@@ -74,11 +74,8 @@ export type {
   SubscribeOptions,
 } from './handler-registry.js';
 export { createUuidV7, type IdentifierGenerator } from './identifier.js';
-export {
-  InMemoryEventStore,
-  InMemoryTransaction,
-  type InMemoryEventStoreOptions,
-} from './in-memory-event-store.js';
+export { InMemoryEventStore, type InMemoryEventStoreOptions } from './in-memory-event-store.js';
+export { InMemoryTransaction } from './in-memory-transaction.js';
 export type { FailureStage, RelayBusLogger, RelayBusObserver } from './observer.js';
 export {
   RelayBus,
