@@ -11,6 +11,44 @@ import {
 
 const DEFAULT_LIST_LIMIT = 100;
 
+/** The bound placeholders of the filters of a listing; undefined where the query has none. */
+type ListFilters = {
+  readonly handler: string | undefined;
+  readonly eventType: string | undefined;
+  readonly eventId: string | undefined;
+  readonly status: string | undefined;
+};
+
+/** Binds the filters, then the limit, as parameters in that order. */
+function bindListFilters(query: DeliveryQuery): {
+  parameters: PostgresParameter[];
+  filters: ListFilters;
+  limit: string;
+} {
+  const parameters: PostgresParameter[] = [];
+  const bind = (value: PostgresParameter): string => {
+    parameters.push(value);
+    return `$${parameters.length}::${typeof value === 'number' ? 'int' : 'text'}`;
+  };
+  const filters = {
+    handler: query.handler === undefined ? undefined : bind(query.handler),
+    eventType: query.eventType === undefined ? undefined : bind(query.eventType),
+    eventId: query.eventId === undefined ? undefined : bind(query.eventId),
+    status: query.status === undefined ? undefined : bind(query.status),
+  };
+  const limit = bind(query.limit ?? DEFAULT_LIST_LIMIT);
+  return { parameters, filters, limit };
+}
+
+/** The conditions of the handler, event type and event id filters on the rows of `alias`. */
+function listConditions(filters: ListFilters, alias: string): string[] {
+  return [
+    ...(filters.handler === undefined ? [] : [`${alias}.handler = ${filters.handler}`]),
+    ...(filters.eventType === undefined ? [] : [`event.type = ${filters.eventType}`]),
+    ...(filters.eventId === undefined ? [] : [`${alias}.event_id = ${filters.eventId}`]),
+  ];
+}
+
 /** Statements for listing, requeueing and statistics. */
 export class QueryStatements {
   readonly #names: PostgresNames;
@@ -41,33 +79,35 @@ WHERE delivery.id = dead.id AND delivery.status = 'dead'`);
    * Records of the completion history (when kept) are listed as `completed`.
    */
   listDeliveries(query: DeliveryQuery): PostgresStatement {
-    const parameters: PostgresParameter[] = [];
-    const bind = (value: PostgresParameter): string => {
-      parameters.push(value);
-      return `$${parameters.length}::${typeof value === 'number' ? 'int' : 'text'}`;
+    const { parameters, filters, limit } = bindListFilters(query);
+    const current = this.#currentDeliveries(filters);
+    const includeHistory =
+      this.#names.completionHistory && (query.status === undefined || query.status === 'completed');
+    if (!includeHistory) {
+      return {
+        sql: `${current}\nORDER BY delivery.created_at, delivery.id\nLIMIT ${limit}`,
+        parameters,
+      };
+    }
+    const history = this.#completionHistory(filters);
+    return {
+      sql: `SELECT * FROM (\n${current}\nUNION ALL\n${history}\n) AS listed\nORDER BY created_at, delivery_id\nLIMIT ${limit}`,
+      parameters,
     };
-    const filters = {
-      handler: query.handler === undefined ? undefined : bind(query.handler),
-      eventType: query.eventType === undefined ? undefined : bind(query.eventType),
-      eventId: query.eventId === undefined ? undefined : bind(query.eventId),
-      status: query.status === undefined ? undefined : bind(query.status),
-    };
-    const limit = bind(query.limit ?? DEFAULT_LIST_LIMIT);
-    const common = (alias: string): string[] => [
-      ...(filters.handler === undefined ? [] : [`${alias}.handler = ${filters.handler}`]),
-      ...(filters.eventType === undefined ? [] : [`event.type = ${filters.eventType}`]),
-      ...(filters.eventId === undefined ? [] : [`${alias}.event_id = ${filters.eventId}`]),
-    ];
+  }
+
+  /** The deliveries that still exist, with a running one reported as `processing`. */
+  #currentDeliveries(filters: ListFilters): string {
     const inFlight = `(delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight))`;
     const whereCurrent = [
-      ...common('delivery'),
+      ...listConditions(filters, 'delivery'),
       ...(filters.status === undefined
         ? []
         : [
             `(CASE WHEN ${inFlight} THEN 'processing' ELSE delivery.status END) = ${filters.status}`,
           ]),
     ];
-    const current = `SELECT delivery.id AS delivery_id, delivery.handler,
+    return `SELECT delivery.id AS delivery_id, delivery.handler,
   CASE WHEN ${inFlight} THEN 'processing' ELSE delivery.status END AS status,
   (delivery.attempts + CASE WHEN ${inFlight} THEN 1 ELSE 0 END)::int AS attempts,
   ${isoText('delivery.available_at')} AS available_at,
@@ -82,15 +122,12 @@ FROM ${this.#names.deliveries} AS delivery
 JOIN ${this.#names.lanes} AS lane ON lane.lane = delivery.lane
 JOIN ${this.#names.events} AS event ON event.id = delivery.event_id
 ${whereCurrent.length === 0 ? '' : `WHERE ${whereCurrent.join(' AND ')}`}`;
-    const includeHistory =
-      this.#names.completionHistory && (query.status === undefined || query.status === 'completed');
-    if (!includeHistory) {
-      return {
-        sql: `${current}\nORDER BY delivery.created_at, delivery.id\nLIMIT ${limit}`,
-        parameters,
-      };
-    }
-    const history = `SELECT done.id AS delivery_id, done.handler, 'completed' AS status, done.attempts,
+  }
+
+  /** The completion history records, listed as `completed`. */
+  #completionHistory(filters: ListFilters): string {
+    const common = (alias: string): string[] => listConditions(filters, alias);
+    return `SELECT done.id AS delivery_id, done.handler, 'completed' AS status, done.attempts,
   ${isoText('done.available_at')} AS available_at,
   NULL AS lease_owner,
   NULL AS lease_expires_at,
@@ -102,10 +139,6 @@ ${whereCurrent.length === 0 ? '' : `WHERE ${whereCurrent.join(' AND ')}`}`;
 FROM ${this.#names.completions} AS done
 JOIN ${this.#names.events} AS event ON event.id = done.event_id
 ${common('done').length === 0 ? '' : `WHERE ${common('done').join(' AND ')}`}`;
-    return {
-      sql: `SELECT * FROM (\n${current}\nUNION ALL\n${history}\n) AS listed\nORDER BY created_at, delivery_id\nLIMIT ${limit}`,
-      parameters,
-    };
   }
 
   /**

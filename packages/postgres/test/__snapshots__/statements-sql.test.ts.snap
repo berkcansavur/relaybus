@@ -1,0 +1,2860 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`statement SQL > creates the same schema with custom names with completion history 1`] = `
+[
+  "CREATE SCHEMA IF NOT EXISTS "bus"",
+  "CREATE TABLE IF NOT EXISTS "bus"."x_events" (
+  id text PRIMARY KEY,
+  type text NOT NULL,
+  source text NOT NULL,
+  key text,
+  sequence bigint,
+  payload jsonb NOT NULL,
+  headers jsonb NOT NULL DEFAULT '{}'::jsonb,
+  correlation_id text,
+  causation_id text,
+  occurred_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL,
+  handlers text[] NOT NULL DEFAULT '{}'
+)",
+  "CREATE INDEX IF NOT EXISTS "x_events_created_idx" ON "bus"."x_events" (created_at, id)",
+  "CREATE TABLE IF NOT EXISTS "bus"."x_key_sequences" (
+  key text PRIMARY KEY,
+  sequence bigint NOT NULL
+)",
+  "CREATE TABLE IF NOT EXISTS "bus"."x_deliveries" (
+  id text COLLATE "C" PRIMARY KEY,
+  event_id text NOT NULL REFERENCES "bus"."x_events" (id) ON DELETE CASCADE,
+  handler text NOT NULL,
+  lane smallint NOT NULL,
+  claims integer NOT NULL DEFAULT 0,
+  status text NOT NULL CHECK (status IN ('pending', 'processing', 'completed', 'dead')),
+  attempts integer NOT NULL DEFAULT 0,
+  available_at timestamptz NOT NULL,
+  last_error jsonb,
+  key text,
+  sequence bigint,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  completed_at timestamptz,
+  CONSTRAINT "x_deliveries_event_handler_unique" UNIQUE (event_id, handler)
+) WITH (autovacuum_vacuum_scale_factor = 0.02, autovacuum_analyze_scale_factor = 0.05)",
+  "DO $relaybus_upgrade$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid = '"bus"."x_deliveries"'::regclass AND attname = 'lease_token' AND NOT attisdropped
+  ) THEN
+    ALTER TABLE "bus"."x_events" ADD COLUMN IF NOT EXISTS handlers text[] NOT NULL DEFAULT '{}';
+    UPDATE "bus"."x_events" AS event SET handlers = known.handlers
+    FROM (
+      SELECT event_id, array_agg(handler) AS handlers FROM "bus"."x_deliveries" GROUP BY event_id
+    ) AS known
+    WHERE event.id = known.event_id;
+    ALTER TABLE "bus"."x_deliveries" ADD COLUMN IF NOT EXISTS lane smallint;
+    UPDATE "bus"."x_deliveries" SET lane = (hashtextextended(COALESCE(key, event_id), 0) & 255)::smallint WHERE lane IS NULL;
+    ALTER TABLE "bus"."x_deliveries" ALTER COLUMN lane SET NOT NULL;
+    UPDATE "bus"."x_deliveries" SET status = 'pending' WHERE status = 'processing';
+    ALTER TABLE "bus"."x_deliveries"
+      DROP COLUMN lease_owner, DROP COLUMN lease_token, DROP COLUMN lease_expires_at;
+  END IF;
+END
+$relaybus_upgrade$",
+  "ALTER TABLE "bus"."x_deliveries" ADD COLUMN IF NOT EXISTS claims integer NOT NULL DEFAULT 0",
+  "ALTER TABLE "bus"."x_deliveries" SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_analyze_scale_factor = 0.05)",
+  "DROP INDEX IF EXISTS "bus"."x_deliveries_due_idx"",
+  "DROP INDEX IF EXISTS "bus"."x_deliveries_due_unkeyed_idx"",
+  "DROP INDEX IF EXISTS "bus"."x_deliveries_handler_created_idx"",
+  "DROP INDEX IF EXISTS "bus"."x_deliveries_key_unfinished_idx"",
+  "DROP INDEX IF EXISTS "bus"."x_deliveries_key_processing_idx"",
+  "DROP INDEX IF EXISTS "bus"."x_deliveries_status_created_idx"",
+  "CREATE INDEX IF NOT EXISTS "x_deliveries_lane_due_idx" ON "bus"."x_deliveries" (lane, available_at, id) WHERE status = 'pending'",
+  "CREATE INDEX IF NOT EXISTS "x_deliveries_key_pending_idx" ON "bus"."x_deliveries" (lane, handler, key, sequence) WHERE key IS NOT NULL AND status = 'pending'",
+  "CREATE INDEX IF NOT EXISTS "x_deliveries_completed_idx" ON "bus"."x_deliveries" (completed_at, id) WHERE status = 'completed'",
+  "CREATE INDEX IF NOT EXISTS "x_deliveries_dead_idx" ON "bus"."x_deliveries" (updated_at, id) WHERE status = 'dead'",
+  "CREATE TABLE IF NOT EXISTS "bus"."x_lanes" (
+  lane smallint PRIMARY KEY CHECK (lane >= 0 AND lane < 256),
+  epoch bigint NOT NULL DEFAULT 0,
+  lease_owner text,
+  lease_expires_at timestamptz,
+  in_flight text[] NOT NULL DEFAULT '{}',
+  claim_floor bigint NOT NULL DEFAULT 0
+) WITH (fillfactor = 50)",
+  "ALTER TABLE "bus"."x_lanes" ADD COLUMN IF NOT EXISTS claim_floor bigint NOT NULL DEFAULT 0",
+  "CREATE TABLE IF NOT EXISTS "bus"."x_event_completions" (
+  event_id text PRIMARY KEY REFERENCES "bus"."x_events" (id) ON DELETE CASCADE,
+  completed_at timestamptz NOT NULL
+)",
+  "CREATE INDEX IF NOT EXISTS "x_event_completions_completed_idx" ON "bus"."x_event_completions" (completed_at, event_id)",
+  "INSERT INTO "bus"."x_lanes" (lane) SELECT generate_series(0, 255)::smallint ON CONFLICT (lane) DO NOTHING",
+  "CREATE TABLE IF NOT EXISTS "bus"."x_completed_deliveries" (
+  id text COLLATE "C" PRIMARY KEY,
+  event_id text NOT NULL REFERENCES "bus"."x_events" (id) ON DELETE CASCADE,
+  handler text NOT NULL,
+  attempts integer NOT NULL,
+  available_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL,
+  completed_at timestamptz NOT NULL
+)",
+  "CREATE INDEX IF NOT EXISTS "x_completed_deliveries_completed_idx" ON "bus"."x_completed_deliveries" (completed_at, id)",
+  "COMMENT ON TABLE "bus"."x_lanes" IS 'relaybus schema 22458fc899be38d2ee6edc6fd04a041b'",
+]
+`;
+
+exports[`statement SQL > creates the same schema with defaults 1`] = `
+[
+  "CREATE TABLE IF NOT EXISTS "public"."relaybus_events" (
+  id text PRIMARY KEY,
+  type text NOT NULL,
+  source text NOT NULL,
+  key text,
+  sequence bigint,
+  payload jsonb NOT NULL,
+  headers jsonb NOT NULL DEFAULT '{}'::jsonb,
+  correlation_id text,
+  causation_id text,
+  occurred_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL,
+  handlers text[] NOT NULL DEFAULT '{}'
+)",
+  "CREATE INDEX IF NOT EXISTS "relaybus_events_created_idx" ON "public"."relaybus_events" (created_at, id)",
+  "CREATE TABLE IF NOT EXISTS "public"."relaybus_key_sequences" (
+  key text PRIMARY KEY,
+  sequence bigint NOT NULL
+)",
+  "CREATE TABLE IF NOT EXISTS "public"."relaybus_deliveries" (
+  id text COLLATE "C" PRIMARY KEY,
+  event_id text NOT NULL REFERENCES "public"."relaybus_events" (id) ON DELETE CASCADE,
+  handler text NOT NULL,
+  lane smallint NOT NULL,
+  claims integer NOT NULL DEFAULT 0,
+  status text NOT NULL CHECK (status IN ('pending', 'processing', 'completed', 'dead')),
+  attempts integer NOT NULL DEFAULT 0,
+  available_at timestamptz NOT NULL,
+  last_error jsonb,
+  key text,
+  sequence bigint,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  completed_at timestamptz,
+  CONSTRAINT "relaybus_deliveries_event_handler_unique" UNIQUE (event_id, handler)
+) WITH (autovacuum_vacuum_scale_factor = 0.02, autovacuum_analyze_scale_factor = 0.05)",
+  "DO $relaybus_upgrade$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid = '"public"."relaybus_deliveries"'::regclass AND attname = 'lease_token' AND NOT attisdropped
+  ) THEN
+    ALTER TABLE "public"."relaybus_events" ADD COLUMN IF NOT EXISTS handlers text[] NOT NULL DEFAULT '{}';
+    UPDATE "public"."relaybus_events" AS event SET handlers = known.handlers
+    FROM (
+      SELECT event_id, array_agg(handler) AS handlers FROM "public"."relaybus_deliveries" GROUP BY event_id
+    ) AS known
+    WHERE event.id = known.event_id;
+    ALTER TABLE "public"."relaybus_deliveries" ADD COLUMN IF NOT EXISTS lane smallint;
+    UPDATE "public"."relaybus_deliveries" SET lane = (hashtextextended(COALESCE(key, event_id), 0) & 255)::smallint WHERE lane IS NULL;
+    ALTER TABLE "public"."relaybus_deliveries" ALTER COLUMN lane SET NOT NULL;
+    UPDATE "public"."relaybus_deliveries" SET status = 'pending' WHERE status = 'processing';
+    ALTER TABLE "public"."relaybus_deliveries"
+      DROP COLUMN lease_owner, DROP COLUMN lease_token, DROP COLUMN lease_expires_at;
+  END IF;
+END
+$relaybus_upgrade$",
+  "ALTER TABLE "public"."relaybus_deliveries" ADD COLUMN IF NOT EXISTS claims integer NOT NULL DEFAULT 0",
+  "ALTER TABLE "public"."relaybus_deliveries" SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_analyze_scale_factor = 0.05)",
+  "DROP INDEX IF EXISTS "public"."relaybus_deliveries_due_idx"",
+  "DROP INDEX IF EXISTS "public"."relaybus_deliveries_due_unkeyed_idx"",
+  "DROP INDEX IF EXISTS "public"."relaybus_deliveries_handler_created_idx"",
+  "DROP INDEX IF EXISTS "public"."relaybus_deliveries_key_unfinished_idx"",
+  "DROP INDEX IF EXISTS "public"."relaybus_deliveries_key_processing_idx"",
+  "DROP INDEX IF EXISTS "public"."relaybus_deliveries_status_created_idx"",
+  "CREATE INDEX IF NOT EXISTS "relaybus_deliveries_lane_due_idx" ON "public"."relaybus_deliveries" (lane, available_at, id) WHERE status = 'pending'",
+  "CREATE INDEX IF NOT EXISTS "relaybus_deliveries_key_pending_idx" ON "public"."relaybus_deliveries" (lane, handler, key, sequence) WHERE key IS NOT NULL AND status = 'pending'",
+  "CREATE INDEX IF NOT EXISTS "relaybus_deliveries_completed_idx" ON "public"."relaybus_deliveries" (completed_at, id) WHERE status = 'completed'",
+  "CREATE INDEX IF NOT EXISTS "relaybus_deliveries_dead_idx" ON "public"."relaybus_deliveries" (updated_at, id) WHERE status = 'dead'",
+  "CREATE TABLE IF NOT EXISTS "public"."relaybus_lanes" (
+  lane smallint PRIMARY KEY CHECK (lane >= 0 AND lane < 256),
+  epoch bigint NOT NULL DEFAULT 0,
+  lease_owner text,
+  lease_expires_at timestamptz,
+  in_flight text[] NOT NULL DEFAULT '{}',
+  claim_floor bigint NOT NULL DEFAULT 0
+) WITH (fillfactor = 50)",
+  "ALTER TABLE "public"."relaybus_lanes" ADD COLUMN IF NOT EXISTS claim_floor bigint NOT NULL DEFAULT 0",
+  "CREATE TABLE IF NOT EXISTS "public"."relaybus_event_completions" (
+  event_id text PRIMARY KEY REFERENCES "public"."relaybus_events" (id) ON DELETE CASCADE,
+  completed_at timestamptz NOT NULL
+)",
+  "CREATE INDEX IF NOT EXISTS "relaybus_event_completions_completed_idx" ON "public"."relaybus_event_completions" (completed_at, event_id)",
+  "INSERT INTO "public"."relaybus_lanes" (lane) SELECT generate_series(0, 255)::smallint ON CONFLICT (lane) DO NOTHING",
+  "COMMENT ON TABLE "public"."relaybus_lanes" IS 'relaybus schema ae44fe2cd55d06183921bc5e2bb0db92'",
+]
+`;
+
+exports[`statement SQL > is unchanged with custom names with completion history 1`] = `
+{
+  "append": {
+    "insertDeliveries": "WITH incoming AS (
+  SELECT incoming.id, incoming.event_id, incoming.handler, incoming.available_at
+  FROM jsonb_to_recordset($1::jsonb) AS incoming (id text, event_id text, handler text, available_at timestamptz)
+), fresh AS (
+  SELECT incoming.*, event.key, event.sequence, (hashtextextended(COALESCE(event.key, event.id), 0) & 255)::smallint AS lane
+  FROM incoming
+  JOIN "bus"."x_events" AS event ON event.id = incoming.event_id
+  WHERE event.id = ANY (ARRAY(SELECT jsonb_array_elements_text($3::jsonb))) OR NOT incoming.handler = ANY (event.handlers)
+), inserted AS (
+  INSERT INTO "bus"."x_deliveries"
+    (id, event_id, handler, lane, status, attempts, available_at, key, sequence, created_at, updated_at)
+  SELECT fresh.id, fresh.event_id, fresh.handler, fresh.lane, 'pending', 0, fresh.available_at,
+    fresh.key, fresh.sequence, $2::timestamptz, $2::timestamptz
+  FROM fresh
+  ORDER BY fresh.event_id, fresh.handler
+  ON CONFLICT (event_id, handler) DO NOTHING
+  RETURNING id, event_id, handler, available_at
+), extended AS (
+  UPDATE "bus"."x_events" AS event SET handlers = event.handlers || added.handlers
+  FROM (
+    SELECT inserted.event_id, array_agg(inserted.handler) AS handlers FROM inserted
+    WHERE inserted.event_id <> ALL (ARRAY(SELECT jsonb_array_elements_text($3::jsonb))) GROUP BY inserted.event_id
+  ) AS added
+  WHERE event.id = added.event_id
+  RETURNING event.id
+), woken AS (
+  SELECT pg_notify('bus.x_deliveries', '') FROM (
+    SELECT 1 FROM inserted WHERE inserted.available_at <= $4::timestamptz LIMIT 1
+  ) AS due
+)
+SELECT id FROM inserted WHERE (SELECT count(*) FROM woken) >= 0",
+    "insertEvents": "INSERT INTO "bus"."x_events"
+  (id, type, source, key, sequence, payload, headers, correlation_id, causation_id, occurred_at, created_at, handlers)
+SELECT incoming.id, incoming.type, incoming.source, incoming.key, incoming.sequence,
+  COALESCE(incoming.payload, 'null'::jsonb), COALESCE(incoming.headers, '{}'::jsonb),
+  incoming.correlation_id, incoming.causation_id, incoming.occurred_at, $2::timestamptz,
+  COALESCE(incoming.handlers, '{}')
+FROM jsonb_to_recordset($1::jsonb) AS incoming (
+  id text, type text, source text, key text, sequence bigint, payload jsonb, headers jsonb,
+  correlation_id text, causation_id text, occurred_at timestamptz, handlers text[])
+ORDER BY incoming.id
+ON CONFLICT (id) DO NOTHING
+RETURNING id",
+    "insertFreshEvents": "WITH reserved AS (
+  INSERT INTO "bus"."x_key_sequences" AS reserved (key, sequence)
+  SELECT requested.key, requested.count
+  FROM jsonb_to_recordset($4::jsonb) AS requested (key text, count bigint)
+  ORDER BY requested.key
+  ON CONFLICT (key) DO UPDATE SET sequence = reserved.sequence + EXCLUDED.sequence
+  RETURNING reserved.key AS key, reserved.sequence AS sequence
+), incoming AS (
+  SELECT incoming.*,
+    CASE WHEN incoming.key IS NULL THEN NULL ELSE
+      reserved.sequence - count(*) OVER (PARTITION BY incoming.key)
+        + row_number() OVER (PARTITION BY incoming.key ORDER BY incoming.ordinal)
+    END AS sequence
+  FROM jsonb_to_recordset($1::jsonb) AS incoming (
+    ordinal int, id text, type text, source text, key text, payload jsonb, headers jsonb,
+    correlation_id text, causation_id text, occurred_at timestamptz, handlers text[])
+  LEFT JOIN reserved ON reserved.key = incoming.key
+), inserted_events AS (
+  INSERT INTO "bus"."x_events"
+    (id, type, source, key, sequence, payload, headers, correlation_id, causation_id, occurred_at, created_at, handlers)
+  SELECT incoming.id, incoming.type, incoming.source, incoming.key, incoming.sequence,
+    COALESCE(incoming.payload, 'null'::jsonb), COALESCE(incoming.headers, '{}'::jsonb),
+    incoming.correlation_id, incoming.causation_id, incoming.occurred_at, $2::timestamptz,
+    COALESCE(incoming.handlers, '{}')
+  FROM incoming
+  ORDER BY incoming.id
+  ON CONFLICT (id) DO NOTHING
+  RETURNING id, key, sequence
+), inserted_deliveries AS (
+  INSERT INTO "bus"."x_deliveries"
+    (id, event_id, handler, lane, status, attempts, available_at, key, sequence, created_at, updated_at)
+  SELECT delivery.id, delivery.event_id, delivery.handler, (hashtextextended(COALESCE(event.key, event.id), 0) & 255)::smallint, 'pending', 0,
+    delivery.available_at, event.key, event.sequence, $2::timestamptz, $2::timestamptz
+  FROM jsonb_to_recordset($3::jsonb) AS delivery (id text, event_id text, handler text, available_at timestamptz)
+  JOIN inserted_events AS event ON event.id = delivery.event_id
+  ORDER BY delivery.event_id, delivery.handler
+  ON CONFLICT (event_id, handler) DO NOTHING
+  RETURNING available_at
+), woken AS (
+  SELECT pg_notify('bus.x_deliveries', '') FROM (
+    SELECT 1 FROM inserted_deliveries WHERE inserted_deliveries.available_at <= $5::timestamptz LIMIT 1
+  ) AS due
+)
+SELECT incoming.id, incoming.sequence::text AS sequence,
+  incoming.id IN (SELECT inserted_events.id FROM inserted_events) AS inserted,
+  (SELECT count(*) FROM inserted_deliveries)::int AS deliveries
+FROM incoming
+WHERE (SELECT count(*) FROM woken) >= 0",
+    "lockExistingEvents": "SELECT id FROM "bus"."x_events"
+WHERE id = ANY (ARRAY(SELECT jsonb_array_elements_text($1::jsonb)))
+ORDER BY id
+FOR NO KEY UPDATE",
+    "notify": "SELECT pg_notify('bus.x_deliveries', '')",
+  },
+  "claim": {
+    "claim": "WITH scope AS MATERIALIZED (
+  SELECT lane.lane, lane.epoch, lane.in_flight FROM "bus"."x_lanes" AS lane WHERE lane.lane = ANY (ARRAY(SELECT jsonb_array_elements_text($4::jsonb)::smallint))
+), running AS MATERIALIZED (
+  SELECT delivery.handler, delivery.key
+  FROM scope
+  CROSS JOIN LATERAL unnest(scope.in_flight) AS flying (id)
+  JOIN "bus"."x_deliveries" AS delivery ON delivery.id = flying.id
+  WHERE delivery.status = 'pending' AND delivery.key IS NOT NULL
+),
+due_window AS MATERIALIZED (
+  SELECT recent.id, recent.lane, recent.available_at
+  FROM scope
+  CROSS JOIN LATERAL (
+    SELECT delivery.id, delivery.lane, delivery.available_at
+    FROM "bus"."x_deliveries" AS delivery
+    WHERE delivery.lane = scope.lane AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+      AND delivery.id <> ALL (scope.in_flight)
+    ORDER BY delivery.available_at, delivery.id
+    LIMIT 64
+  ) AS recent
+  ORDER BY recent.available_at, recent.id
+  LIMIT 256
+), candidates AS MATERIALIZED (
+  SELECT delivery.id, delivery.lane, delivery.available_at
+  FROM due_window
+  JOIN "bus"."x_deliveries" AS delivery ON delivery.id = due_window.id
+  WHERE delivery.key IS NULL OR NOT (EXISTS (
+        SELECT 1 FROM "bus"."x_deliveries" AS earlier
+        WHERE earlier.lane = delivery.lane AND earlier.handler = delivery.handler AND earlier.key = delivery.key
+          AND earlier.status = 'pending' AND earlier.key IS NOT NULL
+          AND earlier.sequence < delivery.sequence
+      ) OR EXISTS (
+        SELECT 1 FROM running
+        WHERE running.handler = delivery.handler AND running.key = delivery.key
+      ))
+  ORDER BY delivery.available_at, delivery.id
+  LIMIT $3::int
+)
+SELECT ((SELECT count(*) FROM due_window) >= 256 OR EXISTS (SELECT 1 FROM due_window GROUP BY lane HAVING count(*) >= 64)) AS window_saturated, picked.*
+FROM (SELECT 1) AS anchor
+LEFT JOIN (
+  SELECT candidates.available_at AS due_at, delivery.id AS delivery_id, delivery.lane::int AS lane,
+    scope.epoch::text AS epoch, delivery.claims AS claims, delivery.handler, delivery.key AS delivery_key, delivery.sequence::text AS sequence, (delivery.attempts + 1)::int AS attempt,
+    event.id AS event_id,
+    event.type AS event_type,
+    event.source AS event_source,
+    event.key AS event_key,
+    event.payload::text AS event_payload,
+    event.headers::text AS event_headers,
+    event.correlation_id AS event_correlation_id,
+    event.causation_id AS event_causation_id,
+    to_char(event.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS event_occurred_at
+  FROM candidates
+  JOIN scope ON scope.lane = candidates.lane
+  JOIN "bus"."x_deliveries" AS delivery ON delivery.id = candidates.id
+  JOIN "bus"."x_events" AS event ON event.id = delivery.event_id
+) AS picked ON true
+ORDER BY picked.due_at, picked.delivery_id",
+    "claimBehindBlockedKeys": "WITH scope AS MATERIALIZED (
+  SELECT lane.lane, lane.epoch, lane.in_flight FROM "bus"."x_lanes" AS lane WHERE lane.lane = ANY (ARRAY(SELECT jsonb_array_elements_text($4::jsonb)::smallint))
+), running AS MATERIALIZED (
+  SELECT delivery.handler, delivery.key
+  FROM scope
+  CROSS JOIN LATERAL unnest(scope.in_flight) AS flying (id)
+  JOIN "bus"."x_deliveries" AS delivery ON delivery.id = flying.id
+  WHERE delivery.status = 'pending' AND delivery.key IS NOT NULL
+),
+heads AS MATERIALIZED (
+  SELECT head.id, head.lane, head.available_at, head.handler, head.key
+  FROM scope
+  CROSS JOIN LATERAL (
+    WITH RECURSIVE hops (handler, key) AS (
+      SELECT (SELECT min(wanted.handler) FROM jsonb_array_elements_text($2::jsonb) AS wanted (handler)), NULL::text
+      UNION ALL
+      SELECT CASE WHEN next.key IS NULL THEN (SELECT min(wanted.handler) FROM jsonb_array_elements_text($2::jsonb) AS wanted (handler) WHERE wanted.handler > hops.handler) ELSE hops.handler END, next.key
+      FROM hops
+      CROSS JOIN LATERAL (
+        SELECT CASE WHEN hops.key IS NULL
+          THEN (SELECT candidate.key FROM "bus"."x_deliveries" AS candidate
+                WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key IS NOT NULL
+                ORDER BY candidate.key LIMIT 1)
+          ELSE (SELECT candidate.key FROM "bus"."x_deliveries" AS candidate
+                WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key > hops.key
+                ORDER BY candidate.key LIMIT 1)
+        END AS key
+        OFFSET 0
+      ) AS next
+      WHERE hops.handler IS NOT NULL
+    )
+    SELECT lowest.id, lowest.lane, lowest.available_at, lowest.handler, lowest.key
+    FROM hops
+    CROSS JOIN LATERAL (
+      SELECT candidate.id, candidate.lane, candidate.available_at, candidate.handler, candidate.key
+      FROM "bus"."x_deliveries" AS candidate
+      WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key = hops.key
+      ORDER BY candidate.sequence LIMIT 1
+    ) AS lowest
+    WHERE hops.key IS NOT NULL
+  ) AS head
+), keyed AS MATERIALIZED (
+  SELECT heads.id, heads.lane, heads.available_at
+  FROM heads
+  JOIN scope ON scope.lane = heads.lane
+  WHERE heads.available_at <= $1::timestamptz AND heads.id <> ALL (scope.in_flight)
+    AND NOT EXISTS (SELECT 1 FROM running WHERE running.handler = heads.handler AND running.key = heads.key)
+  ORDER BY heads.available_at, heads.id
+  LIMIT $3::int
+), unkeyed AS MATERIALIZED (
+  SELECT recent.id, recent.lane, recent.available_at
+  FROM scope
+  CROSS JOIN LATERAL (
+    SELECT delivery.id, delivery.lane, delivery.available_at
+    FROM "bus"."x_deliveries" AS delivery
+    WHERE delivery.lane = scope.lane AND delivery.key IS NULL AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+      AND delivery.id <> ALL (scope.in_flight)
+    ORDER BY delivery.available_at, delivery.id
+    LIMIT $3::int
+  ) AS recent
+  ORDER BY recent.available_at, recent.id
+  LIMIT $3::int
+), candidates AS MATERIALIZED (
+  SELECT id, lane, available_at FROM (
+    SELECT id, lane, available_at FROM keyed
+    UNION ALL
+    SELECT id, lane, available_at FROM unkeyed
+  ) AS both_sets
+  ORDER BY available_at, id
+  LIMIT $3::int
+)
+SELECT false AS window_saturated, picked.*
+FROM (SELECT 1) AS anchor
+LEFT JOIN (
+  SELECT candidates.available_at AS due_at, delivery.id AS delivery_id, delivery.lane::int AS lane,
+    scope.epoch::text AS epoch, delivery.claims AS claims, delivery.handler, delivery.key AS delivery_key, delivery.sequence::text AS sequence, (delivery.attempts + 1)::int AS attempt,
+    event.id AS event_id,
+    event.type AS event_type,
+    event.source AS event_source,
+    event.key AS event_key,
+    event.payload::text AS event_payload,
+    event.headers::text AS event_headers,
+    event.correlation_id AS event_correlation_id,
+    event.causation_id AS event_causation_id,
+    to_char(event.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS event_occurred_at
+  FROM candidates
+  JOIN scope ON scope.lane = candidates.lane
+  JOIN "bus"."x_deliveries" AS delivery ON delivery.id = candidates.id
+  JOIN "bus"."x_events" AS event ON event.id = delivery.event_id
+) AS picked ON true
+ORDER BY picked.due_at, picked.delivery_id",
+    "reconcileClaims": "WITH owned AS MATERIALIZED (
+  SELECT lane.lane FROM "bus"."x_lanes" AS lane
+  WHERE lane.lease_owner = $1::text AND lane.claim_floor <= $3::bigint
+  ORDER BY lane.lane
+  FOR NO KEY UPDATE
+)
+UPDATE "bus"."x_lanes" AS lane
+SET in_flight = ARRAY(SELECT flying.id FROM unnest(lane.in_flight) AS flying (id) WHERE EXISTS (SELECT 1 FROM jsonb_to_recordset($2::jsonb) AS handed (id text, lane smallint, epoch bigint, claims int) JOIN "bus"."x_deliveries" AS delivery ON delivery.id = handed.id
+      WHERE handed.id = flying.id AND handed.lane = lane.lane AND handed.epoch = lane.epoch AND delivery.claims = handed.claims)),
+    claim_floor = $3::bigint
+FROM owned
+WHERE lane.lane = owned.lane AND lane.lease_owner = $1::text AND lane.claim_floor <= $3::bigint",
+    "recordClaim": "WITH picked AS (
+  SELECT recorded.lane, recorded.ids
+  FROM jsonb_to_recordset($1::jsonb) AS recorded (lane smallint, ids text[])
+), still_running AS (
+  SELECT lane.lane, array_agg(delivery.id) AS ids
+  FROM picked
+  JOIN "bus"."x_lanes" AS lane ON lane.lane = picked.lane
+  CROSS JOIN LATERAL unnest(lane.in_flight) AS flying (id)
+  JOIN "bus"."x_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+  GROUP BY lane.lane
+), extended AS (
+  UPDATE "bus"."x_lanes" AS lane
+  SET in_flight = COALESCE(still_running.ids, '{}') || picked.ids,
+      lease_expires_at = GREATEST(lane.lease_expires_at, $4::timestamptz)
+  FROM picked
+  LEFT JOIN still_running ON still_running.lane = picked.lane
+  WHERE lane.lane = picked.lane
+  RETURNING lane.lane
+), freed AS (
+  UPDATE "bus"."x_lanes" AS lane
+  SET lease_owner = NULL, lease_expires_at = NULL, in_flight = '{}'
+  WHERE lane.lane = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)::smallint))
+    AND lane.lease_owner = $3::text
+    AND NOT EXISTS (
+      SELECT 1 FROM unnest(lane.in_flight) AS flying (id)
+      JOIN "bus"."x_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+    )
+  RETURNING lane.lane
+)
+SELECT (SELECT count(*) FROM extended)::int AS extended, (SELECT count(*) FROM freed)::int AS freed",
+    "relinquish": "WITH owned AS MATERIALIZED (
+  SELECT lane.lane FROM "bus"."x_lanes" AS lane
+  WHERE lane.lease_owner = $1::text
+  ORDER BY lane.lane
+  FOR NO KEY UPDATE
+)
+UPDATE "bus"."x_lanes" AS lane
+SET lease_owner = NULL, lease_expires_at = NULL, in_flight = '{}'
+FROM owned
+WHERE lane.lane = owned.lane AND lane.lease_owner = $1::text AND NOT EXISTS (
+      SELECT 1 FROM unnest(lane.in_flight) AS flying (id)
+      JOIN "bus"."x_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+    )",
+  },
+  "completion": {
+    "bury": "WITH fence AS MATERIALIZED (
+  SELECT lane.lane FROM "bus"."x_lanes" AS lane
+  WHERE lane.lane = $2::smallint AND lane.epoch = $3::bigint AND $1::text = ANY (lane.in_flight)
+  FOR NO KEY UPDATE
+), changed AS (
+  UPDATE "bus"."x_deliveries" AS delivery SET status = 'dead', last_error = $5::jsonb, attempts = delivery.attempts + 1, claims = delivery.claims + 1, updated_at = $6::timestamptz
+  FROM fence
+  WHERE delivery.id = $1::text AND delivery.lane = fence.lane AND delivery.status = 'pending'
+    AND delivery.claims = $4::int
+  RETURNING delivery.id
+), trimmed AS (
+  UPDATE "bus"."x_lanes" AS lane SET in_flight = array_remove(lane.in_flight, $1::text)
+  FROM changed WHERE lane.lane = $2::smallint
+  RETURNING lane.lane
+)
+SELECT count(*)::int AS count FROM changed",
+    "complete": "WITH leases AS (
+  SELECT lease.ord, lease.id, lease.lane, lease.epoch, lease.claims
+  FROM jsonb_to_recordset($1::jsonb) AS lease (ord int, id text, lane smallint, epoch bigint, claims int)
+), fence AS MATERIALIZED (
+  SELECT lane.lane, lane.epoch, lane.in_flight
+  FROM "bus"."x_lanes" AS lane
+  WHERE lane.lane IN (SELECT lane FROM leases)
+  ORDER BY lane.lane
+  FOR KEY SHARE
+), completed AS (
+  DELETE FROM "bus"."x_deliveries" AS delivery
+  USING leases JOIN fence ON fence.lane = leases.lane AND fence.epoch = leases.epoch
+  WHERE delivery.id = leases.id AND delivery.lane = leases.lane AND delivery.status = 'pending'
+    AND delivery.claims = leases.claims AND leases.id = ANY (fence.in_flight)
+  RETURNING leases.ord, delivery.id, delivery.event_id, delivery.handler, delivery.attempts, delivery.available_at, delivery.created_at
+), stamped AS (
+  INSERT INTO "bus"."x_event_completions" (event_id, completed_at)
+  SELECT DISTINCT completed.event_id, $2::timestamptz FROM completed
+  -- Event id order: completions of other handlers of the same events lock these rows too.
+  ORDER BY completed.event_id
+  ON CONFLICT (event_id) DO UPDATE SET completed_at = GREATEST("bus"."x_event_completions".completed_at, EXCLUDED.completed_at)
+  RETURNING event_id
+), archived AS (
+  INSERT INTO "bus"."x_completed_deliveries" (id, event_id, handler, attempts, available_at, created_at, completed_at)
+  SELECT id, event_id, handler, attempts + 1, available_at, created_at, $2::timestamptz FROM completed
+  RETURNING id
+)
+SELECT ord FROM completed",
+    "extendLease": "WITH changed AS (UPDATE "bus"."x_lanes" AS lane
+SET lease_expires_at = GREATEST(lane.lease_expires_at, $5::timestamptz)
+WHERE lane.lane = $2::smallint AND lane.epoch = $3::bigint AND $1::text = ANY (lane.in_flight)
+  AND EXISTS (
+    SELECT 1 FROM "bus"."x_deliveries" AS delivery
+    WHERE delivery.id = $1::text AND delivery.status = 'pending' AND delivery.claims = $4::int
+  ) RETURNING 1) SELECT count(*)::int AS count FROM changed",
+    "release": "WITH fence AS MATERIALIZED (
+  SELECT lane.lane FROM "bus"."x_lanes" AS lane
+  WHERE lane.lane = $2::smallint AND lane.epoch = $3::bigint AND $1::text = ANY (lane.in_flight)
+  FOR NO KEY UPDATE
+), changed AS (
+  UPDATE "bus"."x_deliveries" AS delivery SET available_at = $5::timestamptz, claims = delivery.claims + 1, updated_at = $5::timestamptz
+  FROM fence
+  WHERE delivery.id = $1::text AND delivery.lane = fence.lane AND delivery.status = 'pending'
+    AND delivery.claims = $4::int
+  RETURNING delivery.id
+), trimmed AS (
+  UPDATE "bus"."x_lanes" AS lane SET in_flight = array_remove(lane.in_flight, $1::text)
+  FROM changed WHERE lane.lane = $2::smallint
+  RETURNING lane.lane
+)
+SELECT count(*)::int AS count FROM changed",
+    "reschedule": "WITH fence AS MATERIALIZED (
+  SELECT lane.lane FROM "bus"."x_lanes" AS lane
+  WHERE lane.lane = $2::smallint AND lane.epoch = $3::bigint AND $1::text = ANY (lane.in_flight)
+  FOR NO KEY UPDATE
+), changed AS (
+  UPDATE "bus"."x_deliveries" AS delivery SET available_at = $5::timestamptz, last_error = $6::jsonb, attempts = delivery.attempts + 1, claims = delivery.claims + 1, updated_at = $7::timestamptz
+  FROM fence
+  WHERE delivery.id = $1::text AND delivery.lane = fence.lane AND delivery.status = 'pending'
+    AND delivery.claims = $4::int
+  RETURNING delivery.id
+), trimmed AS (
+  UPDATE "bus"."x_lanes" AS lane SET in_flight = array_remove(lane.in_flight, $1::text)
+  FROM changed WHERE lane.lane = $2::smallint
+  RETURNING lane.lane
+)
+SELECT count(*)::int AS count FROM changed",
+  },
+  "lanes": {
+    "claimHeldLanes": "WITH held AS MATERIALIZED (
+  SELECT lane.lane, lane.epoch, lane.in_flight
+  FROM "bus"."x_lanes" AS lane
+  WHERE lane.lease_owner = $4::text AND lane.lease_expires_at > $1::timestamptz
+    AND lane.claim_floor = $6::bigint
+  ORDER BY lane.lane
+  FOR NO KEY UPDATE
+), stale AS (
+  -- A claim that waited for a lane lock sees the new lane row but reads deliveries with the snapshot it took
+  -- before the wait: whatever changed the lane meanwhile (a reschedule, a release) may also have changed
+  -- deliveries it cannot see. The statement then does nothing and reports it, and the caller runs it again.
+  SELECT EXISTS (
+    SELECT 1 FROM held
+    JOIN "bus"."x_lanes" AS before ON before.lane = held.lane
+    WHERE before.epoch <> held.epoch OR before.in_flight IS DISTINCT FROM held.in_flight
+  ) AS value
+), held_scope AS MATERIALIZED (
+  SELECT held.lane, held.epoch, held.in_flight FROM held WHERE NOT (SELECT value FROM stale)
+), held_running AS MATERIALIZED (
+  SELECT delivery.handler, delivery.key
+  FROM held_scope
+  CROSS JOIN LATERAL unnest(held_scope.in_flight) AS flying (id)
+  JOIN "bus"."x_deliveries" AS delivery ON delivery.id = flying.id
+  WHERE delivery.status = 'pending' AND delivery.key IS NOT NULL
+), held_window AS MATERIALIZED (
+  SELECT recent.id, recent.lane, recent.available_at, recent.handler, recent.key, recent.sequence
+  FROM held_scope
+  CROSS JOIN LATERAL (
+    SELECT delivery.id, delivery.lane, delivery.available_at, delivery.handler, delivery.key, delivery.sequence
+    FROM "bus"."x_deliveries" AS delivery
+    WHERE delivery.lane = held_scope.lane AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+      AND delivery.id <> ALL (held_scope.in_flight)
+    ORDER BY delivery.available_at, delivery.id
+    LIMIT 64
+  ) AS recent
+  ORDER BY recent.available_at, recent.id
+  LIMIT 256
+), held_fast AS MATERIALIZED (
+  SELECT picked.id, picked.lane, picked.available_at FROM (
+    SELECT unkeyed.id, unkeyed.lane, unkeyed.available_at FROM held_window AS unkeyed WHERE unkeyed.key IS NULL
+    UNION ALL
+    SELECT head.id, head.lane, head.available_at
+    FROM (
+      SELECT DISTINCT ON (keyed.handler, keyed.key) keyed.id, keyed.lane, keyed.available_at, keyed.handler, keyed.key, keyed.sequence
+      FROM held_window AS keyed
+      WHERE keyed.key IS NOT NULL
+      ORDER BY keyed.handler, keyed.key, keyed.sequence
+    ) AS head
+    WHERE NOT EXISTS (
+        SELECT 1 FROM "bus"."x_deliveries" AS earlier
+        WHERE earlier.lane = head.lane AND earlier.handler = head.handler AND earlier.key = head.key
+          AND earlier.status = 'pending' AND earlier.key IS NOT NULL AND earlier.sequence < head.sequence
+      ) AND NOT EXISTS (SELECT 1 FROM held_running AS running WHERE running.handler = head.handler AND running.key = head.key)
+  ) AS picked
+  ORDER BY picked.available_at, picked.id
+  LIMIT $3::int
+), held_saturated AS MATERIALIZED (
+  SELECT held_scope.lane, held_scope.in_flight FROM held_scope
+  WHERE (SELECT count(*) FROM held_fast) < $3::int
+    AND ((SELECT count(*) FROM held_window) >= 256
+      OR held_scope.lane IN (
+        SELECT full_lane.lane FROM held_window AS full_lane
+        GROUP BY full_lane.lane HAVING count(*) >= 64
+      ))
+), held_heads AS MATERIALIZED (
+  SELECT head.id, head.lane, head.available_at, head.handler, head.key
+  FROM held_saturated AS scope
+  CROSS JOIN LATERAL (
+    WITH RECURSIVE hops (handler, key) AS (
+      SELECT (SELECT min(wanted.handler) FROM jsonb_array_elements_text($2::jsonb) AS wanted (handler)), NULL::text
+      UNION ALL
+      SELECT CASE WHEN next.key IS NULL THEN (SELECT min(wanted.handler) FROM jsonb_array_elements_text($2::jsonb) AS wanted (handler) WHERE wanted.handler > hops.handler) ELSE hops.handler END, next.key
+      FROM hops
+      CROSS JOIN LATERAL (
+        SELECT CASE WHEN hops.key IS NULL
+          THEN (SELECT candidate.key FROM "bus"."x_deliveries" AS candidate
+                WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key IS NOT NULL
+                ORDER BY candidate.key LIMIT 1)
+          ELSE (SELECT candidate.key FROM "bus"."x_deliveries" AS candidate
+                WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key > hops.key
+                ORDER BY candidate.key LIMIT 1)
+        END AS key
+        OFFSET 0
+      ) AS next
+      WHERE hops.handler IS NOT NULL
+    )
+    SELECT lowest.id, lowest.lane, lowest.available_at, lowest.handler, lowest.key
+    FROM hops
+    CROSS JOIN LATERAL (
+      SELECT candidate.id, candidate.lane, candidate.available_at, candidate.handler, candidate.key
+      FROM "bus"."x_deliveries" AS candidate
+      WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key = hops.key
+      ORDER BY candidate.sequence LIMIT 1
+    ) AS lowest
+    WHERE hops.key IS NOT NULL
+  ) AS head
+), held_keyed AS MATERIALIZED (
+  SELECT heads.id, heads.lane, heads.available_at
+  FROM held_heads AS heads
+  JOIN held_saturated AS scope ON scope.lane = heads.lane
+  WHERE heads.available_at <= $1::timestamptz AND heads.id <> ALL (scope.in_flight) AND NOT EXISTS (SELECT 1 FROM held_running AS running WHERE running.handler = heads.handler AND running.key = heads.key)
+  ORDER BY heads.available_at, heads.id
+  LIMIT $3::int
+), held_unkeyed AS MATERIALIZED (
+  SELECT recent.id, recent.lane, recent.available_at
+  FROM held_saturated AS scope
+  CROSS JOIN LATERAL (
+    SELECT delivery.id, delivery.lane, delivery.available_at
+    FROM "bus"."x_deliveries" AS delivery
+    WHERE delivery.lane = scope.lane AND delivery.key IS NULL AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+      AND delivery.id <> ALL (scope.in_flight)
+    ORDER BY delivery.available_at, delivery.id
+    LIMIT $3::int
+  ) AS recent
+  ORDER BY recent.available_at, recent.id
+  LIMIT $3::int
+), held_candidates AS MATERIALIZED (
+  SELECT chosen.id, chosen.lane, chosen.available_at FROM (
+    SELECT fast.id, fast.lane, fast.available_at FROM held_fast AS fast
+    UNION
+    SELECT keyed.id, keyed.lane, keyed.available_at FROM held_keyed AS keyed
+    UNION
+    SELECT unkeyed.id, unkeyed.lane, unkeyed.available_at FROM held_unkeyed AS unkeyed
+  ) AS chosen
+  ORDER BY chosen.available_at, chosen.id
+  LIMIT $3::int
+), wanted AS MATERIALIZED (
+  SELECT CASE WHEN (SELECT value FROM stale) THEN 0
+    ELSE $3::int - (SELECT count(*) FROM held_candidates)::int END AS count
+), free_lanes AS (
+  SELECT NULL::smallint AS lane, NULL::bigint AS epoch, NULL::text[] AS in_flight, false AS running WHERE false
+), free_scope AS (
+  SELECT NULL::smallint AS lane, NULL::bigint AS epoch WHERE false
+), free_candidates AS (
+  SELECT NULL::text AS id, NULL::smallint AS lane, NULL::timestamptz AS available_at WHERE false
+), claim_scope AS MATERIALIZED (
+  SELECT held_scope.lane, held_scope.epoch FROM held_scope
+  UNION ALL
+  SELECT free_scope.lane, free_scope.epoch FROM free_scope
+), picked_rows AS MATERIALIZED (
+  SELECT candidates.available_at AS due_at, delivery.id AS delivery_id, delivery.lane::int AS lane,
+    scope.epoch::text AS epoch, delivery.claims AS claims, delivery.handler, delivery.key AS delivery_key, delivery.sequence::text AS sequence, (delivery.attempts + 1)::int AS attempt,
+    event.id AS event_id,
+    event.type AS event_type,
+    event.source AS event_source,
+    event.key AS event_key,
+    event.payload::text AS event_payload,
+    event.headers::text AS event_headers,
+    event.correlation_id AS event_correlation_id,
+    event.causation_id AS event_causation_id,
+    to_char(event.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS event_occurred_at
+  FROM (
+    SELECT held_candidates.id, held_candidates.lane, held_candidates.available_at FROM held_candidates
+    UNION ALL
+    SELECT free_candidates.id, free_candidates.lane, free_candidates.available_at FROM free_candidates
+  ) AS candidates
+  JOIN claim_scope AS scope ON scope.lane = candidates.lane
+  JOIN "bus"."x_deliveries" AS delivery ON delivery.id = candidates.id
+  JOIN "bus"."x_events" AS event ON event.id = delivery.event_id
+), by_lane AS (
+  SELECT picked_rows.lane, array_agg(picked_rows.delivery_id) AS ids FROM picked_rows GROUP BY picked_rows.lane
+), still_running AS (
+  -- The retained ids come from the locked \`held\` rows, not from the lane table: a claim that waited for the lock
+  -- must see the in-flight list the claim before it recorded, which the statement snapshot may not.
+  SELECT held.lane, array_agg(delivery.id) AS ids
+  FROM by_lane
+  JOIN held ON held.lane = by_lane.lane
+  CROSS JOIN LATERAL unnest(held.in_flight) AS flying (id)
+  JOIN "bus"."x_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+  GROUP BY held.lane
+), extended AS (
+  UPDATE "bus"."x_lanes" AS lane
+  SET in_flight = COALESCE(still_running.ids, '{}') || by_lane.ids,
+      lease_expires_at = GREATEST(lane.lease_expires_at, $5::timestamptz)
+  FROM by_lane
+  JOIN held_scope ON held_scope.lane = by_lane.lane
+  LEFT JOIN still_running ON still_running.lane = by_lane.lane
+  WHERE lane.lane = by_lane.lane
+  RETURNING lane.lane
+), taken AS (
+  UPDATE "bus"."x_lanes" AS lane
+  SET epoch = free_scope.epoch, lease_owner = $4::text, lease_expires_at = $5::timestamptz,
+      in_flight = by_lane.ids, claim_floor = $6::bigint
+  FROM free_scope
+  JOIN by_lane ON by_lane.lane = free_scope.lane
+  WHERE lane.lane = free_scope.lane
+  RETURNING lane.lane
+), saturated_lanes AS (
+  SELECT held_window.lane FROM held_window GROUP BY held_window.lane HAVING count(*) >= 64
+), freed AS (
+  UPDATE "bus"."x_lanes" AS lane
+  SET lease_owner = NULL, lease_expires_at = NULL, in_flight = '{}'
+  FROM held
+  WHERE lane.lane = held.lane
+    AND lane.lane NOT IN (SELECT lane FROM by_lane)
+    AND lane.lane NOT IN (SELECT lane FROM saturated_lanes)
+    AND (SELECT count(*) FROM held_window) < 256
+    AND NOT (SELECT value FROM stale)
+    AND NOT EXISTS (
+      SELECT 1 FROM unnest(lane.in_flight) AS flying (id)
+      JOIN "bus"."x_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+    )
+  RETURNING lane.lane
+)
+SELECT (SELECT value FROM stale) AS stale,
+  EXISTS (SELECT 1 FROM free_lanes WHERE free_lanes.running) AS takeover_waiting,
+  (SELECT count(*) FROM free_lanes) = (SELECT count FROM wanted) + 16 AS unexamined_free_lanes,
+  (
+    SELECT COALESCE(jsonb_agg(delivery.id), '[]'::jsonb)
+    FROM held
+    CROSS JOIN LATERAL unnest(held.in_flight) AS flying (id)
+    JOIN "bus"."x_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+  )::text AS running_ids,
+  (SELECT COALESCE(jsonb_agg(held.lane), '[]'::jsonb) FROM held)::text AS examined_lanes,
+  picked.*
+FROM (SELECT 1) AS anchor
+LEFT JOIN picked_rows AS picked ON true
+ORDER BY picked.due_at, picked.delivery_id",
+    "claimLanes": "WITH held AS MATERIALIZED (
+  SELECT lane.lane, lane.epoch, lane.in_flight
+  FROM "bus"."x_lanes" AS lane
+  WHERE lane.lease_owner = $4::text AND lane.lease_expires_at > $1::timestamptz
+    AND lane.claim_floor = $6::bigint
+  ORDER BY lane.lane
+  FOR NO KEY UPDATE
+), stale AS (
+  -- A claim that waited for a lane lock sees the new lane row but reads deliveries with the snapshot it took
+  -- before the wait: whatever changed the lane meanwhile (a reschedule, a release) may also have changed
+  -- deliveries it cannot see. The statement then does nothing and reports it, and the caller runs it again.
+  SELECT EXISTS (
+    SELECT 1 FROM held
+    JOIN "bus"."x_lanes" AS before ON before.lane = held.lane
+    WHERE before.epoch <> held.epoch OR before.in_flight IS DISTINCT FROM held.in_flight
+  ) AS value
+), held_scope AS MATERIALIZED (
+  SELECT held.lane, held.epoch, held.in_flight FROM held WHERE NOT (SELECT value FROM stale)
+), held_running AS MATERIALIZED (
+  SELECT delivery.handler, delivery.key
+  FROM held_scope
+  CROSS JOIN LATERAL unnest(held_scope.in_flight) AS flying (id)
+  JOIN "bus"."x_deliveries" AS delivery ON delivery.id = flying.id
+  WHERE delivery.status = 'pending' AND delivery.key IS NOT NULL
+), held_window AS MATERIALIZED (
+  SELECT recent.id, recent.lane, recent.available_at, recent.handler, recent.key, recent.sequence
+  FROM held_scope
+  CROSS JOIN LATERAL (
+    SELECT delivery.id, delivery.lane, delivery.available_at, delivery.handler, delivery.key, delivery.sequence
+    FROM "bus"."x_deliveries" AS delivery
+    WHERE delivery.lane = held_scope.lane AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+      AND delivery.id <> ALL (held_scope.in_flight)
+    ORDER BY delivery.available_at, delivery.id
+    LIMIT 64
+  ) AS recent
+  ORDER BY recent.available_at, recent.id
+  LIMIT 256
+), held_fast AS MATERIALIZED (
+  SELECT picked.id, picked.lane, picked.available_at FROM (
+    SELECT unkeyed.id, unkeyed.lane, unkeyed.available_at FROM held_window AS unkeyed WHERE unkeyed.key IS NULL
+    UNION ALL
+    SELECT head.id, head.lane, head.available_at
+    FROM (
+      SELECT DISTINCT ON (keyed.handler, keyed.key) keyed.id, keyed.lane, keyed.available_at, keyed.handler, keyed.key, keyed.sequence
+      FROM held_window AS keyed
+      WHERE keyed.key IS NOT NULL
+      ORDER BY keyed.handler, keyed.key, keyed.sequence
+    ) AS head
+    WHERE NOT EXISTS (
+        SELECT 1 FROM "bus"."x_deliveries" AS earlier
+        WHERE earlier.lane = head.lane AND earlier.handler = head.handler AND earlier.key = head.key
+          AND earlier.status = 'pending' AND earlier.key IS NOT NULL AND earlier.sequence < head.sequence
+      ) AND NOT EXISTS (SELECT 1 FROM held_running AS running WHERE running.handler = head.handler AND running.key = head.key)
+  ) AS picked
+  ORDER BY picked.available_at, picked.id
+  LIMIT $3::int
+), held_saturated AS MATERIALIZED (
+  SELECT held_scope.lane, held_scope.in_flight FROM held_scope
+  WHERE (SELECT count(*) FROM held_fast) < $3::int
+    AND ((SELECT count(*) FROM held_window) >= 256
+      OR held_scope.lane IN (
+        SELECT full_lane.lane FROM held_window AS full_lane
+        GROUP BY full_lane.lane HAVING count(*) >= 64
+      ))
+), held_heads AS MATERIALIZED (
+  SELECT head.id, head.lane, head.available_at, head.handler, head.key
+  FROM held_saturated AS scope
+  CROSS JOIN LATERAL (
+    WITH RECURSIVE hops (handler, key) AS (
+      SELECT (SELECT min(wanted.handler) FROM jsonb_array_elements_text($2::jsonb) AS wanted (handler)), NULL::text
+      UNION ALL
+      SELECT CASE WHEN next.key IS NULL THEN (SELECT min(wanted.handler) FROM jsonb_array_elements_text($2::jsonb) AS wanted (handler) WHERE wanted.handler > hops.handler) ELSE hops.handler END, next.key
+      FROM hops
+      CROSS JOIN LATERAL (
+        SELECT CASE WHEN hops.key IS NULL
+          THEN (SELECT candidate.key FROM "bus"."x_deliveries" AS candidate
+                WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key IS NOT NULL
+                ORDER BY candidate.key LIMIT 1)
+          ELSE (SELECT candidate.key FROM "bus"."x_deliveries" AS candidate
+                WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key > hops.key
+                ORDER BY candidate.key LIMIT 1)
+        END AS key
+        OFFSET 0
+      ) AS next
+      WHERE hops.handler IS NOT NULL
+    )
+    SELECT lowest.id, lowest.lane, lowest.available_at, lowest.handler, lowest.key
+    FROM hops
+    CROSS JOIN LATERAL (
+      SELECT candidate.id, candidate.lane, candidate.available_at, candidate.handler, candidate.key
+      FROM "bus"."x_deliveries" AS candidate
+      WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key = hops.key
+      ORDER BY candidate.sequence LIMIT 1
+    ) AS lowest
+    WHERE hops.key IS NOT NULL
+  ) AS head
+), held_keyed AS MATERIALIZED (
+  SELECT heads.id, heads.lane, heads.available_at
+  FROM held_heads AS heads
+  JOIN held_saturated AS scope ON scope.lane = heads.lane
+  WHERE heads.available_at <= $1::timestamptz AND heads.id <> ALL (scope.in_flight) AND NOT EXISTS (SELECT 1 FROM held_running AS running WHERE running.handler = heads.handler AND running.key = heads.key)
+  ORDER BY heads.available_at, heads.id
+  LIMIT $3::int
+), held_unkeyed AS MATERIALIZED (
+  SELECT recent.id, recent.lane, recent.available_at
+  FROM held_saturated AS scope
+  CROSS JOIN LATERAL (
+    SELECT delivery.id, delivery.lane, delivery.available_at
+    FROM "bus"."x_deliveries" AS delivery
+    WHERE delivery.lane = scope.lane AND delivery.key IS NULL AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+      AND delivery.id <> ALL (scope.in_flight)
+    ORDER BY delivery.available_at, delivery.id
+    LIMIT $3::int
+  ) AS recent
+  ORDER BY recent.available_at, recent.id
+  LIMIT $3::int
+), held_candidates AS MATERIALIZED (
+  SELECT chosen.id, chosen.lane, chosen.available_at FROM (
+    SELECT fast.id, fast.lane, fast.available_at FROM held_fast AS fast
+    UNION
+    SELECT keyed.id, keyed.lane, keyed.available_at FROM held_keyed AS keyed
+    UNION
+    SELECT unkeyed.id, unkeyed.lane, unkeyed.available_at FROM held_unkeyed AS unkeyed
+  ) AS chosen
+  ORDER BY chosen.available_at, chosen.id
+  LIMIT $3::int
+), wanted AS MATERIALIZED (
+  SELECT CASE WHEN (SELECT value FROM stale) THEN 0
+    ELSE $3::int - (SELECT count(*) FROM held_candidates)::int END AS count
+), free_lanes AS MATERIALIZED (
+  -- The oldest due delivery of each free lane: one index probe per free lane, bounded by the due time,
+  -- so deliveries scheduled for later are never read.
+  SELECT lane.lane, lane.epoch, lane.in_flight, lane.lease_owner, lane.lease_expires_at,
+    oldest.available_at, oldest.id, NOT NOT EXISTS (
+      SELECT 1 FROM unnest(lane.in_flight) AS flying (id)
+      JOIN "bus"."x_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+    ) AS running
+  FROM "bus"."x_lanes" AS lane
+  CROSS JOIN LATERAL (
+    SELECT delivery.available_at, delivery.id
+    FROM "bus"."x_deliveries" AS delivery
+    WHERE delivery.lane = lane.lane AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+    ORDER BY delivery.available_at, delivery.id
+    LIMIT 1
+  ) AS oldest
+  WHERE (SELECT count FROM wanted) > 0 AND (lane.lease_expires_at IS NULL OR lane.lease_expires_at <= $1::timestamptz
+      OR (lane.lease_owner = $4::text AND lane.claim_floor < $6::bigint))
+  ORDER BY oldest.available_at, oldest.id
+  LIMIT (SELECT count FROM wanted) + 16
+), free_depth AS MATERIALIZED (
+  -- What each candidate lane can give now, from its first due deliveries: unkeyed ones, and of a key its
+  -- lowest one when nothing earlier of the key is pending. Lanes that can give nothing are passed over;
+  -- of the others, the first 4 are taken, and further ones until they cover what is
+  -- still wanted, so the earliest due work of the free lanes comes first.
+  SELECT runnable.lane,
+    row_number() OVER (ORDER BY runnable.available_at, runnable.id) AS rank,
+    sum(runnable.count) OVER (ORDER BY runnable.available_at, runnable.id ROWS UNBOUNDED PRECEDING) - runnable.count AS due_before
+  FROM (
+    SELECT lane_candidate.lane, lane_candidate.available_at, lane_candidate.id, depth.count
+    FROM free_lanes AS lane_candidate
+    CROSS JOIN LATERAL (
+      -- A full window that shows nothing runnable may hide runnable work behind it: such a lane counts
+      -- once, and the claim looks behind its blocked deliveries.
+      SELECT GREATEST(count(*) FILTER (
+          WHERE due.key IS NULL OR (due.position = 1 AND NOT EXISTS (
+            SELECT 1 FROM "bus"."x_deliveries" AS earlier
+            WHERE earlier.lane = due.lane AND earlier.handler = due.handler AND earlier.key = due.key
+              AND earlier.status = 'pending' AND earlier.key IS NOT NULL AND earlier.sequence < due.sequence
+          ))
+        ), CASE WHEN count(*) >= 16 THEN 1 ELSE 0 END) AS count
+      FROM (
+        SELECT window_rows.*,
+          row_number() OVER (PARTITION BY window_rows.handler, window_rows.key ORDER BY window_rows.sequence) AS position
+        FROM (
+          SELECT delivery.lane, delivery.handler, delivery.key, delivery.sequence FROM "bus"."x_deliveries" AS delivery
+          WHERE delivery.lane = lane_candidate.lane AND delivery.status = 'pending'
+            AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+          ORDER BY delivery.available_at, delivery.id
+          LIMIT 16
+        ) AS window_rows
+      ) AS due
+    ) AS depth
+    WHERE NOT lane_candidate.running AND depth.count > 0
+  ) AS runnable
+), free_locked AS MATERIALIZED (
+  SELECT lane.lane, lane.epoch, lane.in_flight, lane.lease_owner, lane.lease_expires_at
+  FROM "bus"."x_lanes" AS lane
+  WHERE lane.lane IN (
+      SELECT chosen.lane FROM free_depth AS chosen
+      WHERE chosen.rank <= 4 OR chosen.due_before < (SELECT count FROM wanted)
+    )
+    AND (lane.lease_expires_at IS NULL OR lane.lease_expires_at <= $1::timestamptz
+      OR (lane.lease_owner = $4::text AND lane.claim_floor < $6::bigint))
+  ORDER BY lane.lane
+  FOR UPDATE SKIP LOCKED
+), free_scope AS MATERIALIZED (
+  -- A lane whose locked row is not the one the snapshot saw changed hands meanwhile: left for a later claim.
+  SELECT locked.lane, locked.epoch + 1 AS epoch, '{}'::text[] AS in_flight
+  FROM free_locked AS locked
+  JOIN free_lanes AS seen ON seen.lane = locked.lane
+  WHERE locked.epoch = seen.epoch AND locked.in_flight = seen.in_flight
+    AND locked.lease_owner IS NOT DISTINCT FROM seen.lease_owner
+    AND locked.lease_expires_at IS NOT DISTINCT FROM seen.lease_expires_at
+), free_window AS MATERIALIZED (
+  SELECT recent.id, recent.lane, recent.available_at, recent.handler, recent.key, recent.sequence
+  FROM free_scope
+  CROSS JOIN LATERAL (
+    SELECT delivery.id, delivery.lane, delivery.available_at, delivery.handler, delivery.key, delivery.sequence
+    FROM "bus"."x_deliveries" AS delivery
+    WHERE delivery.lane = free_scope.lane AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+      AND delivery.id <> ALL (free_scope.in_flight)
+    ORDER BY delivery.available_at, delivery.id
+    LIMIT 64
+  ) AS recent
+  ORDER BY recent.available_at, recent.id
+  LIMIT 256
+), free_fast AS MATERIALIZED (
+  SELECT picked.id, picked.lane, picked.available_at FROM (
+    SELECT unkeyed.id, unkeyed.lane, unkeyed.available_at FROM free_window AS unkeyed WHERE unkeyed.key IS NULL
+    UNION ALL
+    SELECT head.id, head.lane, head.available_at
+    FROM (
+      SELECT DISTINCT ON (keyed.handler, keyed.key) keyed.id, keyed.lane, keyed.available_at, keyed.handler, keyed.key, keyed.sequence
+      FROM free_window AS keyed
+      WHERE keyed.key IS NOT NULL
+      ORDER BY keyed.handler, keyed.key, keyed.sequence
+    ) AS head
+    WHERE NOT EXISTS (
+        SELECT 1 FROM "bus"."x_deliveries" AS earlier
+        WHERE earlier.lane = head.lane AND earlier.handler = head.handler AND earlier.key = head.key
+          AND earlier.status = 'pending' AND earlier.key IS NOT NULL AND earlier.sequence < head.sequence
+      ) AND true
+  ) AS picked
+  ORDER BY picked.available_at, picked.id
+  LIMIT (SELECT count FROM wanted)
+), free_saturated AS MATERIALIZED (
+  SELECT free_scope.lane, free_scope.in_flight FROM free_scope
+  WHERE (SELECT count(*) FROM free_fast) < (SELECT count FROM wanted)
+    AND ((SELECT count(*) FROM free_window) >= 256
+      OR free_scope.lane IN (
+        SELECT full_lane.lane FROM free_window AS full_lane
+        GROUP BY full_lane.lane HAVING count(*) >= 64
+      ))
+), free_heads AS MATERIALIZED (
+  SELECT head.id, head.lane, head.available_at, head.handler, head.key
+  FROM free_saturated AS scope
+  CROSS JOIN LATERAL (
+    WITH RECURSIVE hops (handler, key) AS (
+      SELECT (SELECT min(wanted.handler) FROM jsonb_array_elements_text($2::jsonb) AS wanted (handler)), NULL::text
+      UNION ALL
+      SELECT CASE WHEN next.key IS NULL THEN (SELECT min(wanted.handler) FROM jsonb_array_elements_text($2::jsonb) AS wanted (handler) WHERE wanted.handler > hops.handler) ELSE hops.handler END, next.key
+      FROM hops
+      CROSS JOIN LATERAL (
+        SELECT CASE WHEN hops.key IS NULL
+          THEN (SELECT candidate.key FROM "bus"."x_deliveries" AS candidate
+                WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key IS NOT NULL
+                ORDER BY candidate.key LIMIT 1)
+          ELSE (SELECT candidate.key FROM "bus"."x_deliveries" AS candidate
+                WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key > hops.key
+                ORDER BY candidate.key LIMIT 1)
+        END AS key
+        OFFSET 0
+      ) AS next
+      WHERE hops.handler IS NOT NULL
+    )
+    SELECT lowest.id, lowest.lane, lowest.available_at, lowest.handler, lowest.key
+    FROM hops
+    CROSS JOIN LATERAL (
+      SELECT candidate.id, candidate.lane, candidate.available_at, candidate.handler, candidate.key
+      FROM "bus"."x_deliveries" AS candidate
+      WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key = hops.key
+      ORDER BY candidate.sequence LIMIT 1
+    ) AS lowest
+    WHERE hops.key IS NOT NULL
+  ) AS head
+), free_keyed AS MATERIALIZED (
+  SELECT heads.id, heads.lane, heads.available_at
+  FROM free_heads AS heads
+  JOIN free_saturated AS scope ON scope.lane = heads.lane
+  WHERE heads.available_at <= $1::timestamptz AND heads.id <> ALL (scope.in_flight) AND true
+  ORDER BY heads.available_at, heads.id
+  LIMIT (SELECT count FROM wanted)
+), free_unkeyed AS MATERIALIZED (
+  SELECT recent.id, recent.lane, recent.available_at
+  FROM free_saturated AS scope
+  CROSS JOIN LATERAL (
+    SELECT delivery.id, delivery.lane, delivery.available_at
+    FROM "bus"."x_deliveries" AS delivery
+    WHERE delivery.lane = scope.lane AND delivery.key IS NULL AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+      AND delivery.id <> ALL (scope.in_flight)
+    ORDER BY delivery.available_at, delivery.id
+    LIMIT (SELECT count FROM wanted)
+  ) AS recent
+  ORDER BY recent.available_at, recent.id
+  LIMIT (SELECT count FROM wanted)
+), free_candidates AS MATERIALIZED (
+  SELECT chosen.id, chosen.lane, chosen.available_at FROM (
+    SELECT fast.id, fast.lane, fast.available_at FROM free_fast AS fast
+    UNION
+    SELECT keyed.id, keyed.lane, keyed.available_at FROM free_keyed AS keyed
+    UNION
+    SELECT unkeyed.id, unkeyed.lane, unkeyed.available_at FROM free_unkeyed AS unkeyed
+  ) AS chosen
+  ORDER BY chosen.available_at, chosen.id
+  LIMIT (SELECT count FROM wanted)
+), claim_scope AS MATERIALIZED (
+  SELECT held_scope.lane, held_scope.epoch FROM held_scope
+  UNION ALL
+  SELECT free_scope.lane, free_scope.epoch FROM free_scope
+), picked_rows AS MATERIALIZED (
+  SELECT candidates.available_at AS due_at, delivery.id AS delivery_id, delivery.lane::int AS lane,
+    scope.epoch::text AS epoch, delivery.claims AS claims, delivery.handler, delivery.key AS delivery_key, delivery.sequence::text AS sequence, (delivery.attempts + 1)::int AS attempt,
+    event.id AS event_id,
+    event.type AS event_type,
+    event.source AS event_source,
+    event.key AS event_key,
+    event.payload::text AS event_payload,
+    event.headers::text AS event_headers,
+    event.correlation_id AS event_correlation_id,
+    event.causation_id AS event_causation_id,
+    to_char(event.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS event_occurred_at
+  FROM (
+    SELECT held_candidates.id, held_candidates.lane, held_candidates.available_at FROM held_candidates
+    UNION ALL
+    SELECT free_candidates.id, free_candidates.lane, free_candidates.available_at FROM free_candidates
+  ) AS candidates
+  JOIN claim_scope AS scope ON scope.lane = candidates.lane
+  JOIN "bus"."x_deliveries" AS delivery ON delivery.id = candidates.id
+  JOIN "bus"."x_events" AS event ON event.id = delivery.event_id
+), by_lane AS (
+  SELECT picked_rows.lane, array_agg(picked_rows.delivery_id) AS ids FROM picked_rows GROUP BY picked_rows.lane
+), still_running AS (
+  -- The retained ids come from the locked \`held\` rows, not from the lane table: a claim that waited for the lock
+  -- must see the in-flight list the claim before it recorded, which the statement snapshot may not.
+  SELECT held.lane, array_agg(delivery.id) AS ids
+  FROM by_lane
+  JOIN held ON held.lane = by_lane.lane
+  CROSS JOIN LATERAL unnest(held.in_flight) AS flying (id)
+  JOIN "bus"."x_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+  GROUP BY held.lane
+), extended AS (
+  UPDATE "bus"."x_lanes" AS lane
+  SET in_flight = COALESCE(still_running.ids, '{}') || by_lane.ids,
+      lease_expires_at = GREATEST(lane.lease_expires_at, $5::timestamptz)
+  FROM by_lane
+  JOIN held_scope ON held_scope.lane = by_lane.lane
+  LEFT JOIN still_running ON still_running.lane = by_lane.lane
+  WHERE lane.lane = by_lane.lane
+  RETURNING lane.lane
+), taken AS (
+  UPDATE "bus"."x_lanes" AS lane
+  SET epoch = free_scope.epoch, lease_owner = $4::text, lease_expires_at = $5::timestamptz,
+      in_flight = by_lane.ids, claim_floor = $6::bigint
+  FROM free_scope
+  JOIN by_lane ON by_lane.lane = free_scope.lane
+  WHERE lane.lane = free_scope.lane
+  RETURNING lane.lane
+), saturated_lanes AS (
+  SELECT held_window.lane FROM held_window GROUP BY held_window.lane HAVING count(*) >= 64
+), freed AS (
+  UPDATE "bus"."x_lanes" AS lane
+  SET lease_owner = NULL, lease_expires_at = NULL, in_flight = '{}'
+  FROM held
+  WHERE lane.lane = held.lane
+    AND lane.lane NOT IN (SELECT lane FROM by_lane)
+    AND lane.lane NOT IN (SELECT lane FROM saturated_lanes)
+    AND (SELECT count(*) FROM held_window) < 256
+    AND NOT (SELECT value FROM stale)
+    AND NOT EXISTS (
+      SELECT 1 FROM unnest(lane.in_flight) AS flying (id)
+      JOIN "bus"."x_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+    )
+  RETURNING lane.lane
+)
+SELECT (SELECT value FROM stale) AS stale,
+  EXISTS (SELECT 1 FROM free_lanes WHERE free_lanes.running) AS takeover_waiting,
+  (SELECT count(*) FROM free_lanes) = (SELECT count FROM wanted) + 16 AS unexamined_free_lanes,
+  (
+    SELECT COALESCE(jsonb_agg(delivery.id), '[]'::jsonb)
+    FROM held
+    CROSS JOIN LATERAL unnest(held.in_flight) AS flying (id)
+    JOIN "bus"."x_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+  )::text AS running_ids,
+  (SELECT COALESCE(jsonb_agg(held.lane), '[]'::jsonb) FROM held)::text AS examined_lanes,
+  picked.*
+FROM (SELECT 1) AS anchor
+LEFT JOIN picked_rows AS picked ON true
+ORDER BY picked.due_at, picked.delivery_id",
+    "takeFreeLanes": "WITH picked AS (
+  -- in_flight is read here, from the locked version of the lane: a settlement that committed after the
+  -- statement took its snapshot has taken its delivery out of the list already and must not be charged again.
+  SELECT free.lane, free.in_flight
+  FROM "bus"."x_lanes" AS free
+  CROSS JOIN LATERAL (
+    SELECT delivery.available_at, delivery.id
+    FROM "bus"."x_deliveries" AS delivery
+    WHERE delivery.lane = free.lane AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+    ORDER BY delivery.available_at, delivery.id
+    LIMIT 1
+  ) AS oldest
+  WHERE free.lease_expires_at IS NULL OR free.lease_expires_at <= $1::timestamptz
+    OR (free.lease_owner = $4::text AND free.claim_floor < $6::bigint)
+  ORDER BY oldest.available_at, oldest.id
+  LIMIT $3::int
+  FOR UPDATE OF free SKIP LOCKED
+), charged AS (
+  UPDATE "bus"."x_deliveries" AS delivery SET attempts = delivery.attempts + 1, claims = delivery.claims + 1
+  FROM (
+    SELECT unnest(picked.in_flight) AS id FROM picked
+  ) AS lost
+  WHERE delivery.id = lost.id AND delivery.status = 'pending'
+  RETURNING delivery.id
+), taken AS (
+  UPDATE "bus"."x_lanes" AS lane
+  SET epoch = lane.epoch + 1, lease_owner = $4::text, lease_expires_at = $5::timestamptz, in_flight = '{}',
+      claim_floor = $6::bigint
+  FROM picked WHERE lane.lane = picked.lane
+  RETURNING lane.lane, lane.epoch
+)
+SELECT lane::int AS lane, epoch::text AS epoch FROM taken ORDER BY lane",
+  },
+  "purge": {
+    "deleteExpiredCompletedOrphanEvents": "WITH changed AS (DELETE FROM "bus"."x_events" AS event
+WHERE event.id = ANY (ARRAY(SELECT jsonb_array_elements_text($1::jsonb)))
+  AND NOT EXISTS (SELECT 1 FROM "bus"."x_deliveries" AS delivery WHERE delivery.event_id = event.id) AND NOT EXISTS (SELECT 1 FROM "bus"."x_completed_deliveries" AS done WHERE done.event_id = event.id)
+  AND EXISTS (
+    SELECT 1 FROM "bus"."x_event_completions" AS completion
+    WHERE completion.event_id = event.id AND completion.completed_at < $2::timestamptz
+  ) RETURNING 1) SELECT count(*)::int AS count FROM changed",
+    "deleteOrphanEventsWithoutCompletion": "WITH changed AS (DELETE FROM "bus"."x_events" AS event
+WHERE event.id = ANY (ARRAY(SELECT jsonb_array_elements_text($1::jsonb)))
+  AND NOT EXISTS (SELECT 1 FROM "bus"."x_deliveries" AS delivery WHERE delivery.event_id = event.id) AND NOT EXISTS (SELECT 1 FROM "bus"."x_completed_deliveries" AS done WHERE done.event_id = event.id)
+  AND NOT EXISTS (SELECT 1 FROM "bus"."x_event_completions" AS completion WHERE completion.event_id = event.id) RETURNING 1) SELECT count(*)::int AS count FROM changed",
+    "lockCompletedOrphanEventsBatch": "SELECT event.id FROM "bus"."x_events" AS event
+JOIN "bus"."x_event_completions" AS completion ON completion.event_id = event.id
+WHERE completion.completed_at < $1::timestamptz
+  AND NOT EXISTS (SELECT 1 FROM "bus"."x_deliveries" AS delivery WHERE delivery.event_id = event.id) AND NOT EXISTS (SELECT 1 FROM "bus"."x_completed_deliveries" AS done WHERE done.event_id = event.id)
+ORDER BY completion.completed_at, event.id
+LIMIT $2::int
+FOR UPDATE OF event SKIP LOCKED",
+    "lockEvents": "SELECT id FROM "bus"."x_events"
+WHERE id = ANY (ARRAY(SELECT jsonb_array_elements_text($1::jsonb)))
+FOR UPDATE SKIP LOCKED",
+    "lockOrphanEventsBatch": "SELECT event.id FROM "bus"."x_events" AS event
+WHERE event.created_at < $1::timestamptz
+  AND NOT EXISTS (SELECT 1 FROM "bus"."x_deliveries" AS delivery WHERE delivery.event_id = event.id) AND NOT EXISTS (SELECT 1 FROM "bus"."x_completed_deliveries" AS done WHERE done.event_id = event.id)
+  AND NOT EXISTS (SELECT 1 FROM "bus"."x_event_completions" AS completion WHERE completion.event_id = event.id)
+ORDER BY event.created_at, event.id
+LIMIT $2::int
+FOR UPDATE OF event SKIP LOCKED",
+    "purgeCompletedBatch": "WITH batch AS MATERIALIZED (
+  SELECT id FROM "bus"."x_deliveries"
+  WHERE status = 'completed' AND completed_at < $1::timestamptz
+  ORDER BY completed_at, id
+  LIMIT $2::int
+  FOR UPDATE SKIP LOCKED
+), deleted AS (
+  DELETE FROM "bus"."x_deliveries" AS delivery USING batch WHERE delivery.id = batch.id RETURNING delivery.event_id
+)
+SELECT event_id FROM deleted",
+    "purgeCompletionHistoryBatch": "WITH batch AS MATERIALIZED (
+  SELECT id FROM "bus"."x_completed_deliveries"
+  WHERE completed_at < $1::timestamptz
+  ORDER BY completed_at, id
+  LIMIT $2::int
+  FOR UPDATE SKIP LOCKED
+), deleted AS (
+  DELETE FROM "bus"."x_completed_deliveries" AS delivery USING batch WHERE delivery.id = batch.id RETURNING delivery.event_id
+)
+SELECT event_id FROM deleted",
+    "purgeDeadBatch": "WITH batch AS MATERIALIZED (
+  SELECT id FROM "bus"."x_deliveries"
+  WHERE status = 'dead' AND updated_at < $1::timestamptz
+  ORDER BY updated_at, id
+  LIMIT $2::int
+  FOR UPDATE SKIP LOCKED
+), deleted AS (
+  DELETE FROM "bus"."x_deliveries" AS delivery USING batch WHERE delivery.id = batch.id RETURNING delivery.event_id
+)
+SELECT event_id FROM deleted",
+  },
+  "queries": {
+    "countByStatus": "SELECT 'pending' AS status, count(*)::text AS count FROM "bus"."x_deliveries" WHERE status = 'pending'
+UNION ALL
+SELECT 'dead' AS status, count(*)::text AS count FROM "bus"."x_deliveries" WHERE status = 'dead'
+UNION ALL
+SELECT 'completed' AS status, count(*)::text AS count FROM "bus"."x_deliveries" WHERE status = 'completed'",
+    "countCompletionHistory": "SELECT count(*)::text AS count FROM "bus"."x_completed_deliveries"",
+    "countRunning": "SELECT count(*)::text AS count
+FROM "bus"."x_lanes" AS lane
+CROSS JOIN LATERAL unnest(lane.in_flight) AS flying (id)
+JOIN "bus"."x_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'",
+    "listDeliveries": [
+      {
+        "parameters": [
+          100,
+        ],
+        "sql": "SELECT * FROM (
+SELECT delivery.id AS delivery_id, delivery.handler,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 'processing' ELSE delivery.status END AS status,
+  (delivery.attempts + CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 1 ELSE 0 END)::int AS attempts,
+  to_char(delivery.available_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS available_at,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN lane.lease_owner END AS lease_owner,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN to_char(lane.lease_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END AS lease_expires_at,
+  delivery.last_error::text AS last_error,
+  to_char(delivery.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+  to_char(delivery.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
+  to_char(delivery.completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS completed_at,
+  event.id AS event_id,
+    event.type AS event_type,
+    event.source AS event_source,
+    event.key AS event_key,
+    event.payload::text AS event_payload,
+    event.headers::text AS event_headers,
+    event.correlation_id AS event_correlation_id,
+    event.causation_id AS event_causation_id,
+    to_char(event.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS event_occurred_at
+FROM "bus"."x_deliveries" AS delivery
+JOIN "bus"."x_lanes" AS lane ON lane.lane = delivery.lane
+JOIN "bus"."x_events" AS event ON event.id = delivery.event_id
+
+UNION ALL
+SELECT done.id AS delivery_id, done.handler, 'completed' AS status, done.attempts,
+  to_char(done.available_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS available_at,
+  NULL AS lease_owner,
+  NULL AS lease_expires_at,
+  NULL AS last_error,
+  to_char(done.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+  to_char(done.completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
+  to_char(done.completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS completed_at,
+  event.id AS event_id,
+    event.type AS event_type,
+    event.source AS event_source,
+    event.key AS event_key,
+    event.payload::text AS event_payload,
+    event.headers::text AS event_headers,
+    event.correlation_id AS event_correlation_id,
+    event.causation_id AS event_causation_id,
+    to_char(event.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS event_occurred_at
+FROM "bus"."x_completed_deliveries" AS done
+JOIN "bus"."x_events" AS event ON event.id = done.event_id
+
+) AS listed
+ORDER BY created_at, delivery_id
+LIMIT $1::int",
+      },
+      {
+        "parameters": [
+          "pending",
+          100,
+        ],
+        "sql": "SELECT delivery.id AS delivery_id, delivery.handler,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 'processing' ELSE delivery.status END AS status,
+  (delivery.attempts + CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 1 ELSE 0 END)::int AS attempts,
+  to_char(delivery.available_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS available_at,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN lane.lease_owner END AS lease_owner,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN to_char(lane.lease_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END AS lease_expires_at,
+  delivery.last_error::text AS last_error,
+  to_char(delivery.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+  to_char(delivery.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
+  to_char(delivery.completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS completed_at,
+  event.id AS event_id,
+    event.type AS event_type,
+    event.source AS event_source,
+    event.key AS event_key,
+    event.payload::text AS event_payload,
+    event.headers::text AS event_headers,
+    event.correlation_id AS event_correlation_id,
+    event.causation_id AS event_causation_id,
+    to_char(event.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS event_occurred_at
+FROM "bus"."x_deliveries" AS delivery
+JOIN "bus"."x_lanes" AS lane ON lane.lane = delivery.lane
+JOIN "bus"."x_events" AS event ON event.id = delivery.event_id
+WHERE (CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 'processing' ELSE delivery.status END) = $1::text
+ORDER BY delivery.created_at, delivery.id
+LIMIT $2::int",
+      },
+      {
+        "parameters": [
+          "processing",
+          100,
+        ],
+        "sql": "SELECT delivery.id AS delivery_id, delivery.handler,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 'processing' ELSE delivery.status END AS status,
+  (delivery.attempts + CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 1 ELSE 0 END)::int AS attempts,
+  to_char(delivery.available_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS available_at,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN lane.lease_owner END AS lease_owner,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN to_char(lane.lease_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END AS lease_expires_at,
+  delivery.last_error::text AS last_error,
+  to_char(delivery.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+  to_char(delivery.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
+  to_char(delivery.completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS completed_at,
+  event.id AS event_id,
+    event.type AS event_type,
+    event.source AS event_source,
+    event.key AS event_key,
+    event.payload::text AS event_payload,
+    event.headers::text AS event_headers,
+    event.correlation_id AS event_correlation_id,
+    event.causation_id AS event_causation_id,
+    to_char(event.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS event_occurred_at
+FROM "bus"."x_deliveries" AS delivery
+JOIN "bus"."x_lanes" AS lane ON lane.lane = delivery.lane
+JOIN "bus"."x_events" AS event ON event.id = delivery.event_id
+WHERE (CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 'processing' ELSE delivery.status END) = $1::text
+ORDER BY delivery.created_at, delivery.id
+LIMIT $2::int",
+      },
+      {
+        "parameters": [
+          "order.placed.v1",
+          "e-1",
+          "completed",
+          100,
+        ],
+        "sql": "SELECT * FROM (
+SELECT delivery.id AS delivery_id, delivery.handler,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 'processing' ELSE delivery.status END AS status,
+  (delivery.attempts + CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 1 ELSE 0 END)::int AS attempts,
+  to_char(delivery.available_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS available_at,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN lane.lease_owner END AS lease_owner,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN to_char(lane.lease_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END AS lease_expires_at,
+  delivery.last_error::text AS last_error,
+  to_char(delivery.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+  to_char(delivery.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
+  to_char(delivery.completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS completed_at,
+  event.id AS event_id,
+    event.type AS event_type,
+    event.source AS event_source,
+    event.key AS event_key,
+    event.payload::text AS event_payload,
+    event.headers::text AS event_headers,
+    event.correlation_id AS event_correlation_id,
+    event.causation_id AS event_causation_id,
+    to_char(event.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS event_occurred_at
+FROM "bus"."x_deliveries" AS delivery
+JOIN "bus"."x_lanes" AS lane ON lane.lane = delivery.lane
+JOIN "bus"."x_events" AS event ON event.id = delivery.event_id
+WHERE event.type = $1::text AND delivery.event_id = $2::text AND (CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 'processing' ELSE delivery.status END) = $3::text
+UNION ALL
+SELECT done.id AS delivery_id, done.handler, 'completed' AS status, done.attempts,
+  to_char(done.available_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS available_at,
+  NULL AS lease_owner,
+  NULL AS lease_expires_at,
+  NULL AS last_error,
+  to_char(done.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+  to_char(done.completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
+  to_char(done.completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS completed_at,
+  event.id AS event_id,
+    event.type AS event_type,
+    event.source AS event_source,
+    event.key AS event_key,
+    event.payload::text AS event_payload,
+    event.headers::text AS event_headers,
+    event.correlation_id AS event_correlation_id,
+    event.causation_id AS event_causation_id,
+    to_char(event.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS event_occurred_at
+FROM "bus"."x_completed_deliveries" AS done
+JOIN "bus"."x_events" AS event ON event.id = done.event_id
+WHERE event.type = $1::text AND done.event_id = $2::text
+) AS listed
+ORDER BY created_at, delivery_id
+LIMIT $4::int",
+      },
+      {
+        "parameters": [
+          "h",
+          "dead",
+          3,
+        ],
+        "sql": "SELECT delivery.id AS delivery_id, delivery.handler,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 'processing' ELSE delivery.status END AS status,
+  (delivery.attempts + CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 1 ELSE 0 END)::int AS attempts,
+  to_char(delivery.available_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS available_at,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN lane.lease_owner END AS lease_owner,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN to_char(lane.lease_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END AS lease_expires_at,
+  delivery.last_error::text AS last_error,
+  to_char(delivery.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+  to_char(delivery.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
+  to_char(delivery.completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS completed_at,
+  event.id AS event_id,
+    event.type AS event_type,
+    event.source AS event_source,
+    event.key AS event_key,
+    event.payload::text AS event_payload,
+    event.headers::text AS event_headers,
+    event.correlation_id AS event_correlation_id,
+    event.causation_id AS event_causation_id,
+    to_char(event.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS event_occurred_at
+FROM "bus"."x_deliveries" AS delivery
+JOIN "bus"."x_lanes" AS lane ON lane.lane = delivery.lane
+JOIN "bus"."x_events" AS event ON event.id = delivery.event_id
+WHERE delivery.handler = $1::text AND (CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 'processing' ELSE delivery.status END) = $2::text
+ORDER BY delivery.created_at, delivery.id
+LIMIT $3::int",
+      },
+    ],
+    "oldestDue": "SELECT to_char(min(due.due_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS oldest_due_at FROM (
+  SELECT waiting.available_at AS due_at
+  FROM "bus"."x_lanes" AS lane
+  CROSS JOIN LATERAL (
+    SELECT delivery.available_at FROM "bus"."x_deliveries" AS delivery
+    WHERE delivery.lane = lane.lane AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.id <> ALL (lane.in_flight)
+    ORDER BY delivery.available_at LIMIT 1
+  ) AS waiting
+  UNION ALL
+  SELECT lane.lease_expires_at AS due_at
+  FROM "bus"."x_lanes" AS lane
+  WHERE lane.lease_expires_at <= $1::timestamptz AND NOT NOT EXISTS (
+      SELECT 1 FROM unnest(lane.in_flight) AS flying (id)
+      JOIN "bus"."x_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+    )
+) AS due",
+    "requeue": "WITH changed AS (WITH dead AS MATERIALIZED (
+  SELECT delivery.id FROM "bus"."x_deliveries" AS delivery
+  WHERE delivery.id = ANY (ARRAY(SELECT jsonb_array_elements_text($1::jsonb))) AND delivery.status = 'dead'
+  ORDER BY delivery.id
+  FOR NO KEY UPDATE
+)
+UPDATE "bus"."x_deliveries" AS delivery
+SET status = 'pending', attempts = 0, available_at = $2::timestamptz, updated_at = $2::timestamptz
+FROM dead
+WHERE delivery.id = dead.id AND delivery.status = 'dead' RETURNING 1) SELECT count(*)::int AS count FROM changed",
+  },
+  "setup": {
+    "schemaCurrent": "SELECT EXISTS (
+  SELECT 1 FROM pg_catalog.pg_class AS c
+  JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+  JOIN pg_catalog.pg_description AS d
+    ON d.objoid = c.oid AND d.classoid = 'pg_catalog.pg_class'::regclass AND d.objsubid = 0
+  WHERE n.nspname = 'bus' AND c.relname = 'x_lanes' AND d.description = $1::text
+) AS current",
+    "setupLock": "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+    "setupLockKey": "relaybus:bus",
+  },
+}
+`;
+
+exports[`statement SQL > is unchanged with defaults 1`] = `
+{
+  "append": {
+    "insertDeliveries": "WITH incoming AS (
+  SELECT incoming.id, incoming.event_id, incoming.handler, incoming.available_at
+  FROM jsonb_to_recordset($1::jsonb) AS incoming (id text, event_id text, handler text, available_at timestamptz)
+), fresh AS (
+  SELECT incoming.*, event.key, event.sequence, (hashtextextended(COALESCE(event.key, event.id), 0) & 255)::smallint AS lane
+  FROM incoming
+  JOIN "public"."relaybus_events" AS event ON event.id = incoming.event_id
+  WHERE event.id = ANY (ARRAY(SELECT jsonb_array_elements_text($3::jsonb))) OR NOT incoming.handler = ANY (event.handlers)
+), inserted AS (
+  INSERT INTO "public"."relaybus_deliveries"
+    (id, event_id, handler, lane, status, attempts, available_at, key, sequence, created_at, updated_at)
+  SELECT fresh.id, fresh.event_id, fresh.handler, fresh.lane, 'pending', 0, fresh.available_at,
+    fresh.key, fresh.sequence, $2::timestamptz, $2::timestamptz
+  FROM fresh
+  ORDER BY fresh.event_id, fresh.handler
+  ON CONFLICT (event_id, handler) DO NOTHING
+  RETURNING id, event_id, handler, available_at
+), extended AS (
+  UPDATE "public"."relaybus_events" AS event SET handlers = event.handlers || added.handlers
+  FROM (
+    SELECT inserted.event_id, array_agg(inserted.handler) AS handlers FROM inserted
+    WHERE inserted.event_id <> ALL (ARRAY(SELECT jsonb_array_elements_text($3::jsonb))) GROUP BY inserted.event_id
+  ) AS added
+  WHERE event.id = added.event_id
+  RETURNING event.id
+), woken AS (
+  SELECT pg_notify('public.relaybus_deliveries', '') FROM (
+    SELECT 1 FROM inserted WHERE inserted.available_at <= $4::timestamptz LIMIT 1
+  ) AS due
+)
+SELECT id FROM inserted WHERE (SELECT count(*) FROM woken) >= 0",
+    "insertEvents": "INSERT INTO "public"."relaybus_events"
+  (id, type, source, key, sequence, payload, headers, correlation_id, causation_id, occurred_at, created_at, handlers)
+SELECT incoming.id, incoming.type, incoming.source, incoming.key, incoming.sequence,
+  COALESCE(incoming.payload, 'null'::jsonb), COALESCE(incoming.headers, '{}'::jsonb),
+  incoming.correlation_id, incoming.causation_id, incoming.occurred_at, $2::timestamptz,
+  COALESCE(incoming.handlers, '{}')
+FROM jsonb_to_recordset($1::jsonb) AS incoming (
+  id text, type text, source text, key text, sequence bigint, payload jsonb, headers jsonb,
+  correlation_id text, causation_id text, occurred_at timestamptz, handlers text[])
+ORDER BY incoming.id
+ON CONFLICT (id) DO NOTHING
+RETURNING id",
+    "insertFreshEvents": "WITH reserved AS (
+  INSERT INTO "public"."relaybus_key_sequences" AS reserved (key, sequence)
+  SELECT requested.key, requested.count
+  FROM jsonb_to_recordset($4::jsonb) AS requested (key text, count bigint)
+  ORDER BY requested.key
+  ON CONFLICT (key) DO UPDATE SET sequence = reserved.sequence + EXCLUDED.sequence
+  RETURNING reserved.key AS key, reserved.sequence AS sequence
+), incoming AS (
+  SELECT incoming.*,
+    CASE WHEN incoming.key IS NULL THEN NULL ELSE
+      reserved.sequence - count(*) OVER (PARTITION BY incoming.key)
+        + row_number() OVER (PARTITION BY incoming.key ORDER BY incoming.ordinal)
+    END AS sequence
+  FROM jsonb_to_recordset($1::jsonb) AS incoming (
+    ordinal int, id text, type text, source text, key text, payload jsonb, headers jsonb,
+    correlation_id text, causation_id text, occurred_at timestamptz, handlers text[])
+  LEFT JOIN reserved ON reserved.key = incoming.key
+), inserted_events AS (
+  INSERT INTO "public"."relaybus_events"
+    (id, type, source, key, sequence, payload, headers, correlation_id, causation_id, occurred_at, created_at, handlers)
+  SELECT incoming.id, incoming.type, incoming.source, incoming.key, incoming.sequence,
+    COALESCE(incoming.payload, 'null'::jsonb), COALESCE(incoming.headers, '{}'::jsonb),
+    incoming.correlation_id, incoming.causation_id, incoming.occurred_at, $2::timestamptz,
+    COALESCE(incoming.handlers, '{}')
+  FROM incoming
+  ORDER BY incoming.id
+  ON CONFLICT (id) DO NOTHING
+  RETURNING id, key, sequence
+), inserted_deliveries AS (
+  INSERT INTO "public"."relaybus_deliveries"
+    (id, event_id, handler, lane, status, attempts, available_at, key, sequence, created_at, updated_at)
+  SELECT delivery.id, delivery.event_id, delivery.handler, (hashtextextended(COALESCE(event.key, event.id), 0) & 255)::smallint, 'pending', 0,
+    delivery.available_at, event.key, event.sequence, $2::timestamptz, $2::timestamptz
+  FROM jsonb_to_recordset($3::jsonb) AS delivery (id text, event_id text, handler text, available_at timestamptz)
+  JOIN inserted_events AS event ON event.id = delivery.event_id
+  ORDER BY delivery.event_id, delivery.handler
+  ON CONFLICT (event_id, handler) DO NOTHING
+  RETURNING available_at
+), woken AS (
+  SELECT pg_notify('public.relaybus_deliveries', '') FROM (
+    SELECT 1 FROM inserted_deliveries WHERE inserted_deliveries.available_at <= $5::timestamptz LIMIT 1
+  ) AS due
+)
+SELECT incoming.id, incoming.sequence::text AS sequence,
+  incoming.id IN (SELECT inserted_events.id FROM inserted_events) AS inserted,
+  (SELECT count(*) FROM inserted_deliveries)::int AS deliveries
+FROM incoming
+WHERE (SELECT count(*) FROM woken) >= 0",
+    "lockExistingEvents": "SELECT id FROM "public"."relaybus_events"
+WHERE id = ANY (ARRAY(SELECT jsonb_array_elements_text($1::jsonb)))
+ORDER BY id
+FOR NO KEY UPDATE",
+    "notify": "SELECT pg_notify('public.relaybus_deliveries', '')",
+  },
+  "claim": {
+    "claim": "WITH scope AS MATERIALIZED (
+  SELECT lane.lane, lane.epoch, lane.in_flight FROM "public"."relaybus_lanes" AS lane WHERE lane.lane = ANY (ARRAY(SELECT jsonb_array_elements_text($4::jsonb)::smallint))
+), running AS MATERIALIZED (
+  SELECT delivery.handler, delivery.key
+  FROM scope
+  CROSS JOIN LATERAL unnest(scope.in_flight) AS flying (id)
+  JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = flying.id
+  WHERE delivery.status = 'pending' AND delivery.key IS NOT NULL
+),
+due_window AS MATERIALIZED (
+  SELECT recent.id, recent.lane, recent.available_at
+  FROM scope
+  CROSS JOIN LATERAL (
+    SELECT delivery.id, delivery.lane, delivery.available_at
+    FROM "public"."relaybus_deliveries" AS delivery
+    WHERE delivery.lane = scope.lane AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+      AND delivery.id <> ALL (scope.in_flight)
+    ORDER BY delivery.available_at, delivery.id
+    LIMIT 64
+  ) AS recent
+  ORDER BY recent.available_at, recent.id
+  LIMIT 256
+), candidates AS MATERIALIZED (
+  SELECT delivery.id, delivery.lane, delivery.available_at
+  FROM due_window
+  JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = due_window.id
+  WHERE delivery.key IS NULL OR NOT (EXISTS (
+        SELECT 1 FROM "public"."relaybus_deliveries" AS earlier
+        WHERE earlier.lane = delivery.lane AND earlier.handler = delivery.handler AND earlier.key = delivery.key
+          AND earlier.status = 'pending' AND earlier.key IS NOT NULL
+          AND earlier.sequence < delivery.sequence
+      ) OR EXISTS (
+        SELECT 1 FROM running
+        WHERE running.handler = delivery.handler AND running.key = delivery.key
+      ))
+  ORDER BY delivery.available_at, delivery.id
+  LIMIT $3::int
+)
+SELECT ((SELECT count(*) FROM due_window) >= 256 OR EXISTS (SELECT 1 FROM due_window GROUP BY lane HAVING count(*) >= 64)) AS window_saturated, picked.*
+FROM (SELECT 1) AS anchor
+LEFT JOIN (
+  SELECT candidates.available_at AS due_at, delivery.id AS delivery_id, delivery.lane::int AS lane,
+    scope.epoch::text AS epoch, delivery.claims AS claims, delivery.handler, delivery.key AS delivery_key, delivery.sequence::text AS sequence, (delivery.attempts + 1)::int AS attempt,
+    event.id AS event_id,
+    event.type AS event_type,
+    event.source AS event_source,
+    event.key AS event_key,
+    event.payload::text AS event_payload,
+    event.headers::text AS event_headers,
+    event.correlation_id AS event_correlation_id,
+    event.causation_id AS event_causation_id,
+    to_char(event.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS event_occurred_at
+  FROM candidates
+  JOIN scope ON scope.lane = candidates.lane
+  JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = candidates.id
+  JOIN "public"."relaybus_events" AS event ON event.id = delivery.event_id
+) AS picked ON true
+ORDER BY picked.due_at, picked.delivery_id",
+    "claimBehindBlockedKeys": "WITH scope AS MATERIALIZED (
+  SELECT lane.lane, lane.epoch, lane.in_flight FROM "public"."relaybus_lanes" AS lane WHERE lane.lane = ANY (ARRAY(SELECT jsonb_array_elements_text($4::jsonb)::smallint))
+), running AS MATERIALIZED (
+  SELECT delivery.handler, delivery.key
+  FROM scope
+  CROSS JOIN LATERAL unnest(scope.in_flight) AS flying (id)
+  JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = flying.id
+  WHERE delivery.status = 'pending' AND delivery.key IS NOT NULL
+),
+heads AS MATERIALIZED (
+  SELECT head.id, head.lane, head.available_at, head.handler, head.key
+  FROM scope
+  CROSS JOIN LATERAL (
+    WITH RECURSIVE hops (handler, key) AS (
+      SELECT (SELECT min(wanted.handler) FROM jsonb_array_elements_text($2::jsonb) AS wanted (handler)), NULL::text
+      UNION ALL
+      SELECT CASE WHEN next.key IS NULL THEN (SELECT min(wanted.handler) FROM jsonb_array_elements_text($2::jsonb) AS wanted (handler) WHERE wanted.handler > hops.handler) ELSE hops.handler END, next.key
+      FROM hops
+      CROSS JOIN LATERAL (
+        SELECT CASE WHEN hops.key IS NULL
+          THEN (SELECT candidate.key FROM "public"."relaybus_deliveries" AS candidate
+                WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key IS NOT NULL
+                ORDER BY candidate.key LIMIT 1)
+          ELSE (SELECT candidate.key FROM "public"."relaybus_deliveries" AS candidate
+                WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key > hops.key
+                ORDER BY candidate.key LIMIT 1)
+        END AS key
+        OFFSET 0
+      ) AS next
+      WHERE hops.handler IS NOT NULL
+    )
+    SELECT lowest.id, lowest.lane, lowest.available_at, lowest.handler, lowest.key
+    FROM hops
+    CROSS JOIN LATERAL (
+      SELECT candidate.id, candidate.lane, candidate.available_at, candidate.handler, candidate.key
+      FROM "public"."relaybus_deliveries" AS candidate
+      WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key = hops.key
+      ORDER BY candidate.sequence LIMIT 1
+    ) AS lowest
+    WHERE hops.key IS NOT NULL
+  ) AS head
+), keyed AS MATERIALIZED (
+  SELECT heads.id, heads.lane, heads.available_at
+  FROM heads
+  JOIN scope ON scope.lane = heads.lane
+  WHERE heads.available_at <= $1::timestamptz AND heads.id <> ALL (scope.in_flight)
+    AND NOT EXISTS (SELECT 1 FROM running WHERE running.handler = heads.handler AND running.key = heads.key)
+  ORDER BY heads.available_at, heads.id
+  LIMIT $3::int
+), unkeyed AS MATERIALIZED (
+  SELECT recent.id, recent.lane, recent.available_at
+  FROM scope
+  CROSS JOIN LATERAL (
+    SELECT delivery.id, delivery.lane, delivery.available_at
+    FROM "public"."relaybus_deliveries" AS delivery
+    WHERE delivery.lane = scope.lane AND delivery.key IS NULL AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+      AND delivery.id <> ALL (scope.in_flight)
+    ORDER BY delivery.available_at, delivery.id
+    LIMIT $3::int
+  ) AS recent
+  ORDER BY recent.available_at, recent.id
+  LIMIT $3::int
+), candidates AS MATERIALIZED (
+  SELECT id, lane, available_at FROM (
+    SELECT id, lane, available_at FROM keyed
+    UNION ALL
+    SELECT id, lane, available_at FROM unkeyed
+  ) AS both_sets
+  ORDER BY available_at, id
+  LIMIT $3::int
+)
+SELECT false AS window_saturated, picked.*
+FROM (SELECT 1) AS anchor
+LEFT JOIN (
+  SELECT candidates.available_at AS due_at, delivery.id AS delivery_id, delivery.lane::int AS lane,
+    scope.epoch::text AS epoch, delivery.claims AS claims, delivery.handler, delivery.key AS delivery_key, delivery.sequence::text AS sequence, (delivery.attempts + 1)::int AS attempt,
+    event.id AS event_id,
+    event.type AS event_type,
+    event.source AS event_source,
+    event.key AS event_key,
+    event.payload::text AS event_payload,
+    event.headers::text AS event_headers,
+    event.correlation_id AS event_correlation_id,
+    event.causation_id AS event_causation_id,
+    to_char(event.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS event_occurred_at
+  FROM candidates
+  JOIN scope ON scope.lane = candidates.lane
+  JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = candidates.id
+  JOIN "public"."relaybus_events" AS event ON event.id = delivery.event_id
+) AS picked ON true
+ORDER BY picked.due_at, picked.delivery_id",
+    "reconcileClaims": "WITH owned AS MATERIALIZED (
+  SELECT lane.lane FROM "public"."relaybus_lanes" AS lane
+  WHERE lane.lease_owner = $1::text AND lane.claim_floor <= $3::bigint
+  ORDER BY lane.lane
+  FOR NO KEY UPDATE
+)
+UPDATE "public"."relaybus_lanes" AS lane
+SET in_flight = ARRAY(SELECT flying.id FROM unnest(lane.in_flight) AS flying (id) WHERE EXISTS (SELECT 1 FROM jsonb_to_recordset($2::jsonb) AS handed (id text, lane smallint, epoch bigint, claims int) JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = handed.id
+      WHERE handed.id = flying.id AND handed.lane = lane.lane AND handed.epoch = lane.epoch AND delivery.claims = handed.claims)),
+    claim_floor = $3::bigint
+FROM owned
+WHERE lane.lane = owned.lane AND lane.lease_owner = $1::text AND lane.claim_floor <= $3::bigint",
+    "recordClaim": "WITH picked AS (
+  SELECT recorded.lane, recorded.ids
+  FROM jsonb_to_recordset($1::jsonb) AS recorded (lane smallint, ids text[])
+), still_running AS (
+  SELECT lane.lane, array_agg(delivery.id) AS ids
+  FROM picked
+  JOIN "public"."relaybus_lanes" AS lane ON lane.lane = picked.lane
+  CROSS JOIN LATERAL unnest(lane.in_flight) AS flying (id)
+  JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+  GROUP BY lane.lane
+), extended AS (
+  UPDATE "public"."relaybus_lanes" AS lane
+  SET in_flight = COALESCE(still_running.ids, '{}') || picked.ids,
+      lease_expires_at = GREATEST(lane.lease_expires_at, $4::timestamptz)
+  FROM picked
+  LEFT JOIN still_running ON still_running.lane = picked.lane
+  WHERE lane.lane = picked.lane
+  RETURNING lane.lane
+), freed AS (
+  UPDATE "public"."relaybus_lanes" AS lane
+  SET lease_owner = NULL, lease_expires_at = NULL, in_flight = '{}'
+  WHERE lane.lane = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)::smallint))
+    AND lane.lease_owner = $3::text
+    AND NOT EXISTS (
+      SELECT 1 FROM unnest(lane.in_flight) AS flying (id)
+      JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+    )
+  RETURNING lane.lane
+)
+SELECT (SELECT count(*) FROM extended)::int AS extended, (SELECT count(*) FROM freed)::int AS freed",
+    "relinquish": "WITH owned AS MATERIALIZED (
+  SELECT lane.lane FROM "public"."relaybus_lanes" AS lane
+  WHERE lane.lease_owner = $1::text
+  ORDER BY lane.lane
+  FOR NO KEY UPDATE
+)
+UPDATE "public"."relaybus_lanes" AS lane
+SET lease_owner = NULL, lease_expires_at = NULL, in_flight = '{}'
+FROM owned
+WHERE lane.lane = owned.lane AND lane.lease_owner = $1::text AND NOT EXISTS (
+      SELECT 1 FROM unnest(lane.in_flight) AS flying (id)
+      JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+    )",
+  },
+  "completion": {
+    "bury": "WITH fence AS MATERIALIZED (
+  SELECT lane.lane FROM "public"."relaybus_lanes" AS lane
+  WHERE lane.lane = $2::smallint AND lane.epoch = $3::bigint AND $1::text = ANY (lane.in_flight)
+  FOR NO KEY UPDATE
+), changed AS (
+  UPDATE "public"."relaybus_deliveries" AS delivery SET status = 'dead', last_error = $5::jsonb, attempts = delivery.attempts + 1, claims = delivery.claims + 1, updated_at = $6::timestamptz
+  FROM fence
+  WHERE delivery.id = $1::text AND delivery.lane = fence.lane AND delivery.status = 'pending'
+    AND delivery.claims = $4::int
+  RETURNING delivery.id
+), trimmed AS (
+  UPDATE "public"."relaybus_lanes" AS lane SET in_flight = array_remove(lane.in_flight, $1::text)
+  FROM changed WHERE lane.lane = $2::smallint
+  RETURNING lane.lane
+)
+SELECT count(*)::int AS count FROM changed",
+    "complete": "WITH leases AS (
+  SELECT lease.ord, lease.id, lease.lane, lease.epoch, lease.claims
+  FROM jsonb_to_recordset($1::jsonb) AS lease (ord int, id text, lane smallint, epoch bigint, claims int)
+), fence AS MATERIALIZED (
+  SELECT lane.lane, lane.epoch, lane.in_flight
+  FROM "public"."relaybus_lanes" AS lane
+  WHERE lane.lane IN (SELECT lane FROM leases)
+  ORDER BY lane.lane
+  FOR KEY SHARE
+), completed AS (
+  DELETE FROM "public"."relaybus_deliveries" AS delivery
+  USING leases JOIN fence ON fence.lane = leases.lane AND fence.epoch = leases.epoch
+  WHERE delivery.id = leases.id AND delivery.lane = leases.lane AND delivery.status = 'pending'
+    AND delivery.claims = leases.claims AND leases.id = ANY (fence.in_flight)
+  RETURNING leases.ord, delivery.id, delivery.event_id, delivery.handler, delivery.attempts, delivery.available_at, delivery.created_at
+), stamped AS (
+  INSERT INTO "public"."relaybus_event_completions" (event_id, completed_at)
+  SELECT DISTINCT completed.event_id, $2::timestamptz FROM completed
+  -- Event id order: completions of other handlers of the same events lock these rows too.
+  ORDER BY completed.event_id
+  ON CONFLICT (event_id) DO UPDATE SET completed_at = GREATEST("public"."relaybus_event_completions".completed_at, EXCLUDED.completed_at)
+  RETURNING event_id
+)
+SELECT ord FROM completed",
+    "extendLease": "WITH changed AS (UPDATE "public"."relaybus_lanes" AS lane
+SET lease_expires_at = GREATEST(lane.lease_expires_at, $5::timestamptz)
+WHERE lane.lane = $2::smallint AND lane.epoch = $3::bigint AND $1::text = ANY (lane.in_flight)
+  AND EXISTS (
+    SELECT 1 FROM "public"."relaybus_deliveries" AS delivery
+    WHERE delivery.id = $1::text AND delivery.status = 'pending' AND delivery.claims = $4::int
+  ) RETURNING 1) SELECT count(*)::int AS count FROM changed",
+    "release": "WITH fence AS MATERIALIZED (
+  SELECT lane.lane FROM "public"."relaybus_lanes" AS lane
+  WHERE lane.lane = $2::smallint AND lane.epoch = $3::bigint AND $1::text = ANY (lane.in_flight)
+  FOR NO KEY UPDATE
+), changed AS (
+  UPDATE "public"."relaybus_deliveries" AS delivery SET available_at = $5::timestamptz, claims = delivery.claims + 1, updated_at = $5::timestamptz
+  FROM fence
+  WHERE delivery.id = $1::text AND delivery.lane = fence.lane AND delivery.status = 'pending'
+    AND delivery.claims = $4::int
+  RETURNING delivery.id
+), trimmed AS (
+  UPDATE "public"."relaybus_lanes" AS lane SET in_flight = array_remove(lane.in_flight, $1::text)
+  FROM changed WHERE lane.lane = $2::smallint
+  RETURNING lane.lane
+)
+SELECT count(*)::int AS count FROM changed",
+    "reschedule": "WITH fence AS MATERIALIZED (
+  SELECT lane.lane FROM "public"."relaybus_lanes" AS lane
+  WHERE lane.lane = $2::smallint AND lane.epoch = $3::bigint AND $1::text = ANY (lane.in_flight)
+  FOR NO KEY UPDATE
+), changed AS (
+  UPDATE "public"."relaybus_deliveries" AS delivery SET available_at = $5::timestamptz, last_error = $6::jsonb, attempts = delivery.attempts + 1, claims = delivery.claims + 1, updated_at = $7::timestamptz
+  FROM fence
+  WHERE delivery.id = $1::text AND delivery.lane = fence.lane AND delivery.status = 'pending'
+    AND delivery.claims = $4::int
+  RETURNING delivery.id
+), trimmed AS (
+  UPDATE "public"."relaybus_lanes" AS lane SET in_flight = array_remove(lane.in_flight, $1::text)
+  FROM changed WHERE lane.lane = $2::smallint
+  RETURNING lane.lane
+)
+SELECT count(*)::int AS count FROM changed",
+  },
+  "lanes": {
+    "claimHeldLanes": "WITH held AS MATERIALIZED (
+  SELECT lane.lane, lane.epoch, lane.in_flight
+  FROM "public"."relaybus_lanes" AS lane
+  WHERE lane.lease_owner = $4::text AND lane.lease_expires_at > $1::timestamptz
+    AND lane.claim_floor = $6::bigint
+  ORDER BY lane.lane
+  FOR NO KEY UPDATE
+), stale AS (
+  -- A claim that waited for a lane lock sees the new lane row but reads deliveries with the snapshot it took
+  -- before the wait: whatever changed the lane meanwhile (a reschedule, a release) may also have changed
+  -- deliveries it cannot see. The statement then does nothing and reports it, and the caller runs it again.
+  SELECT EXISTS (
+    SELECT 1 FROM held
+    JOIN "public"."relaybus_lanes" AS before ON before.lane = held.lane
+    WHERE before.epoch <> held.epoch OR before.in_flight IS DISTINCT FROM held.in_flight
+  ) AS value
+), held_scope AS MATERIALIZED (
+  SELECT held.lane, held.epoch, held.in_flight FROM held WHERE NOT (SELECT value FROM stale)
+), held_running AS MATERIALIZED (
+  SELECT delivery.handler, delivery.key
+  FROM held_scope
+  CROSS JOIN LATERAL unnest(held_scope.in_flight) AS flying (id)
+  JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = flying.id
+  WHERE delivery.status = 'pending' AND delivery.key IS NOT NULL
+), held_window AS MATERIALIZED (
+  SELECT recent.id, recent.lane, recent.available_at, recent.handler, recent.key, recent.sequence
+  FROM held_scope
+  CROSS JOIN LATERAL (
+    SELECT delivery.id, delivery.lane, delivery.available_at, delivery.handler, delivery.key, delivery.sequence
+    FROM "public"."relaybus_deliveries" AS delivery
+    WHERE delivery.lane = held_scope.lane AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+      AND delivery.id <> ALL (held_scope.in_flight)
+    ORDER BY delivery.available_at, delivery.id
+    LIMIT 64
+  ) AS recent
+  ORDER BY recent.available_at, recent.id
+  LIMIT 256
+), held_fast AS MATERIALIZED (
+  SELECT picked.id, picked.lane, picked.available_at FROM (
+    SELECT unkeyed.id, unkeyed.lane, unkeyed.available_at FROM held_window AS unkeyed WHERE unkeyed.key IS NULL
+    UNION ALL
+    SELECT head.id, head.lane, head.available_at
+    FROM (
+      SELECT DISTINCT ON (keyed.handler, keyed.key) keyed.id, keyed.lane, keyed.available_at, keyed.handler, keyed.key, keyed.sequence
+      FROM held_window AS keyed
+      WHERE keyed.key IS NOT NULL
+      ORDER BY keyed.handler, keyed.key, keyed.sequence
+    ) AS head
+    WHERE NOT EXISTS (
+        SELECT 1 FROM "public"."relaybus_deliveries" AS earlier
+        WHERE earlier.lane = head.lane AND earlier.handler = head.handler AND earlier.key = head.key
+          AND earlier.status = 'pending' AND earlier.key IS NOT NULL AND earlier.sequence < head.sequence
+      ) AND NOT EXISTS (SELECT 1 FROM held_running AS running WHERE running.handler = head.handler AND running.key = head.key)
+  ) AS picked
+  ORDER BY picked.available_at, picked.id
+  LIMIT $3::int
+), held_saturated AS MATERIALIZED (
+  SELECT held_scope.lane, held_scope.in_flight FROM held_scope
+  WHERE (SELECT count(*) FROM held_fast) < $3::int
+    AND ((SELECT count(*) FROM held_window) >= 256
+      OR held_scope.lane IN (
+        SELECT full_lane.lane FROM held_window AS full_lane
+        GROUP BY full_lane.lane HAVING count(*) >= 64
+      ))
+), held_heads AS MATERIALIZED (
+  SELECT head.id, head.lane, head.available_at, head.handler, head.key
+  FROM held_saturated AS scope
+  CROSS JOIN LATERAL (
+    WITH RECURSIVE hops (handler, key) AS (
+      SELECT (SELECT min(wanted.handler) FROM jsonb_array_elements_text($2::jsonb) AS wanted (handler)), NULL::text
+      UNION ALL
+      SELECT CASE WHEN next.key IS NULL THEN (SELECT min(wanted.handler) FROM jsonb_array_elements_text($2::jsonb) AS wanted (handler) WHERE wanted.handler > hops.handler) ELSE hops.handler END, next.key
+      FROM hops
+      CROSS JOIN LATERAL (
+        SELECT CASE WHEN hops.key IS NULL
+          THEN (SELECT candidate.key FROM "public"."relaybus_deliveries" AS candidate
+                WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key IS NOT NULL
+                ORDER BY candidate.key LIMIT 1)
+          ELSE (SELECT candidate.key FROM "public"."relaybus_deliveries" AS candidate
+                WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key > hops.key
+                ORDER BY candidate.key LIMIT 1)
+        END AS key
+        OFFSET 0
+      ) AS next
+      WHERE hops.handler IS NOT NULL
+    )
+    SELECT lowest.id, lowest.lane, lowest.available_at, lowest.handler, lowest.key
+    FROM hops
+    CROSS JOIN LATERAL (
+      SELECT candidate.id, candidate.lane, candidate.available_at, candidate.handler, candidate.key
+      FROM "public"."relaybus_deliveries" AS candidate
+      WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key = hops.key
+      ORDER BY candidate.sequence LIMIT 1
+    ) AS lowest
+    WHERE hops.key IS NOT NULL
+  ) AS head
+), held_keyed AS MATERIALIZED (
+  SELECT heads.id, heads.lane, heads.available_at
+  FROM held_heads AS heads
+  JOIN held_saturated AS scope ON scope.lane = heads.lane
+  WHERE heads.available_at <= $1::timestamptz AND heads.id <> ALL (scope.in_flight) AND NOT EXISTS (SELECT 1 FROM held_running AS running WHERE running.handler = heads.handler AND running.key = heads.key)
+  ORDER BY heads.available_at, heads.id
+  LIMIT $3::int
+), held_unkeyed AS MATERIALIZED (
+  SELECT recent.id, recent.lane, recent.available_at
+  FROM held_saturated AS scope
+  CROSS JOIN LATERAL (
+    SELECT delivery.id, delivery.lane, delivery.available_at
+    FROM "public"."relaybus_deliveries" AS delivery
+    WHERE delivery.lane = scope.lane AND delivery.key IS NULL AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+      AND delivery.id <> ALL (scope.in_flight)
+    ORDER BY delivery.available_at, delivery.id
+    LIMIT $3::int
+  ) AS recent
+  ORDER BY recent.available_at, recent.id
+  LIMIT $3::int
+), held_candidates AS MATERIALIZED (
+  SELECT chosen.id, chosen.lane, chosen.available_at FROM (
+    SELECT fast.id, fast.lane, fast.available_at FROM held_fast AS fast
+    UNION
+    SELECT keyed.id, keyed.lane, keyed.available_at FROM held_keyed AS keyed
+    UNION
+    SELECT unkeyed.id, unkeyed.lane, unkeyed.available_at FROM held_unkeyed AS unkeyed
+  ) AS chosen
+  ORDER BY chosen.available_at, chosen.id
+  LIMIT $3::int
+), wanted AS MATERIALIZED (
+  SELECT CASE WHEN (SELECT value FROM stale) THEN 0
+    ELSE $3::int - (SELECT count(*) FROM held_candidates)::int END AS count
+), free_lanes AS (
+  SELECT NULL::smallint AS lane, NULL::bigint AS epoch, NULL::text[] AS in_flight, false AS running WHERE false
+), free_scope AS (
+  SELECT NULL::smallint AS lane, NULL::bigint AS epoch WHERE false
+), free_candidates AS (
+  SELECT NULL::text AS id, NULL::smallint AS lane, NULL::timestamptz AS available_at WHERE false
+), claim_scope AS MATERIALIZED (
+  SELECT held_scope.lane, held_scope.epoch FROM held_scope
+  UNION ALL
+  SELECT free_scope.lane, free_scope.epoch FROM free_scope
+), picked_rows AS MATERIALIZED (
+  SELECT candidates.available_at AS due_at, delivery.id AS delivery_id, delivery.lane::int AS lane,
+    scope.epoch::text AS epoch, delivery.claims AS claims, delivery.handler, delivery.key AS delivery_key, delivery.sequence::text AS sequence, (delivery.attempts + 1)::int AS attempt,
+    event.id AS event_id,
+    event.type AS event_type,
+    event.source AS event_source,
+    event.key AS event_key,
+    event.payload::text AS event_payload,
+    event.headers::text AS event_headers,
+    event.correlation_id AS event_correlation_id,
+    event.causation_id AS event_causation_id,
+    to_char(event.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS event_occurred_at
+  FROM (
+    SELECT held_candidates.id, held_candidates.lane, held_candidates.available_at FROM held_candidates
+    UNION ALL
+    SELECT free_candidates.id, free_candidates.lane, free_candidates.available_at FROM free_candidates
+  ) AS candidates
+  JOIN claim_scope AS scope ON scope.lane = candidates.lane
+  JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = candidates.id
+  JOIN "public"."relaybus_events" AS event ON event.id = delivery.event_id
+), by_lane AS (
+  SELECT picked_rows.lane, array_agg(picked_rows.delivery_id) AS ids FROM picked_rows GROUP BY picked_rows.lane
+), still_running AS (
+  -- The retained ids come from the locked \`held\` rows, not from the lane table: a claim that waited for the lock
+  -- must see the in-flight list the claim before it recorded, which the statement snapshot may not.
+  SELECT held.lane, array_agg(delivery.id) AS ids
+  FROM by_lane
+  JOIN held ON held.lane = by_lane.lane
+  CROSS JOIN LATERAL unnest(held.in_flight) AS flying (id)
+  JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+  GROUP BY held.lane
+), extended AS (
+  UPDATE "public"."relaybus_lanes" AS lane
+  SET in_flight = COALESCE(still_running.ids, '{}') || by_lane.ids,
+      lease_expires_at = GREATEST(lane.lease_expires_at, $5::timestamptz)
+  FROM by_lane
+  JOIN held_scope ON held_scope.lane = by_lane.lane
+  LEFT JOIN still_running ON still_running.lane = by_lane.lane
+  WHERE lane.lane = by_lane.lane
+  RETURNING lane.lane
+), taken AS (
+  UPDATE "public"."relaybus_lanes" AS lane
+  SET epoch = free_scope.epoch, lease_owner = $4::text, lease_expires_at = $5::timestamptz,
+      in_flight = by_lane.ids, claim_floor = $6::bigint
+  FROM free_scope
+  JOIN by_lane ON by_lane.lane = free_scope.lane
+  WHERE lane.lane = free_scope.lane
+  RETURNING lane.lane
+), saturated_lanes AS (
+  SELECT held_window.lane FROM held_window GROUP BY held_window.lane HAVING count(*) >= 64
+), freed AS (
+  UPDATE "public"."relaybus_lanes" AS lane
+  SET lease_owner = NULL, lease_expires_at = NULL, in_flight = '{}'
+  FROM held
+  WHERE lane.lane = held.lane
+    AND lane.lane NOT IN (SELECT lane FROM by_lane)
+    AND lane.lane NOT IN (SELECT lane FROM saturated_lanes)
+    AND (SELECT count(*) FROM held_window) < 256
+    AND NOT (SELECT value FROM stale)
+    AND NOT EXISTS (
+      SELECT 1 FROM unnest(lane.in_flight) AS flying (id)
+      JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+    )
+  RETURNING lane.lane
+)
+SELECT (SELECT value FROM stale) AS stale,
+  EXISTS (SELECT 1 FROM free_lanes WHERE free_lanes.running) AS takeover_waiting,
+  (SELECT count(*) FROM free_lanes) = (SELECT count FROM wanted) + 16 AS unexamined_free_lanes,
+  (
+    SELECT COALESCE(jsonb_agg(delivery.id), '[]'::jsonb)
+    FROM held
+    CROSS JOIN LATERAL unnest(held.in_flight) AS flying (id)
+    JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+  )::text AS running_ids,
+  (SELECT COALESCE(jsonb_agg(held.lane), '[]'::jsonb) FROM held)::text AS examined_lanes,
+  picked.*
+FROM (SELECT 1) AS anchor
+LEFT JOIN picked_rows AS picked ON true
+ORDER BY picked.due_at, picked.delivery_id",
+    "claimLanes": "WITH held AS MATERIALIZED (
+  SELECT lane.lane, lane.epoch, lane.in_flight
+  FROM "public"."relaybus_lanes" AS lane
+  WHERE lane.lease_owner = $4::text AND lane.lease_expires_at > $1::timestamptz
+    AND lane.claim_floor = $6::bigint
+  ORDER BY lane.lane
+  FOR NO KEY UPDATE
+), stale AS (
+  -- A claim that waited for a lane lock sees the new lane row but reads deliveries with the snapshot it took
+  -- before the wait: whatever changed the lane meanwhile (a reschedule, a release) may also have changed
+  -- deliveries it cannot see. The statement then does nothing and reports it, and the caller runs it again.
+  SELECT EXISTS (
+    SELECT 1 FROM held
+    JOIN "public"."relaybus_lanes" AS before ON before.lane = held.lane
+    WHERE before.epoch <> held.epoch OR before.in_flight IS DISTINCT FROM held.in_flight
+  ) AS value
+), held_scope AS MATERIALIZED (
+  SELECT held.lane, held.epoch, held.in_flight FROM held WHERE NOT (SELECT value FROM stale)
+), held_running AS MATERIALIZED (
+  SELECT delivery.handler, delivery.key
+  FROM held_scope
+  CROSS JOIN LATERAL unnest(held_scope.in_flight) AS flying (id)
+  JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = flying.id
+  WHERE delivery.status = 'pending' AND delivery.key IS NOT NULL
+), held_window AS MATERIALIZED (
+  SELECT recent.id, recent.lane, recent.available_at, recent.handler, recent.key, recent.sequence
+  FROM held_scope
+  CROSS JOIN LATERAL (
+    SELECT delivery.id, delivery.lane, delivery.available_at, delivery.handler, delivery.key, delivery.sequence
+    FROM "public"."relaybus_deliveries" AS delivery
+    WHERE delivery.lane = held_scope.lane AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+      AND delivery.id <> ALL (held_scope.in_flight)
+    ORDER BY delivery.available_at, delivery.id
+    LIMIT 64
+  ) AS recent
+  ORDER BY recent.available_at, recent.id
+  LIMIT 256
+), held_fast AS MATERIALIZED (
+  SELECT picked.id, picked.lane, picked.available_at FROM (
+    SELECT unkeyed.id, unkeyed.lane, unkeyed.available_at FROM held_window AS unkeyed WHERE unkeyed.key IS NULL
+    UNION ALL
+    SELECT head.id, head.lane, head.available_at
+    FROM (
+      SELECT DISTINCT ON (keyed.handler, keyed.key) keyed.id, keyed.lane, keyed.available_at, keyed.handler, keyed.key, keyed.sequence
+      FROM held_window AS keyed
+      WHERE keyed.key IS NOT NULL
+      ORDER BY keyed.handler, keyed.key, keyed.sequence
+    ) AS head
+    WHERE NOT EXISTS (
+        SELECT 1 FROM "public"."relaybus_deliveries" AS earlier
+        WHERE earlier.lane = head.lane AND earlier.handler = head.handler AND earlier.key = head.key
+          AND earlier.status = 'pending' AND earlier.key IS NOT NULL AND earlier.sequence < head.sequence
+      ) AND NOT EXISTS (SELECT 1 FROM held_running AS running WHERE running.handler = head.handler AND running.key = head.key)
+  ) AS picked
+  ORDER BY picked.available_at, picked.id
+  LIMIT $3::int
+), held_saturated AS MATERIALIZED (
+  SELECT held_scope.lane, held_scope.in_flight FROM held_scope
+  WHERE (SELECT count(*) FROM held_fast) < $3::int
+    AND ((SELECT count(*) FROM held_window) >= 256
+      OR held_scope.lane IN (
+        SELECT full_lane.lane FROM held_window AS full_lane
+        GROUP BY full_lane.lane HAVING count(*) >= 64
+      ))
+), held_heads AS MATERIALIZED (
+  SELECT head.id, head.lane, head.available_at, head.handler, head.key
+  FROM held_saturated AS scope
+  CROSS JOIN LATERAL (
+    WITH RECURSIVE hops (handler, key) AS (
+      SELECT (SELECT min(wanted.handler) FROM jsonb_array_elements_text($2::jsonb) AS wanted (handler)), NULL::text
+      UNION ALL
+      SELECT CASE WHEN next.key IS NULL THEN (SELECT min(wanted.handler) FROM jsonb_array_elements_text($2::jsonb) AS wanted (handler) WHERE wanted.handler > hops.handler) ELSE hops.handler END, next.key
+      FROM hops
+      CROSS JOIN LATERAL (
+        SELECT CASE WHEN hops.key IS NULL
+          THEN (SELECT candidate.key FROM "public"."relaybus_deliveries" AS candidate
+                WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key IS NOT NULL
+                ORDER BY candidate.key LIMIT 1)
+          ELSE (SELECT candidate.key FROM "public"."relaybus_deliveries" AS candidate
+                WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key > hops.key
+                ORDER BY candidate.key LIMIT 1)
+        END AS key
+        OFFSET 0
+      ) AS next
+      WHERE hops.handler IS NOT NULL
+    )
+    SELECT lowest.id, lowest.lane, lowest.available_at, lowest.handler, lowest.key
+    FROM hops
+    CROSS JOIN LATERAL (
+      SELECT candidate.id, candidate.lane, candidate.available_at, candidate.handler, candidate.key
+      FROM "public"."relaybus_deliveries" AS candidate
+      WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key = hops.key
+      ORDER BY candidate.sequence LIMIT 1
+    ) AS lowest
+    WHERE hops.key IS NOT NULL
+  ) AS head
+), held_keyed AS MATERIALIZED (
+  SELECT heads.id, heads.lane, heads.available_at
+  FROM held_heads AS heads
+  JOIN held_saturated AS scope ON scope.lane = heads.lane
+  WHERE heads.available_at <= $1::timestamptz AND heads.id <> ALL (scope.in_flight) AND NOT EXISTS (SELECT 1 FROM held_running AS running WHERE running.handler = heads.handler AND running.key = heads.key)
+  ORDER BY heads.available_at, heads.id
+  LIMIT $3::int
+), held_unkeyed AS MATERIALIZED (
+  SELECT recent.id, recent.lane, recent.available_at
+  FROM held_saturated AS scope
+  CROSS JOIN LATERAL (
+    SELECT delivery.id, delivery.lane, delivery.available_at
+    FROM "public"."relaybus_deliveries" AS delivery
+    WHERE delivery.lane = scope.lane AND delivery.key IS NULL AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+      AND delivery.id <> ALL (scope.in_flight)
+    ORDER BY delivery.available_at, delivery.id
+    LIMIT $3::int
+  ) AS recent
+  ORDER BY recent.available_at, recent.id
+  LIMIT $3::int
+), held_candidates AS MATERIALIZED (
+  SELECT chosen.id, chosen.lane, chosen.available_at FROM (
+    SELECT fast.id, fast.lane, fast.available_at FROM held_fast AS fast
+    UNION
+    SELECT keyed.id, keyed.lane, keyed.available_at FROM held_keyed AS keyed
+    UNION
+    SELECT unkeyed.id, unkeyed.lane, unkeyed.available_at FROM held_unkeyed AS unkeyed
+  ) AS chosen
+  ORDER BY chosen.available_at, chosen.id
+  LIMIT $3::int
+), wanted AS MATERIALIZED (
+  SELECT CASE WHEN (SELECT value FROM stale) THEN 0
+    ELSE $3::int - (SELECT count(*) FROM held_candidates)::int END AS count
+), free_lanes AS MATERIALIZED (
+  -- The oldest due delivery of each free lane: one index probe per free lane, bounded by the due time,
+  -- so deliveries scheduled for later are never read.
+  SELECT lane.lane, lane.epoch, lane.in_flight, lane.lease_owner, lane.lease_expires_at,
+    oldest.available_at, oldest.id, NOT NOT EXISTS (
+      SELECT 1 FROM unnest(lane.in_flight) AS flying (id)
+      JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+    ) AS running
+  FROM "public"."relaybus_lanes" AS lane
+  CROSS JOIN LATERAL (
+    SELECT delivery.available_at, delivery.id
+    FROM "public"."relaybus_deliveries" AS delivery
+    WHERE delivery.lane = lane.lane AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+    ORDER BY delivery.available_at, delivery.id
+    LIMIT 1
+  ) AS oldest
+  WHERE (SELECT count FROM wanted) > 0 AND (lane.lease_expires_at IS NULL OR lane.lease_expires_at <= $1::timestamptz
+      OR (lane.lease_owner = $4::text AND lane.claim_floor < $6::bigint))
+  ORDER BY oldest.available_at, oldest.id
+  LIMIT (SELECT count FROM wanted) + 16
+), free_depth AS MATERIALIZED (
+  -- What each candidate lane can give now, from its first due deliveries: unkeyed ones, and of a key its
+  -- lowest one when nothing earlier of the key is pending. Lanes that can give nothing are passed over;
+  -- of the others, the first 4 are taken, and further ones until they cover what is
+  -- still wanted, so the earliest due work of the free lanes comes first.
+  SELECT runnable.lane,
+    row_number() OVER (ORDER BY runnable.available_at, runnable.id) AS rank,
+    sum(runnable.count) OVER (ORDER BY runnable.available_at, runnable.id ROWS UNBOUNDED PRECEDING) - runnable.count AS due_before
+  FROM (
+    SELECT lane_candidate.lane, lane_candidate.available_at, lane_candidate.id, depth.count
+    FROM free_lanes AS lane_candidate
+    CROSS JOIN LATERAL (
+      -- A full window that shows nothing runnable may hide runnable work behind it: such a lane counts
+      -- once, and the claim looks behind its blocked deliveries.
+      SELECT GREATEST(count(*) FILTER (
+          WHERE due.key IS NULL OR (due.position = 1 AND NOT EXISTS (
+            SELECT 1 FROM "public"."relaybus_deliveries" AS earlier
+            WHERE earlier.lane = due.lane AND earlier.handler = due.handler AND earlier.key = due.key
+              AND earlier.status = 'pending' AND earlier.key IS NOT NULL AND earlier.sequence < due.sequence
+          ))
+        ), CASE WHEN count(*) >= 16 THEN 1 ELSE 0 END) AS count
+      FROM (
+        SELECT window_rows.*,
+          row_number() OVER (PARTITION BY window_rows.handler, window_rows.key ORDER BY window_rows.sequence) AS position
+        FROM (
+          SELECT delivery.lane, delivery.handler, delivery.key, delivery.sequence FROM "public"."relaybus_deliveries" AS delivery
+          WHERE delivery.lane = lane_candidate.lane AND delivery.status = 'pending'
+            AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+          ORDER BY delivery.available_at, delivery.id
+          LIMIT 16
+        ) AS window_rows
+      ) AS due
+    ) AS depth
+    WHERE NOT lane_candidate.running AND depth.count > 0
+  ) AS runnable
+), free_locked AS MATERIALIZED (
+  SELECT lane.lane, lane.epoch, lane.in_flight, lane.lease_owner, lane.lease_expires_at
+  FROM "public"."relaybus_lanes" AS lane
+  WHERE lane.lane IN (
+      SELECT chosen.lane FROM free_depth AS chosen
+      WHERE chosen.rank <= 4 OR chosen.due_before < (SELECT count FROM wanted)
+    )
+    AND (lane.lease_expires_at IS NULL OR lane.lease_expires_at <= $1::timestamptz
+      OR (lane.lease_owner = $4::text AND lane.claim_floor < $6::bigint))
+  ORDER BY lane.lane
+  FOR UPDATE SKIP LOCKED
+), free_scope AS MATERIALIZED (
+  -- A lane whose locked row is not the one the snapshot saw changed hands meanwhile: left for a later claim.
+  SELECT locked.lane, locked.epoch + 1 AS epoch, '{}'::text[] AS in_flight
+  FROM free_locked AS locked
+  JOIN free_lanes AS seen ON seen.lane = locked.lane
+  WHERE locked.epoch = seen.epoch AND locked.in_flight = seen.in_flight
+    AND locked.lease_owner IS NOT DISTINCT FROM seen.lease_owner
+    AND locked.lease_expires_at IS NOT DISTINCT FROM seen.lease_expires_at
+), free_window AS MATERIALIZED (
+  SELECT recent.id, recent.lane, recent.available_at, recent.handler, recent.key, recent.sequence
+  FROM free_scope
+  CROSS JOIN LATERAL (
+    SELECT delivery.id, delivery.lane, delivery.available_at, delivery.handler, delivery.key, delivery.sequence
+    FROM "public"."relaybus_deliveries" AS delivery
+    WHERE delivery.lane = free_scope.lane AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+      AND delivery.id <> ALL (free_scope.in_flight)
+    ORDER BY delivery.available_at, delivery.id
+    LIMIT 64
+  ) AS recent
+  ORDER BY recent.available_at, recent.id
+  LIMIT 256
+), free_fast AS MATERIALIZED (
+  SELECT picked.id, picked.lane, picked.available_at FROM (
+    SELECT unkeyed.id, unkeyed.lane, unkeyed.available_at FROM free_window AS unkeyed WHERE unkeyed.key IS NULL
+    UNION ALL
+    SELECT head.id, head.lane, head.available_at
+    FROM (
+      SELECT DISTINCT ON (keyed.handler, keyed.key) keyed.id, keyed.lane, keyed.available_at, keyed.handler, keyed.key, keyed.sequence
+      FROM free_window AS keyed
+      WHERE keyed.key IS NOT NULL
+      ORDER BY keyed.handler, keyed.key, keyed.sequence
+    ) AS head
+    WHERE NOT EXISTS (
+        SELECT 1 FROM "public"."relaybus_deliveries" AS earlier
+        WHERE earlier.lane = head.lane AND earlier.handler = head.handler AND earlier.key = head.key
+          AND earlier.status = 'pending' AND earlier.key IS NOT NULL AND earlier.sequence < head.sequence
+      ) AND true
+  ) AS picked
+  ORDER BY picked.available_at, picked.id
+  LIMIT (SELECT count FROM wanted)
+), free_saturated AS MATERIALIZED (
+  SELECT free_scope.lane, free_scope.in_flight FROM free_scope
+  WHERE (SELECT count(*) FROM free_fast) < (SELECT count FROM wanted)
+    AND ((SELECT count(*) FROM free_window) >= 256
+      OR free_scope.lane IN (
+        SELECT full_lane.lane FROM free_window AS full_lane
+        GROUP BY full_lane.lane HAVING count(*) >= 64
+      ))
+), free_heads AS MATERIALIZED (
+  SELECT head.id, head.lane, head.available_at, head.handler, head.key
+  FROM free_saturated AS scope
+  CROSS JOIN LATERAL (
+    WITH RECURSIVE hops (handler, key) AS (
+      SELECT (SELECT min(wanted.handler) FROM jsonb_array_elements_text($2::jsonb) AS wanted (handler)), NULL::text
+      UNION ALL
+      SELECT CASE WHEN next.key IS NULL THEN (SELECT min(wanted.handler) FROM jsonb_array_elements_text($2::jsonb) AS wanted (handler) WHERE wanted.handler > hops.handler) ELSE hops.handler END, next.key
+      FROM hops
+      CROSS JOIN LATERAL (
+        SELECT CASE WHEN hops.key IS NULL
+          THEN (SELECT candidate.key FROM "public"."relaybus_deliveries" AS candidate
+                WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key IS NOT NULL
+                ORDER BY candidate.key LIMIT 1)
+          ELSE (SELECT candidate.key FROM "public"."relaybus_deliveries" AS candidate
+                WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key > hops.key
+                ORDER BY candidate.key LIMIT 1)
+        END AS key
+        OFFSET 0
+      ) AS next
+      WHERE hops.handler IS NOT NULL
+    )
+    SELECT lowest.id, lowest.lane, lowest.available_at, lowest.handler, lowest.key
+    FROM hops
+    CROSS JOIN LATERAL (
+      SELECT candidate.id, candidate.lane, candidate.available_at, candidate.handler, candidate.key
+      FROM "public"."relaybus_deliveries" AS candidate
+      WHERE candidate.lane = scope.lane AND candidate.status = 'pending' AND candidate.handler = hops.handler AND candidate.key = hops.key
+      ORDER BY candidate.sequence LIMIT 1
+    ) AS lowest
+    WHERE hops.key IS NOT NULL
+  ) AS head
+), free_keyed AS MATERIALIZED (
+  SELECT heads.id, heads.lane, heads.available_at
+  FROM free_heads AS heads
+  JOIN free_saturated AS scope ON scope.lane = heads.lane
+  WHERE heads.available_at <= $1::timestamptz AND heads.id <> ALL (scope.in_flight) AND true
+  ORDER BY heads.available_at, heads.id
+  LIMIT (SELECT count FROM wanted)
+), free_unkeyed AS MATERIALIZED (
+  SELECT recent.id, recent.lane, recent.available_at
+  FROM free_saturated AS scope
+  CROSS JOIN LATERAL (
+    SELECT delivery.id, delivery.lane, delivery.available_at
+    FROM "public"."relaybus_deliveries" AS delivery
+    WHERE delivery.lane = scope.lane AND delivery.key IS NULL AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+      AND delivery.id <> ALL (scope.in_flight)
+    ORDER BY delivery.available_at, delivery.id
+    LIMIT (SELECT count FROM wanted)
+  ) AS recent
+  ORDER BY recent.available_at, recent.id
+  LIMIT (SELECT count FROM wanted)
+), free_candidates AS MATERIALIZED (
+  SELECT chosen.id, chosen.lane, chosen.available_at FROM (
+    SELECT fast.id, fast.lane, fast.available_at FROM free_fast AS fast
+    UNION
+    SELECT keyed.id, keyed.lane, keyed.available_at FROM free_keyed AS keyed
+    UNION
+    SELECT unkeyed.id, unkeyed.lane, unkeyed.available_at FROM free_unkeyed AS unkeyed
+  ) AS chosen
+  ORDER BY chosen.available_at, chosen.id
+  LIMIT (SELECT count FROM wanted)
+), claim_scope AS MATERIALIZED (
+  SELECT held_scope.lane, held_scope.epoch FROM held_scope
+  UNION ALL
+  SELECT free_scope.lane, free_scope.epoch FROM free_scope
+), picked_rows AS MATERIALIZED (
+  SELECT candidates.available_at AS due_at, delivery.id AS delivery_id, delivery.lane::int AS lane,
+    scope.epoch::text AS epoch, delivery.claims AS claims, delivery.handler, delivery.key AS delivery_key, delivery.sequence::text AS sequence, (delivery.attempts + 1)::int AS attempt,
+    event.id AS event_id,
+    event.type AS event_type,
+    event.source AS event_source,
+    event.key AS event_key,
+    event.payload::text AS event_payload,
+    event.headers::text AS event_headers,
+    event.correlation_id AS event_correlation_id,
+    event.causation_id AS event_causation_id,
+    to_char(event.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS event_occurred_at
+  FROM (
+    SELECT held_candidates.id, held_candidates.lane, held_candidates.available_at FROM held_candidates
+    UNION ALL
+    SELECT free_candidates.id, free_candidates.lane, free_candidates.available_at FROM free_candidates
+  ) AS candidates
+  JOIN claim_scope AS scope ON scope.lane = candidates.lane
+  JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = candidates.id
+  JOIN "public"."relaybus_events" AS event ON event.id = delivery.event_id
+), by_lane AS (
+  SELECT picked_rows.lane, array_agg(picked_rows.delivery_id) AS ids FROM picked_rows GROUP BY picked_rows.lane
+), still_running AS (
+  -- The retained ids come from the locked \`held\` rows, not from the lane table: a claim that waited for the lock
+  -- must see the in-flight list the claim before it recorded, which the statement snapshot may not.
+  SELECT held.lane, array_agg(delivery.id) AS ids
+  FROM by_lane
+  JOIN held ON held.lane = by_lane.lane
+  CROSS JOIN LATERAL unnest(held.in_flight) AS flying (id)
+  JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+  GROUP BY held.lane
+), extended AS (
+  UPDATE "public"."relaybus_lanes" AS lane
+  SET in_flight = COALESCE(still_running.ids, '{}') || by_lane.ids,
+      lease_expires_at = GREATEST(lane.lease_expires_at, $5::timestamptz)
+  FROM by_lane
+  JOIN held_scope ON held_scope.lane = by_lane.lane
+  LEFT JOIN still_running ON still_running.lane = by_lane.lane
+  WHERE lane.lane = by_lane.lane
+  RETURNING lane.lane
+), taken AS (
+  UPDATE "public"."relaybus_lanes" AS lane
+  SET epoch = free_scope.epoch, lease_owner = $4::text, lease_expires_at = $5::timestamptz,
+      in_flight = by_lane.ids, claim_floor = $6::bigint
+  FROM free_scope
+  JOIN by_lane ON by_lane.lane = free_scope.lane
+  WHERE lane.lane = free_scope.lane
+  RETURNING lane.lane
+), saturated_lanes AS (
+  SELECT held_window.lane FROM held_window GROUP BY held_window.lane HAVING count(*) >= 64
+), freed AS (
+  UPDATE "public"."relaybus_lanes" AS lane
+  SET lease_owner = NULL, lease_expires_at = NULL, in_flight = '{}'
+  FROM held
+  WHERE lane.lane = held.lane
+    AND lane.lane NOT IN (SELECT lane FROM by_lane)
+    AND lane.lane NOT IN (SELECT lane FROM saturated_lanes)
+    AND (SELECT count(*) FROM held_window) < 256
+    AND NOT (SELECT value FROM stale)
+    AND NOT EXISTS (
+      SELECT 1 FROM unnest(lane.in_flight) AS flying (id)
+      JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+    )
+  RETURNING lane.lane
+)
+SELECT (SELECT value FROM stale) AS stale,
+  EXISTS (SELECT 1 FROM free_lanes WHERE free_lanes.running) AS takeover_waiting,
+  (SELECT count(*) FROM free_lanes) = (SELECT count FROM wanted) + 16 AS unexamined_free_lanes,
+  (
+    SELECT COALESCE(jsonb_agg(delivery.id), '[]'::jsonb)
+    FROM held
+    CROSS JOIN LATERAL unnest(held.in_flight) AS flying (id)
+    JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+  )::text AS running_ids,
+  (SELECT COALESCE(jsonb_agg(held.lane), '[]'::jsonb) FROM held)::text AS examined_lanes,
+  picked.*
+FROM (SELECT 1) AS anchor
+LEFT JOIN picked_rows AS picked ON true
+ORDER BY picked.due_at, picked.delivery_id",
+    "takeFreeLanes": "WITH picked AS (
+  -- in_flight is read here, from the locked version of the lane: a settlement that committed after the
+  -- statement took its snapshot has taken its delivery out of the list already and must not be charged again.
+  SELECT free.lane, free.in_flight
+  FROM "public"."relaybus_lanes" AS free
+  CROSS JOIN LATERAL (
+    SELECT delivery.available_at, delivery.id
+    FROM "public"."relaybus_deliveries" AS delivery
+    WHERE delivery.lane = free.lane AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.handler = ANY (ARRAY(SELECT jsonb_array_elements_text($2::jsonb)))
+    ORDER BY delivery.available_at, delivery.id
+    LIMIT 1
+  ) AS oldest
+  WHERE free.lease_expires_at IS NULL OR free.lease_expires_at <= $1::timestamptz
+    OR (free.lease_owner = $4::text AND free.claim_floor < $6::bigint)
+  ORDER BY oldest.available_at, oldest.id
+  LIMIT $3::int
+  FOR UPDATE OF free SKIP LOCKED
+), charged AS (
+  UPDATE "public"."relaybus_deliveries" AS delivery SET attempts = delivery.attempts + 1, claims = delivery.claims + 1
+  FROM (
+    SELECT unnest(picked.in_flight) AS id FROM picked
+  ) AS lost
+  WHERE delivery.id = lost.id AND delivery.status = 'pending'
+  RETURNING delivery.id
+), taken AS (
+  UPDATE "public"."relaybus_lanes" AS lane
+  SET epoch = lane.epoch + 1, lease_owner = $4::text, lease_expires_at = $5::timestamptz, in_flight = '{}',
+      claim_floor = $6::bigint
+  FROM picked WHERE lane.lane = picked.lane
+  RETURNING lane.lane, lane.epoch
+)
+SELECT lane::int AS lane, epoch::text AS epoch FROM taken ORDER BY lane",
+  },
+  "purge": {
+    "deleteExpiredCompletedOrphanEvents": "WITH changed AS (DELETE FROM "public"."relaybus_events" AS event
+WHERE event.id = ANY (ARRAY(SELECT jsonb_array_elements_text($1::jsonb)))
+  AND NOT EXISTS (SELECT 1 FROM "public"."relaybus_deliveries" AS delivery WHERE delivery.event_id = event.id)
+  AND EXISTS (
+    SELECT 1 FROM "public"."relaybus_event_completions" AS completion
+    WHERE completion.event_id = event.id AND completion.completed_at < $2::timestamptz
+  ) RETURNING 1) SELECT count(*)::int AS count FROM changed",
+    "deleteOrphanEventsWithoutCompletion": "WITH changed AS (DELETE FROM "public"."relaybus_events" AS event
+WHERE event.id = ANY (ARRAY(SELECT jsonb_array_elements_text($1::jsonb)))
+  AND NOT EXISTS (SELECT 1 FROM "public"."relaybus_deliveries" AS delivery WHERE delivery.event_id = event.id)
+  AND NOT EXISTS (SELECT 1 FROM "public"."relaybus_event_completions" AS completion WHERE completion.event_id = event.id) RETURNING 1) SELECT count(*)::int AS count FROM changed",
+    "lockCompletedOrphanEventsBatch": "SELECT event.id FROM "public"."relaybus_events" AS event
+JOIN "public"."relaybus_event_completions" AS completion ON completion.event_id = event.id
+WHERE completion.completed_at < $1::timestamptz
+  AND NOT EXISTS (SELECT 1 FROM "public"."relaybus_deliveries" AS delivery WHERE delivery.event_id = event.id)
+ORDER BY completion.completed_at, event.id
+LIMIT $2::int
+FOR UPDATE OF event SKIP LOCKED",
+    "lockEvents": "SELECT id FROM "public"."relaybus_events"
+WHERE id = ANY (ARRAY(SELECT jsonb_array_elements_text($1::jsonb)))
+FOR UPDATE SKIP LOCKED",
+    "lockOrphanEventsBatch": "SELECT event.id FROM "public"."relaybus_events" AS event
+WHERE event.created_at < $1::timestamptz
+  AND NOT EXISTS (SELECT 1 FROM "public"."relaybus_deliveries" AS delivery WHERE delivery.event_id = event.id)
+  AND NOT EXISTS (SELECT 1 FROM "public"."relaybus_event_completions" AS completion WHERE completion.event_id = event.id)
+ORDER BY event.created_at, event.id
+LIMIT $2::int
+FOR UPDATE OF event SKIP LOCKED",
+    "purgeCompletedBatch": "WITH batch AS MATERIALIZED (
+  SELECT id FROM "public"."relaybus_deliveries"
+  WHERE status = 'completed' AND completed_at < $1::timestamptz
+  ORDER BY completed_at, id
+  LIMIT $2::int
+  FOR UPDATE SKIP LOCKED
+), deleted AS (
+  DELETE FROM "public"."relaybus_deliveries" AS delivery USING batch WHERE delivery.id = batch.id RETURNING delivery.event_id
+)
+SELECT event_id FROM deleted",
+    "purgeCompletionHistoryBatch": "WITH batch AS MATERIALIZED (
+  SELECT id FROM "public"."relaybus_completed_deliveries"
+  WHERE completed_at < $1::timestamptz
+  ORDER BY completed_at, id
+  LIMIT $2::int
+  FOR UPDATE SKIP LOCKED
+), deleted AS (
+  DELETE FROM "public"."relaybus_completed_deliveries" AS delivery USING batch WHERE delivery.id = batch.id RETURNING delivery.event_id
+)
+SELECT event_id FROM deleted",
+    "purgeDeadBatch": "WITH batch AS MATERIALIZED (
+  SELECT id FROM "public"."relaybus_deliveries"
+  WHERE status = 'dead' AND updated_at < $1::timestamptz
+  ORDER BY updated_at, id
+  LIMIT $2::int
+  FOR UPDATE SKIP LOCKED
+), deleted AS (
+  DELETE FROM "public"."relaybus_deliveries" AS delivery USING batch WHERE delivery.id = batch.id RETURNING delivery.event_id
+)
+SELECT event_id FROM deleted",
+  },
+  "queries": {
+    "countByStatus": "SELECT 'pending' AS status, count(*)::text AS count FROM "public"."relaybus_deliveries" WHERE status = 'pending'
+UNION ALL
+SELECT 'dead' AS status, count(*)::text AS count FROM "public"."relaybus_deliveries" WHERE status = 'dead'
+UNION ALL
+SELECT 'completed' AS status, count(*)::text AS count FROM "public"."relaybus_deliveries" WHERE status = 'completed'",
+    "countCompletionHistory": "SELECT count(*)::text AS count FROM "public"."relaybus_completed_deliveries"",
+    "countRunning": "SELECT count(*)::text AS count
+FROM "public"."relaybus_lanes" AS lane
+CROSS JOIN LATERAL unnest(lane.in_flight) AS flying (id)
+JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'",
+    "listDeliveries": [
+      {
+        "parameters": [
+          100,
+        ],
+        "sql": "SELECT delivery.id AS delivery_id, delivery.handler,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 'processing' ELSE delivery.status END AS status,
+  (delivery.attempts + CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 1 ELSE 0 END)::int AS attempts,
+  to_char(delivery.available_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS available_at,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN lane.lease_owner END AS lease_owner,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN to_char(lane.lease_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END AS lease_expires_at,
+  delivery.last_error::text AS last_error,
+  to_char(delivery.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+  to_char(delivery.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
+  to_char(delivery.completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS completed_at,
+  event.id AS event_id,
+    event.type AS event_type,
+    event.source AS event_source,
+    event.key AS event_key,
+    event.payload::text AS event_payload,
+    event.headers::text AS event_headers,
+    event.correlation_id AS event_correlation_id,
+    event.causation_id AS event_causation_id,
+    to_char(event.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS event_occurred_at
+FROM "public"."relaybus_deliveries" AS delivery
+JOIN "public"."relaybus_lanes" AS lane ON lane.lane = delivery.lane
+JOIN "public"."relaybus_events" AS event ON event.id = delivery.event_id
+
+ORDER BY delivery.created_at, delivery.id
+LIMIT $1::int",
+      },
+      {
+        "parameters": [
+          "pending",
+          100,
+        ],
+        "sql": "SELECT delivery.id AS delivery_id, delivery.handler,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 'processing' ELSE delivery.status END AS status,
+  (delivery.attempts + CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 1 ELSE 0 END)::int AS attempts,
+  to_char(delivery.available_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS available_at,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN lane.lease_owner END AS lease_owner,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN to_char(lane.lease_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END AS lease_expires_at,
+  delivery.last_error::text AS last_error,
+  to_char(delivery.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+  to_char(delivery.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
+  to_char(delivery.completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS completed_at,
+  event.id AS event_id,
+    event.type AS event_type,
+    event.source AS event_source,
+    event.key AS event_key,
+    event.payload::text AS event_payload,
+    event.headers::text AS event_headers,
+    event.correlation_id AS event_correlation_id,
+    event.causation_id AS event_causation_id,
+    to_char(event.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS event_occurred_at
+FROM "public"."relaybus_deliveries" AS delivery
+JOIN "public"."relaybus_lanes" AS lane ON lane.lane = delivery.lane
+JOIN "public"."relaybus_events" AS event ON event.id = delivery.event_id
+WHERE (CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 'processing' ELSE delivery.status END) = $1::text
+ORDER BY delivery.created_at, delivery.id
+LIMIT $2::int",
+      },
+      {
+        "parameters": [
+          "processing",
+          100,
+        ],
+        "sql": "SELECT delivery.id AS delivery_id, delivery.handler,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 'processing' ELSE delivery.status END AS status,
+  (delivery.attempts + CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 1 ELSE 0 END)::int AS attempts,
+  to_char(delivery.available_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS available_at,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN lane.lease_owner END AS lease_owner,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN to_char(lane.lease_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END AS lease_expires_at,
+  delivery.last_error::text AS last_error,
+  to_char(delivery.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+  to_char(delivery.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
+  to_char(delivery.completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS completed_at,
+  event.id AS event_id,
+    event.type AS event_type,
+    event.source AS event_source,
+    event.key AS event_key,
+    event.payload::text AS event_payload,
+    event.headers::text AS event_headers,
+    event.correlation_id AS event_correlation_id,
+    event.causation_id AS event_causation_id,
+    to_char(event.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS event_occurred_at
+FROM "public"."relaybus_deliveries" AS delivery
+JOIN "public"."relaybus_lanes" AS lane ON lane.lane = delivery.lane
+JOIN "public"."relaybus_events" AS event ON event.id = delivery.event_id
+WHERE (CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 'processing' ELSE delivery.status END) = $1::text
+ORDER BY delivery.created_at, delivery.id
+LIMIT $2::int",
+      },
+      {
+        "parameters": [
+          "order.placed.v1",
+          "e-1",
+          "completed",
+          100,
+        ],
+        "sql": "SELECT delivery.id AS delivery_id, delivery.handler,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 'processing' ELSE delivery.status END AS status,
+  (delivery.attempts + CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 1 ELSE 0 END)::int AS attempts,
+  to_char(delivery.available_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS available_at,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN lane.lease_owner END AS lease_owner,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN to_char(lane.lease_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END AS lease_expires_at,
+  delivery.last_error::text AS last_error,
+  to_char(delivery.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+  to_char(delivery.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
+  to_char(delivery.completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS completed_at,
+  event.id AS event_id,
+    event.type AS event_type,
+    event.source AS event_source,
+    event.key AS event_key,
+    event.payload::text AS event_payload,
+    event.headers::text AS event_headers,
+    event.correlation_id AS event_correlation_id,
+    event.causation_id AS event_causation_id,
+    to_char(event.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS event_occurred_at
+FROM "public"."relaybus_deliveries" AS delivery
+JOIN "public"."relaybus_lanes" AS lane ON lane.lane = delivery.lane
+JOIN "public"."relaybus_events" AS event ON event.id = delivery.event_id
+WHERE event.type = $1::text AND delivery.event_id = $2::text AND (CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 'processing' ELSE delivery.status END) = $3::text
+ORDER BY delivery.created_at, delivery.id
+LIMIT $4::int",
+      },
+      {
+        "parameters": [
+          "h",
+          "dead",
+          3,
+        ],
+        "sql": "SELECT delivery.id AS delivery_id, delivery.handler,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 'processing' ELSE delivery.status END AS status,
+  (delivery.attempts + CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 1 ELSE 0 END)::int AS attempts,
+  to_char(delivery.available_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS available_at,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN lane.lease_owner END AS lease_owner,
+  CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN to_char(lane.lease_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END AS lease_expires_at,
+  delivery.last_error::text AS last_error,
+  to_char(delivery.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+  to_char(delivery.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
+  to_char(delivery.completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS completed_at,
+  event.id AS event_id,
+    event.type AS event_type,
+    event.source AS event_source,
+    event.key AS event_key,
+    event.payload::text AS event_payload,
+    event.headers::text AS event_headers,
+    event.correlation_id AS event_correlation_id,
+    event.causation_id AS event_causation_id,
+    to_char(event.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS event_occurred_at
+FROM "public"."relaybus_deliveries" AS delivery
+JOIN "public"."relaybus_lanes" AS lane ON lane.lane = delivery.lane
+JOIN "public"."relaybus_events" AS event ON event.id = delivery.event_id
+WHERE delivery.handler = $1::text AND (CASE WHEN (delivery.status = 'pending' AND delivery.id = ANY (lane.in_flight)) THEN 'processing' ELSE delivery.status END) = $2::text
+ORDER BY delivery.created_at, delivery.id
+LIMIT $3::int",
+      },
+    ],
+    "oldestDue": "SELECT to_char(min(due.due_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS oldest_due_at FROM (
+  SELECT waiting.available_at AS due_at
+  FROM "public"."relaybus_lanes" AS lane
+  CROSS JOIN LATERAL (
+    SELECT delivery.available_at FROM "public"."relaybus_deliveries" AS delivery
+    WHERE delivery.lane = lane.lane AND delivery.status = 'pending'
+      AND delivery.available_at <= $1::timestamptz AND delivery.id <> ALL (lane.in_flight)
+    ORDER BY delivery.available_at LIMIT 1
+  ) AS waiting
+  UNION ALL
+  SELECT lane.lease_expires_at AS due_at
+  FROM "public"."relaybus_lanes" AS lane
+  WHERE lane.lease_expires_at <= $1::timestamptz AND NOT NOT EXISTS (
+      SELECT 1 FROM unnest(lane.in_flight) AS flying (id)
+      JOIN "public"."relaybus_deliveries" AS delivery ON delivery.id = flying.id AND delivery.status = 'pending'
+    )
+) AS due",
+    "requeue": "WITH changed AS (WITH dead AS MATERIALIZED (
+  SELECT delivery.id FROM "public"."relaybus_deliveries" AS delivery
+  WHERE delivery.id = ANY (ARRAY(SELECT jsonb_array_elements_text($1::jsonb))) AND delivery.status = 'dead'
+  ORDER BY delivery.id
+  FOR NO KEY UPDATE
+)
+UPDATE "public"."relaybus_deliveries" AS delivery
+SET status = 'pending', attempts = 0, available_at = $2::timestamptz, updated_at = $2::timestamptz
+FROM dead
+WHERE delivery.id = dead.id AND delivery.status = 'dead' RETURNING 1) SELECT count(*)::int AS count FROM changed",
+  },
+  "setup": {
+    "schemaCurrent": "SELECT EXISTS (
+  SELECT 1 FROM pg_catalog.pg_class AS c
+  JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+  JOIN pg_catalog.pg_description AS d
+    ON d.objoid = c.oid AND d.classoid = 'pg_catalog.pg_class'::regclass AND d.objsubid = 0
+  WHERE n.nspname = 'public' AND c.relname = 'relaybus_lanes' AND d.description = $1::text
+) AS current",
+    "setupLock": "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+    "setupLockKey": "relaybus:public",
+  },
+}
+`;

@@ -17,6 +17,35 @@ import {
  */
 const FREE_LANE_SURPLUS = 16;
 
+/** Which lanes `#candidates` picks from, under which CTE names, and how many. */
+type CandidateSpec = {
+  readonly prefix: string;
+  readonly scope: string;
+  readonly running: string | null;
+  readonly limit: string;
+};
+
+/** True for a delivery whose (handler, key) runs nowhere in the CTE `running`; always true without one. */
+function notRunning(running: string | null, alias: string): string {
+  return running === null
+    ? 'true'
+    : `NOT EXISTS (SELECT 1 FROM ${running} AS running WHERE running.handler = ${alias}.handler AND running.key = ${alias}.key)`;
+}
+
+/** A free lane: its lease expired, or this owner left it behind under an older claim floor. */
+const freeLane = (alias: string): string =>
+  `(${alias}.lease_expires_at IS NULL OR ${alias}.lease_expires_at <= $1::timestamptz
+      OR (${alias}.lease_owner = $4::text AND ${alias}.claim_floor < $6::bigint))`;
+
+/** The free-lane CTEs of a claim that only looks at the lanes it holds: all empty. */
+const NO_FREE_LANES = `), free_lanes AS (
+  SELECT NULL::smallint AS lane, NULL::bigint AS epoch, NULL::text[] AS in_flight, false AS running WHERE false
+), free_scope AS (
+  SELECT NULL::smallint AS lane, NULL::bigint AS epoch WHERE false
+), free_candidates AS (
+  SELECT NULL::text AS id, NULL::smallint AS lane, NULL::timestamptz AS available_at WHERE false
+)`;
+
 /** Statements that claim with the lanes they hold or take: the one-statement claim and the lane takeover. */
 export class LaneStatements {
   readonly #names: PostgresNames;
@@ -69,13 +98,53 @@ export class LaneStatements {
   }
 
   #claimLanes(includeFreeLanes: boolean): string {
+    const free = includeFreeLanes
+      ? this.#freeLaneChoice() + this.#freeLaneDepth() + this.#freeLaneTake()
+      : NO_FREE_LANES;
+    return (
+      this.#heldLanes() + free + this.#claimPicks() + this.#claimRecord() + this.#claimRelease()
+    );
+  }
+
+  /** Locks the held lanes, detects a stale snapshot and picks from the held lanes; ends with `wanted`. */
+  #heldLanes(): string {
     const deliveries = this.#names.deliveries;
     const lanes = this.#names.lanes;
-    const freeLane = (alias: string): string =>
-      `(${alias}.lease_expires_at IS NULL OR ${alias}.lease_expires_at <= $1::timestamptz
-      OR (${alias}.lease_owner = $4::text AND ${alias}.claim_floor < $6::bigint))`;
-    const free = includeFreeLanes
-      ? `), free_lanes AS MATERIALIZED (
+    return `WITH held AS MATERIALIZED (
+  SELECT lane.lane, lane.epoch, lane.in_flight
+  FROM ${lanes} AS lane
+  WHERE lane.lease_owner = $4::text AND lane.lease_expires_at > $1::timestamptz
+    AND lane.claim_floor = $6::bigint
+  ORDER BY lane.lane
+  FOR NO KEY UPDATE
+), stale AS (
+  -- A claim that waited for a lane lock sees the new lane row but reads deliveries with the snapshot it took
+  -- before the wait: whatever changed the lane meanwhile (a reschedule, a release) may also have changed
+  -- deliveries it cannot see. The statement then does nothing and reports it, and the caller runs it again.
+  SELECT EXISTS (
+    SELECT 1 FROM held
+    JOIN ${lanes} AS before ON before.lane = held.lane
+    WHERE before.epoch <> held.epoch OR before.in_flight IS DISTINCT FROM held.in_flight
+  ) AS value
+), held_scope AS MATERIALIZED (
+  SELECT held.lane, held.epoch, held.in_flight FROM held WHERE NOT (SELECT value FROM stale)
+), held_running AS MATERIALIZED (
+  SELECT delivery.handler, delivery.key
+  FROM held_scope
+  CROSS JOIN LATERAL unnest(held_scope.in_flight) AS flying (id)
+  JOIN ${deliveries} AS delivery ON delivery.id = flying.id
+  WHERE delivery.status = 'pending' AND delivery.key IS NOT NULL
+), ${this.#candidates('held', 'held_scope', 'held_running', '$3::int')}, wanted AS MATERIALIZED (
+  SELECT CASE WHEN (SELECT value FROM stale) THEN 0
+    ELSE $3::int - (SELECT count(*) FROM held_candidates)::int END AS count
+`;
+  }
+
+  /** The oldest due delivery of each free lane, at most the number still wanted plus a surplus. */
+  #freeLaneChoice(): string {
+    const deliveries = this.#names.deliveries;
+    const lanes = this.#names.lanes;
+    return `), free_lanes AS MATERIALIZED (
   -- The oldest due delivery of each free lane: one index probe per free lane, bounded by the due time,
   -- so deliveries scheduled for later are never read.
   SELECT lane.lane, lane.epoch, lane.in_flight, lane.lease_owner, lane.lease_expires_at,
@@ -92,7 +161,13 @@ export class LaneStatements {
   WHERE (SELECT count FROM wanted) > 0 AND ${freeLane('lane')}
   ORDER BY oldest.available_at, oldest.id
   LIMIT (SELECT count FROM wanted) + ${FREE_LANE_SURPLUS}
-), free_depth AS MATERIALIZED (
+`;
+  }
+
+  /** What each free candidate lane can give now, and their order. */
+  #freeLaneDepth(): string {
+    const deliveries = this.#names.deliveries;
+    return `), free_depth AS MATERIALIZED (
   -- What each candidate lane can give now, from its first due deliveries: unkeyed ones, and of a key its
   -- lowest one when nothing earlier of the key is pending. Lanes that can give nothing are passed over;
   -- of the others, the first ${INITIAL_FREE_LANES} are taken, and further ones until they cover what is
@@ -127,7 +202,13 @@ export class LaneStatements {
     ) AS depth
     WHERE NOT lane_candidate.running AND depth.count > 0
   ) AS runnable
-), free_locked AS MATERIALIZED (
+`;
+  }
+
+  /** Locks the chosen free lanes that did not change hands and picks from them. */
+  #freeLaneTake(): string {
+    const lanes = this.#names.lanes;
+    return `), free_locked AS MATERIALIZED (
   SELECT lane.lane, lane.epoch, lane.in_flight, lane.lease_owner, lane.lease_expires_at
   FROM ${lanes} AS lane
   WHERE lane.lane IN (
@@ -145,42 +226,13 @@ export class LaneStatements {
   WHERE locked.epoch = seen.epoch AND locked.in_flight = seen.in_flight
     AND locked.lease_owner IS NOT DISTINCT FROM seen.lease_owner
     AND locked.lease_expires_at IS NOT DISTINCT FROM seen.lease_expires_at
-), ${this.#candidates('free', 'free_scope', null, '(SELECT count FROM wanted)')}`
-      : `), free_lanes AS (
-  SELECT NULL::smallint AS lane, NULL::bigint AS epoch, NULL::text[] AS in_flight, false AS running WHERE false
-), free_scope AS (
-  SELECT NULL::smallint AS lane, NULL::bigint AS epoch WHERE false
-), free_candidates AS (
-  SELECT NULL::text AS id, NULL::smallint AS lane, NULL::timestamptz AS available_at WHERE false
-)`;
-    return `WITH held AS MATERIALIZED (
-  SELECT lane.lane, lane.epoch, lane.in_flight
-  FROM ${lanes} AS lane
-  WHERE lane.lease_owner = $4::text AND lane.lease_expires_at > $1::timestamptz
-    AND lane.claim_floor = $6::bigint
-  ORDER BY lane.lane
-  FOR NO KEY UPDATE
-), stale AS (
-  -- A claim that waited for a lane lock sees the new lane row but reads deliveries with the snapshot it took
-  -- before the wait: whatever changed the lane meanwhile (a reschedule, a release) may also have changed
-  -- deliveries it cannot see. The statement then does nothing and reports it, and the caller runs it again.
-  SELECT EXISTS (
-    SELECT 1 FROM held
-    JOIN ${lanes} AS before ON before.lane = held.lane
-    WHERE before.epoch <> held.epoch OR before.in_flight IS DISTINCT FROM held.in_flight
-  ) AS value
-), held_scope AS MATERIALIZED (
-  SELECT held.lane, held.epoch, held.in_flight FROM held WHERE NOT (SELECT value FROM stale)
-), held_running AS MATERIALIZED (
-  SELECT delivery.handler, delivery.key
-  FROM held_scope
-  CROSS JOIN LATERAL unnest(held_scope.in_flight) AS flying (id)
-  JOIN ${deliveries} AS delivery ON delivery.id = flying.id
-  WHERE delivery.status = 'pending' AND delivery.key IS NOT NULL
-), ${this.#candidates('held', 'held_scope', 'held_running', '$3::int')}, wanted AS MATERIALIZED (
-  SELECT CASE WHEN (SELECT value FROM stale) THEN 0
-    ELSE $3::int - (SELECT count(*) FROM held_candidates)::int END AS count
-${free}, claim_scope AS MATERIALIZED (
+), ${this.#candidates('free', 'free_scope', null, '(SELECT count FROM wanted)')}`;
+  }
+
+  /** The picked deliveries of held and taken lanes with their events, and the picks per lane. */
+  #claimPicks(): string {
+    const deliveries = this.#names.deliveries;
+    return `, claim_scope AS MATERIALIZED (
   SELECT held_scope.lane, held_scope.epoch FROM held_scope
   UNION ALL
   SELECT free_scope.lane, free_scope.epoch FROM free_scope
@@ -198,7 +250,14 @@ ${free}, claim_scope AS MATERIALIZED (
   JOIN ${this.#names.events} AS event ON event.id = delivery.event_id
 ), by_lane AS (
   SELECT picked_rows.lane, array_agg(picked_rows.delivery_id) AS ids FROM picked_rows GROUP BY picked_rows.lane
-), still_running AS (
+`;
+  }
+
+  /** Records the picks in the held lanes and takes the free lanes that yielded picks. */
+  #claimRecord(): string {
+    const deliveries = this.#names.deliveries;
+    const lanes = this.#names.lanes;
+    return `), still_running AS (
   -- The retained ids come from the locked \`held\` rows, not from the lane table: a claim that waited for the lock
   -- must see the in-flight list the claim before it recorded, which the statement snapshot may not.
   SELECT held.lane, array_agg(delivery.id) AS ids
@@ -224,7 +283,14 @@ ${free}, claim_scope AS MATERIALIZED (
   JOIN by_lane ON by_lane.lane = free_scope.lane
   WHERE lane.lane = free_scope.lane
   RETURNING lane.lane
-), saturated_lanes AS (
+`;
+  }
+
+  /** Frees the held lanes that yielded nothing and run nothing, and selects the result rows. */
+  #claimRelease(): string {
+    const deliveries = this.#names.deliveries;
+    const lanes = this.#names.lanes;
+    return `), saturated_lanes AS (
   SELECT held_window.lane FROM held_window GROUP BY held_window.lane HAVING count(*) >= ${LANE_SCAN_WINDOW}
 ), freed AS (
   UPDATE ${lanes} AS lane
@@ -265,11 +331,13 @@ ORDER BY picked.due_at, picked.delivery_id`;
    * lanes, or is null when nothing runs there.
    */
   #candidates(prefix: string, scope: string, running: string | null, limit: string): string {
+    const spec: CandidateSpec = { prefix, scope, running, limit };
+    return this.#fastCandidates(spec) + this.#slowCandidates(spec);
+  }
+
+  /** The fast window of each lane and the claimable deliveries in it (`<prefix>_window`, `<prefix>_fast`). */
+  #fastCandidates({ prefix, scope, running, limit }: CandidateSpec): string {
     const deliveries = this.#names.deliveries;
-    const notRunning = (alias: string): string =>
-      running === null
-        ? 'true'
-        : `NOT EXISTS (SELECT 1 FROM ${running} AS running WHERE running.handler = ${alias}.handler AND running.key = ${alias}.key)`;
     return `${prefix}_window AS MATERIALIZED (
   SELECT recent.id, recent.lane, recent.available_at, recent.handler, recent.key, recent.sequence
   FROM ${scope}
@@ -299,11 +367,20 @@ ORDER BY picked.due_at, picked.delivery_id`;
         SELECT 1 FROM ${deliveries} AS earlier
         WHERE earlier.lane = head.lane AND earlier.handler = head.handler AND earlier.key = head.key
           AND earlier.status = 'pending' AND earlier.key IS NOT NULL AND earlier.sequence < head.sequence
-      ) AND ${notRunning('head')}
+      ) AND ${notRunning(running, 'head')}
   ) AS picked
   ORDER BY picked.available_at, picked.id
   LIMIT ${limit}
-), ${prefix}_saturated AS MATERIALIZED (
+`;
+  }
+
+  /**
+   * For lanes whose window filled up while the fast pick came up short: the heads of all their keys and
+   * their unkeyed deliveries, then the union with the fast pick (`<prefix>_candidates`).
+   */
+  #slowCandidates({ prefix, scope, running, limit }: CandidateSpec): string {
+    const deliveries = this.#names.deliveries;
+    return `), ${prefix}_saturated AS MATERIALIZED (
   SELECT ${scope}.lane, ${scope}.in_flight FROM ${scope}
   WHERE (SELECT count(*) FROM ${prefix}_fast) < ${limit}
     AND ((SELECT count(*) FROM ${prefix}_window) >= ${CLAIM_SCAN_WINDOW}
@@ -319,7 +396,7 @@ ORDER BY picked.due_at, picked.delivery_id`;
   SELECT heads.id, heads.lane, heads.available_at
   FROM ${prefix}_heads AS heads
   JOIN ${prefix}_saturated AS scope ON scope.lane = heads.lane
-  WHERE heads.available_at <= $1::timestamptz AND heads.id <> ALL (scope.in_flight) AND ${notRunning('heads')}
+  WHERE heads.available_at <= $1::timestamptz AND heads.id <> ALL (scope.in_flight) AND ${notRunning(running, 'heads')}
   ORDER BY heads.available_at, heads.id
   LIMIT ${limit}
 ), ${prefix}_unkeyed AS MATERIALIZED (

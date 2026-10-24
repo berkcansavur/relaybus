@@ -144,59 +144,12 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   readonly #maintenance: PostgresMaintenance<TTransaction>;
 
   constructor(options: PostgresEventStoreOptions<TTransaction>) {
-    const sources = [options.pool, options.connectionString, options.executor].filter(
-      (source) => source !== undefined,
-    );
-    if (sources.length !== 1) {
-      throw new ConfigurationError(
-        'PostgresEventStore needs exactly one of pool, connectionString or executor',
-      );
-    }
-    const purgeBatchSize = assertPositiveInteger(
-      options.purgeBatchSize ?? DEFAULT_PURGE_BATCH_SIZE,
-      'purgeBatchSize',
-    );
-    const wakeUp = options.wakeUp ?? 'notify';
-    if (!WAKE_UPS.includes(wakeUp)) {
-      throw new ConfigurationError(`wakeUp must be 'notify' or 'poll', received ${String(wakeUp)}`);
-    }
-    const preparedStatements = options.preparedStatements ?? true;
-    if (typeof preparedStatements !== 'boolean') {
-      throw new ConfigurationError(
-        `preparedStatements must be a boolean, received ${String(preparedStatements)}`,
-      );
-    }
-    const queryOptions: PostgresQueryOptions | undefined = preparedStatements
-      ? { prepare: true }
-      : undefined;
+    const { purgeBatchSize, wakeUp, queryOptions } = resolveStoreSettings(options);
     const names = resolvePostgresNames(options);
     const statements = new PostgresStatements(names);
     const schemaStatements = createPostgresSchemaStatements(options);
     const logger = options.logger ?? console;
-    let executor: PostgresExecutor<TTransaction>;
-    let pool: Pool | undefined;
-    let ownedPool: Pool | undefined;
-    if (options.executor !== undefined) {
-      executor = options.executor;
-      pool = undefined;
-    } else {
-      pool =
-        options.pool ??
-        new Pool({ ...options.poolConfig, connectionString: options.connectionString });
-      if (options.pool === undefined) {
-        const poolLogger = options.logger ?? console;
-        pool.on('error', (error) => {
-          poolLogger.error(
-            `[PostgresEventStore](constructor) Idle connection failed, the pool replaces it | error=${error.message}`,
-          );
-        });
-        ownedPool = pool;
-      }
-      // Without an executor the transaction type is PoolClient, as the default type argument states.
-      executor = new PgExecutor(pool, {
-        logger,
-      }) as unknown as PostgresExecutor<TTransaction>;
-    }
+    const { executor, pool, ownedPool } = connect(options, logger);
     const state: PostgresStoreState<TTransaction> = {
       executor,
       statements,
@@ -418,4 +371,73 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     this.#state.ownedPool = undefined;
     await pool?.end();
   }
+}
+
+/** Validates the options that are not names, in declaration order. */
+function resolveStoreSettings<TTransaction>(options: PostgresEventStoreOptions<TTransaction>): {
+  purgeBatchSize: number;
+  wakeUp: PostgresWakeUp;
+  queryOptions: PostgresQueryOptions | undefined;
+} {
+  const sources = [options.pool, options.connectionString, options.executor].filter(
+    (source) => source !== undefined,
+  );
+  if (sources.length !== 1) {
+    throw new ConfigurationError(
+      'PostgresEventStore needs exactly one of pool, connectionString or executor',
+    );
+  }
+  const purgeBatchSize = assertPositiveInteger(
+    options.purgeBatchSize ?? DEFAULT_PURGE_BATCH_SIZE,
+    'purgeBatchSize',
+  );
+  const wakeUp = options.wakeUp ?? 'notify';
+  if (!WAKE_UPS.includes(wakeUp)) {
+    throw new ConfigurationError(`wakeUp must be 'notify' or 'poll', received ${String(wakeUp)}`);
+  }
+  const preparedStatements = options.preparedStatements ?? true;
+  if (typeof preparedStatements !== 'boolean') {
+    throw new ConfigurationError(
+      `preparedStatements must be a boolean, received ${String(preparedStatements)}`,
+    );
+  }
+  return {
+    purgeBatchSize,
+    wakeUp,
+    queryOptions: preparedStatements ? { prepare: true } : undefined,
+  };
+}
+
+/**
+ * The executor of the store: the one passed in, or a `pg` executor on the given pool or on a pool
+ * of its own (`ownedPool`, which the store ends on close).
+ */
+function connect<TTransaction>(
+  options: PostgresEventStoreOptions<TTransaction>,
+  logger: RelayBusLogger,
+): {
+  executor: PostgresExecutor<TTransaction>;
+  pool: Pool | undefined;
+  ownedPool: Pool | undefined;
+} {
+  if (options.executor !== undefined) {
+    return { executor: options.executor, pool: undefined, ownedPool: undefined };
+  }
+  const pool =
+    options.pool ?? new Pool({ ...options.poolConfig, connectionString: options.connectionString });
+  let ownedPool: Pool | undefined;
+  if (options.pool === undefined) {
+    const poolLogger = options.logger ?? console;
+    pool.on('error', (error) => {
+      poolLogger.error(
+        `[PostgresEventStore](constructor) Idle connection failed, the pool replaces it | error=${error.message}`,
+      );
+    });
+    ownedPool = pool;
+  }
+  // Without an executor the transaction type is PoolClient, as the default type argument states.
+  const executor = new PgExecutor(pool, {
+    logger,
+  }) as unknown as PostgresExecutor<TTransaction>;
+  return { executor, pool, ownedPool };
 }

@@ -63,19 +63,8 @@ export class PostgresAppend<TTransaction> {
     }
     const createdAt = now.toISOString();
     const wakeAt = this.#wakeAt(plan.deliveries, now, transaction);
-    const handlersByEvent = new Map<string, string[]>();
-    for (const delivery of plan.deliveries) {
-      handlersByEvent.set(delivery.event_id, [
-        ...(handlersByEvent.get(delivery.event_id) ?? []),
-        delivery.handler,
-      ]);
-    }
-    const keyCounts = new Map<string, number>();
-    for (const event of plan.events) {
-      if (event.key !== null) {
-        keyCounts.set(event.key, (keyCounts.get(event.key) ?? 0) + 1);
-      }
-    }
+    const handlersByEvent = handlersByEventOf(plan.deliveries);
+    const keyCounts = keyCountsOf(plan.events);
     const fresh = await this.#state.query(
       this.#state.statements.append.insertFreshEvents,
       [
@@ -110,14 +99,7 @@ export class PostgresAppend<TTransaction> {
         wakeAt,
       });
     }
-    const appendedEventIds: string[] = [];
-    const duplicateEventIds: string[] = [];
-    for (const { eventId, repeated } of plan.outcomes) {
-      (!repeated && insertedEventIds.has(eventId) ? appendedEventIds : duplicateEventIds).push(
-        eventId,
-      );
-    }
-    return { appendedEventIds, duplicateEventIds, appendedDeliveryCount };
+    return { ...splitOutcomes(plan, insertedEventIds), appendedDeliveryCount };
   }
 
   /**
@@ -284,4 +266,42 @@ function toEventRow(
     occurred_at: event.occurredAt.toISOString(),
     handlers,
   };
+}
+
+/** The handlers each event gets a delivery for, in delivery order. */
+function handlersByEventOf(deliveries: readonly DeliveryRow[]): Map<string, string[]> {
+  const handlersByEvent = new Map<string, string[]>();
+  for (const delivery of deliveries) {
+    handlersByEvent.set(delivery.event_id, [
+      ...(handlersByEvent.get(delivery.event_id) ?? []),
+      delivery.handler,
+    ]);
+  }
+  return handlersByEvent;
+}
+
+/** How many of the events carry each key: the sequences each key reserves. */
+function keyCountsOf(events: AppendPlan['events']): Map<string, number> {
+  const keyCounts = new Map<string, number>();
+  for (const event of events) {
+    if (event.key !== null) {
+      keyCounts.set(event.key, (keyCounts.get(event.key) ?? 0) + 1);
+    }
+  }
+  return keyCounts;
+}
+
+/** Each entry's event id as appended (new and inserted by this call) or duplicate, in entry order. */
+function splitOutcomes(
+  plan: AppendPlan,
+  insertedEventIds: ReadonlySet<string>,
+): { appendedEventIds: string[]; duplicateEventIds: string[] } {
+  const appendedEventIds: string[] = [];
+  const duplicateEventIds: string[] = [];
+  for (const { eventId, repeated } of plan.outcomes) {
+    (!repeated && insertedEventIds.has(eventId) ? appendedEventIds : duplicateEventIds).push(
+      eventId,
+    );
+  }
+  return { appendedEventIds, duplicateEventIds };
 }

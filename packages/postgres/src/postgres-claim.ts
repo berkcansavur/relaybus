@@ -49,21 +49,40 @@ export class PostgresClaims<TTransaction> {
   }
 
   async #claim(request: ClaimRequest): Promise<ClaimedDelivery[]> {
-    if (
-      this.#state.unreconciled.has(request.leaseOwner) &&
-      !(await this.#reconcile(request.leaseOwner))
-    ) {
-      // The generation moved on and the lanes were not told: claiming now would take the owner's live lanes for foreign ones.
-      throw new ReconcileFailedError(
-        `[PostgresEventStore](claim) Giving back unreturned deliveries still fails, so no claim is made | owner=${request.leaseOwner}`,
-      );
-    }
+    await this.#assertReconciled(request.leaseOwner);
     // An owner whose last claim was filled from the lanes it held is draining a backlog there: those
     // lanes are asked first.
     const heldFirst = this.#state.drainingOwners.has(request.leaseOwner);
-    let rows: readonly PostgresRow[];
+    let rows = await this.#claimFirst(request, heldFirst);
+    const heldLanes = new Set(JSON.parse(rows[0]!['examined_lanes'] as string) as number[]);
+    const claimed = this.#takeClaimed(rows, request.leaseOwner);
+    if (heldFirst && claimed.length < request.limit && rows[0]!['stale'] !== true) {
+      const freeRows = await this.#claimFreeLanesAfterHeld(request, claimed);
+      if (freeRows === undefined) {
+        return this.#handOutInDueOrder(claimed, request, heldLanes);
+      }
+      rows = freeRows;
+    }
+    if (claimed.length < request.limit && leftWorkBehind(rows[0]!)) {
+      await this.#claimMoreLanes(request, claimed);
+    }
+    return this.#handOutInDueOrder(claimed, request, heldLanes);
+  }
+
+  /** Reconciles first when an earlier reconciliation of `owner` failed; refuses to claim while it still fails. */
+  async #assertReconciled(owner: string): Promise<void> {
+    if (this.#state.unreconciled.has(owner) && !(await this.#reconcile(owner))) {
+      // The generation moved on and the lanes were not told: claiming now would take the owner's live lanes for foreign ones.
+      throw new ReconcileFailedError(
+        `[PostgresEventStore](claim) Giving back unreturned deliveries still fails, so no claim is made | owner=${owner}`,
+      );
+    }
+  }
+
+  /** The first claim statement: from the held lanes only when `heldFirst`, else from held and free lanes. */
+  async #claimFirst(request: ClaimRequest, heldFirst: boolean): Promise<readonly PostgresRow[]> {
     try {
-      rows = await this.#claimInOneStatement(
+      return await this.#claimInOneStatement(
         request,
         heldFirst
           ? this.#state.statements.lanes.claimHeldLanes
@@ -73,48 +92,53 @@ export class PostgresClaims<TTransaction> {
       await this.#reconcile(request.leaseOwner);
       throw error;
     }
-    const heldLanes = new Set(JSON.parse(rows[0]!['examined_lanes'] as string) as number[]);
-    const claimed = this.#takeClaimed(rows, request.leaseOwner);
-    if (heldFirst && claimed.length < request.limit && rows[0]!['stale'] !== true) {
-      try {
-        rows = await this.#claimInOneStatement(
-          { ...request, limit: request.limit - claimed.length },
-          this.#state.statements.lanes.claimLanes,
-        );
-      } catch (error) {
-        await this.#reconcile(request.leaseOwner);
-        if (claimed.length === 0) {
-          this.#state.drainingOwners.delete(request.leaseOwner);
-          throw error;
-        }
-        this.#state.logger.error(
-          `[PostgresEventStore](claim) Claiming from free lanes failed, returning the deliveries already claimed | claimed=${claimed.length} | error=${error instanceof Error ? error.message : String(error)}`,
-        );
-        return this.#handOutInDueOrder(claimed, request, heldLanes);
+  }
+
+  /**
+   * After a held-lanes claim came up short: claims the rest from held and free lanes and adds it to
+   * `claimed`. Returns the statement's rows, or undefined when it failed after something was claimed
+   * already, which is then handed out as it is.
+   */
+  async #claimFreeLanesAfterHeld(
+    request: ClaimRequest,
+    claimed: PostgresRow[],
+  ): Promise<readonly PostgresRow[] | undefined> {
+    let rows: readonly PostgresRow[];
+    try {
+      rows = await this.#claimInOneStatement(
+        { ...request, limit: request.limit - claimed.length },
+        this.#state.statements.lanes.claimLanes,
+      );
+    } catch (error) {
+      await this.#reconcile(request.leaseOwner);
+      if (claimed.length === 0) {
+        this.#state.drainingOwners.delete(request.leaseOwner);
+        throw error;
       }
-      claimed.push(...this.#takeClaimed(rows, request.leaseOwner));
+      this.#state.logger.error(
+        `[PostgresEventStore](claim) Claiming from free lanes failed, returning the deliveries already claimed | claimed=${claimed.length} | error=${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
     }
-    if (
-      claimed.length < request.limit &&
-      (rows[0]!['takeover_waiting'] === true ||
-        rows[0]!['unexamined_free_lanes'] === true ||
-        rows[0]!['stale'] === true)
-    ) {
-      try {
-        const more = await this.#claimMore(request, claimed.length);
-        this.#handOut(more, request.leaseOwner);
-        claimed.push(...more);
-      } catch (error) {
-        await this.#reconcile(request.leaseOwner);
-        if (claimed.length === 0) {
-          throw error;
-        }
-        this.#state.logger.error(
-          `[PostgresEventStore](claim) Taking more lanes failed, returning the deliveries already claimed | claimed=${claimed.length} | error=${error instanceof Error ? error.message : String(error)}`,
-        );
+    claimed.push(...this.#takeClaimed(rows, request.leaseOwner));
+    return rows;
+  }
+
+  /** Takes more lanes round by round and adds what they give to `claimed`; keeps what was claimed when that fails. */
+  async #claimMoreLanes(request: ClaimRequest, claimed: PostgresRow[]): Promise<void> {
+    try {
+      const more = await this.#claimMore(request, claimed.length);
+      this.#handOut(more, request.leaseOwner);
+      claimed.push(...more);
+    } catch (error) {
+      await this.#reconcile(request.leaseOwner);
+      if (claimed.length === 0) {
+        throw error;
       }
+      this.#state.logger.error(
+        `[PostgresEventStore](claim) Taking more lanes failed, returning the deliveries already claimed | claimed=${claimed.length} | error=${error instanceof Error ? error.message : String(error)}`,
+      );
     }
-    return this.#handOutInDueOrder(claimed, request, heldLanes);
   }
 
   /** The deliveries a claim statement picked, registered as handed out to `leaseOwner`. */
@@ -364,10 +388,24 @@ export class PostgresClaims<TTransaction> {
   }
 }
 
+/** Whether the claim statement saw work it could not take: a takeover in progress, unexamined free lanes, or a stale snapshot. */
+function leftWorkBehind(row: PostgresRow): boolean {
+  return (
+    row['takeover_waiting'] === true ||
+    row['unexamined_free_lanes'] === true ||
+    row['stale'] === true
+  );
+}
+
 function compareSequence(left: PostgresRow, right: PostgresRow): number {
-  const first = BigInt((left['sequence'] as string | null) ?? 0);
-  const second = BigInt((right['sequence'] as string | null) ?? 0);
+  const first = sequenceOf(left);
+  const second = sequenceOf(right);
   return Number(first > second) - Number(first < second);
+}
+
+/** The key sequence of a picked row; 0 for an unkeyed delivery, which has none. */
+function sequenceOf(row: PostgresRow): bigint {
+  return BigInt((row['sequence'] as string | null) ?? 0);
 }
 
 function compareDue(left: PostgresRow, right: PostgresRow): number {

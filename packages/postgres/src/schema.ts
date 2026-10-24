@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
-import { LANE_COUNT, resolvePostgresNames, type PostgresSchemaOptions } from './names.js';
+import {
+  LANE_COUNT,
+  resolvePostgresNames,
+  type PostgresNames,
+  type PostgresSchemaOptions,
+} from './names.js';
 import { laneExpression } from './sql-fragments.js';
 
 /**
@@ -23,7 +28,20 @@ import { laneExpression } from './sql-fragments.js';
  */
 export function createPostgresSchemaStatements(options: PostgresSchemaOptions = {}): string[] {
   const names = resolvePostgresNames(options);
-  const statements = [
+  const statements = [...eventAndDeliveryStatements(names), ...laneAndCompletionStatements(names)];
+  if (names.completionHistory) {
+    statements.push(...completionHistoryStatements(names));
+  }
+  if (names.schema !== 'public') {
+    statements.unshift(`CREATE SCHEMA IF NOT EXISTS ${names.quotedSchema}`);
+  }
+  statements.push(`COMMENT ON TABLE ${names.lanes} IS '${postgresSchemaMarker(statements)}'`);
+  return statements;
+}
+
+/** The event, key sequence and delivery tables, their upgrades and indexes. */
+function eventAndDeliveryStatements(names: PostgresNames): string[] {
+  return [
     `CREATE TABLE IF NOT EXISTS ${names.events} (
   id text PRIMARY KEY,
   type text NOT NULL,
@@ -68,6 +86,12 @@ export function createPostgresSchemaStatements(options: PostgresSchemaOptions = 
     `CREATE INDEX IF NOT EXISTS ${names.indexes.deliveryKeyPending} ON ${names.deliveries} (lane, handler, key, sequence) WHERE key IS NOT NULL AND status = 'pending'`,
     `CREATE INDEX IF NOT EXISTS ${names.indexes.deliveryCompleted} ON ${names.deliveries} (completed_at, id) WHERE status = 'completed'`,
     `CREATE INDEX IF NOT EXISTS ${names.indexes.deliveryDead} ON ${names.deliveries} (updated_at, id) WHERE status = 'dead'`,
+  ];
+}
+
+/** The lane and event completion tables, and the lane rows. */
+function laneAndCompletionStatements(names: PostgresNames): string[] {
+  return [
     `CREATE TABLE IF NOT EXISTS ${names.lanes} (
   lane smallint PRIMARY KEY CHECK (lane >= 0 AND lane < ${LANE_COUNT}),
   epoch bigint NOT NULL DEFAULT 0,
@@ -84,9 +108,12 @@ export function createPostgresSchemaStatements(options: PostgresSchemaOptions = 
     `CREATE INDEX IF NOT EXISTS ${names.indexes.eventCompletionsCompleted} ON ${names.eventCompletions} (completed_at, event_id)`,
     `INSERT INTO ${names.lanes} (lane) SELECT generate_series(0, ${LANE_COUNT - 1})::smallint ON CONFLICT (lane) DO NOTHING`,
   ];
-  if (names.completionHistory) {
-    statements.push(
-      `CREATE TABLE IF NOT EXISTS ${names.completions} (
+}
+
+/** The completion history table, kept with `completionHistory: true`. */
+function completionHistoryStatements(names: PostgresNames): string[] {
+  return [
+    `CREATE TABLE IF NOT EXISTS ${names.completions} (
   id text COLLATE "C" PRIMARY KEY,
   event_id text NOT NULL REFERENCES ${names.events} (id) ON DELETE CASCADE,
   handler text NOT NULL,
@@ -95,14 +122,8 @@ export function createPostgresSchemaStatements(options: PostgresSchemaOptions = 
   created_at timestamptz NOT NULL,
   completed_at timestamptz NOT NULL
 )`,
-      `CREATE INDEX IF NOT EXISTS ${names.indexes.completionCompleted} ON ${names.completions} (completed_at, id)`,
-    );
-  }
-  if (names.schema !== 'public') {
-    statements.unshift(`CREATE SCHEMA IF NOT EXISTS ${names.quotedSchema}`);
-  }
-  statements.push(`COMMENT ON TABLE ${names.lanes} IS '${postgresSchemaMarker(statements)}'`);
-  return statements;
+    `CREATE INDEX IF NOT EXISTS ${names.indexes.completionCompleted} ON ${names.completions} (completed_at, id)`,
+  ];
 }
 
 /**
