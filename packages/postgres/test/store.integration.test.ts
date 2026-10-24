@@ -351,6 +351,36 @@ describe('reports of new deliveries', () => {
     await store.close();
   });
 
+  it('wakes the dispatchers after a quiet publish that commits long after the interval', async () => {
+    const schema = uniqueSchema();
+    const store = new PostgresEventStore({ pool: database.pool, schema });
+    await store.setup();
+    const peer = new PostgresEventStore({ pool: database.pool, schema });
+    const wokenAt: number[] = [];
+    const unwatch = await peer.watchNewDeliveries(() => void wokenAt.push(Date.now()));
+    await publish(store, NOW);
+    // Within the interval of the first: this append sends nothing itself, and its transaction stays
+    // open well past the interval.
+    await store.transaction(async (transaction) => {
+      await store.append(
+        transaction,
+        [
+          {
+            event: envelope(),
+            deliveries: [{ id: createUuidV7(), handler: 'h', availableAt: NOW }],
+          },
+        ],
+        NOW,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+    const committedAt = Date.now();
+    await settle();
+    await unwatch!();
+    expect(wokenAt.filter((at) => at >= committedAt)).toHaveLength(1);
+    await store.close();
+  });
+
   it('cannot listen through an executor, which has no connection of its own', async () => {
     const store = new PostgresEventStore({
       executor: { transaction: (work) => work(null as never), query: async () => [] },

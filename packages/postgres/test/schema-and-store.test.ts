@@ -225,34 +225,37 @@ describe('wake-up notifications', () => {
       },
       logger: logger as never,
     });
+    const entries = (availableAt: Date) => [
+      {
+        event: {
+          id: 'e',
+          type: 't',
+          source: 's',
+          key: null,
+          payload: {},
+          headers: {},
+          correlationId: null,
+          causationId: null,
+          occurredAt: availableAt,
+        },
+        deliveries: [{ id: 'd', handler: 'h', availableAt }],
+      },
+    ];
+    // Publishes in a transaction of the store, which knows when it committed.
     const append = (availableAt: Date) =>
-      store.append(
-        undefined,
-        [
-          {
-            event: {
-              id: 'e',
-              type: 't',
-              source: 's',
-              key: null,
-              payload: {},
-              headers: {},
-              correlationId: null,
-              causationId: null,
-              occurredAt: availableAt,
-            },
-            deliveries: [{ id: 'd', handler: 'h', availableAt }],
-          },
-        ],
-        new Date(0),
+      store.transaction((transaction) =>
+        store.append(transaction, entries(availableAt), new Date(0)),
       );
-    return { store, sent, logger, append };
+    // Publishes in a transaction of the caller, whose commit the store does not see.
+    const appendInCallerTransaction = (availableAt: Date) =>
+      store.append(undefined, entries(availableAt), new Date(0));
+    return { store, sent, logger, append, appendInCallerTransaction };
   }
 
   it('notifies the first due publish at once and the rest of the interval once, after it', async () => {
     vi.useFakeTimers();
     try {
-      const { sent, append } = appendingStore(async () => undefined);
+      const { sent, append, appendInCallerTransaction } = appendingStore(async () => undefined);
       await append(new Date(0));
       await append(new Date(0));
       await append(new Date(0));
@@ -267,6 +270,13 @@ describe('wake-up notifications', () => {
       await vi.advanceTimersByTimeAsync(100);
       await append(new Date(60_000));
       expect(sent.at(-1)![4]).toBeNull();
+      // A caller's own transaction always carries its notification, whatever was sent just before.
+      await append(new Date(0));
+      await appendInCallerTransaction(new Date(0));
+      expect(sent.slice(-2).map((parameters) => parameters[4])).toEqual([
+        '1970-01-01T00:00:00.000Z',
+        '1970-01-01T00:00:00.000Z',
+      ]);
     } finally {
       vi.useRealTimers();
     }
@@ -282,7 +292,9 @@ describe('wake-up notifications', () => {
       await failing.append(new Date(0));
       await vi.advanceTimersByTimeAsync(10);
       expect(failing.logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('[PostgresEventStore](wakeAt) Waking the dispatchers failed'),
+        expect.stringContaining(
+          '[PostgresEventStore](wakeAfterCommit) Waking the dispatchers failed',
+        ),
       );
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
       const failingText = appendingStore(() => Promise.reject('text'));

@@ -177,6 +177,8 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   readonly #notificationChannel: string;
   #lastNotificationAt = Number.NEGATIVE_INFINITY;
   #trailingNotification: ReturnType<typeof setTimeout> | undefined;
+  /** The transactions `transaction` runs right now, and whether one of their appends left its wake-up for after the commit. */
+  readonly #ownTransactions = new Map<unknown, { wake: boolean }>();
 
   constructor(options: PostgresEventStoreOptions<TTransaction>) {
     const sources = [options.pool, options.connectionString, options.executor].filter(
@@ -259,8 +261,20 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     return rows[0]!['current'] === true;
   }
 
-  transaction<T>(work: (transaction: TTransaction) => Promise<T>): Promise<T> {
-    return this.#executor.transaction(work);
+  async transaction<T>(work: (transaction: TTransaction) => Promise<T>): Promise<T> {
+    const own = { wake: false };
+    const result = await this.#executor.transaction(async (transaction) => {
+      this.#ownTransactions.set(transaction, own);
+      try {
+        return await work(transaction);
+      } finally {
+        this.#ownTransactions.delete(transaction);
+      }
+    });
+    if (own.wake) {
+      this.#wakeAfterCommit();
+    }
+    return result;
   }
 
   /**
@@ -284,7 +298,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       return { appendedEventIds: [], duplicateEventIds: [], appendedDeliveryCount: 0 };
     }
     const createdAt = now.toISOString();
-    const wakeAt = this.#wakeAt(plan.deliveries, now);
+    const wakeAt = this.#wakeAt(plan.deliveries, now, transaction);
     const handlersByEvent = new Map<string, string[]>();
     for (const delivery of plan.deliveries) {
       handlersByEvent.set(delivery.event_id, [
@@ -345,29 +359,45 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
 
   /**
    * The time the publishing statements notify the dispatchers for (deliveries due by then wake them),
-   * or `null` for no notification. The first append with a delivery due now notifies at once; later
-   * ones within {@link NOTIFICATION_INTERVAL_MS} send nothing themselves, and one notification of its
-   * own follows when the interval ends, by when those short transactions have normally committed.
+   * or `null` for no notification. An append in a transaction of the caller's always notifies, at its
+   * commit. In a transaction of this store, only the first append within {@link NOTIFICATION_INTERVAL_MS}
+   * does; the others leave the wake-up to {@link #wakeAfterCommit}, which runs once their transaction
+   * committed, so no committed delivery waits for the poll.
    */
-  #wakeAt(deliveries: readonly DeliveryRow[], now: Date): string | null {
+  #wakeAt(deliveries: readonly DeliveryRow[], now: Date, transaction: TTransaction): string | null {
     if (!deliveries.some((delivery) => Date.parse(delivery.available_at) <= now.getTime())) {
       return null;
     }
-    const elapsed = Date.now() - this.#lastNotificationAt;
-    if (elapsed >= NOTIFICATION_INTERVAL_MS) {
-      this.#lastNotificationAt = Date.now();
-      return now.toISOString();
+    const own = this.#ownTransactions.get(transaction);
+    if (own !== undefined && Date.now() - this.#lastNotificationAt < NOTIFICATION_INTERVAL_MS) {
+      own.wake = true;
+      return null;
     }
-    this.#trailingNotification ??= setTimeout(() => {
-      this.#trailingNotification = undefined;
-      this.#lastNotificationAt = Date.now();
-      this.#executor.query(this.#statements.notify, []).catch((error: unknown) => {
-        this.#logger.error(
-          `[PostgresEventStore](wakeAt) Waking the dispatchers failed, they find the deliveries when they poll | error=${error instanceof Error ? error.message : String(error)}`,
-        );
-      });
-    }, NOTIFICATION_INTERVAL_MS - elapsed);
-    return null;
+    this.#lastNotificationAt = Date.now();
+    return now.toISOString();
+  }
+
+  /**
+   * Wakes the dispatchers for a committed transaction whose appends sent no notification: at once when
+   * none was sent within {@link NOTIFICATION_INTERVAL_MS}, otherwise once when the interval ends. A
+   * wake-up already scheduled covers this transaction too, since it is sent after this commit.
+   */
+  #wakeAfterCommit(): void {
+    if (this.#trailingNotification !== undefined) {
+      return;
+    }
+    this.#trailingNotification = setTimeout(
+      () => {
+        this.#trailingNotification = undefined;
+        this.#lastNotificationAt = Date.now();
+        this.#executor.query(this.#statements.notify, []).catch((error: unknown) => {
+          this.#logger.error(
+            `[PostgresEventStore](wakeAfterCommit) Waking the dispatchers failed, they find the deliveries when they poll | error=${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+      },
+      Math.max(0, this.#lastNotificationAt + NOTIFICATION_INTERVAL_MS - Date.now()),
+    );
   }
 
   /**
