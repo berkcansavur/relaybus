@@ -4,6 +4,9 @@ import type { AmqpMessage, AmqpMessageProperties } from './amqp-types.js';
 import { MalformedMessageError } from './errors.js';
 import { RFC3339_PATTERN, decodeEnvelope } from './wire-format.js';
 
+/** AMQP `timestamp` properties count seconds. */
+const MILLISECONDS_PER_SECOND = 1_000;
+
 const { optionalAttribute, requiredAttribute, assertValidType, assertJsonDataContentType } =
   createCloudEventReaders((reason) => new MalformedMessageError(reason));
 
@@ -274,7 +277,7 @@ function parseTime(text: string): Date {
 function propertyTimeOrNow(properties: AmqpMessageProperties): Date {
   const { timestamp } = properties;
   return typeof timestamp === 'number' && Number.isFinite(timestamp)
-    ? new Date(timestamp * 1_000)
+    ? new Date(timestamp * MILLISECONDS_PER_SECOND)
     : new Date();
 }
 

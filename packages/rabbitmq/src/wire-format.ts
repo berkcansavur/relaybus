@@ -3,6 +3,9 @@ import type { AmqpMessage, AmqpPublishOptions } from './amqp-types.js';
 import { AmqpLimitExceededError, MalformedMessageError } from './errors.js';
 import { assertJsonPayload } from './json-payload.js';
 
+/** AMQP `timestamp` properties count seconds. */
+const MILLISECONDS_PER_SECOND = 1_000;
+
 /**
  * Wire format: CloudEvents 1.0 in binary content mode, following the CloudEvents
  * AMQP protocol binding adapted to RabbitMQ's AMQP 0-9-1.
@@ -84,7 +87,7 @@ export function encodeEnvelope(envelope: EventEnvelope): EncodedMessage {
       contentType: JSON_CONTENT_TYPE,
       persistent: true,
       messageId: envelope.id,
-      timestamp: Math.floor(envelope.occurredAt.getTime() / 1_000),
+      timestamp: Math.floor(envelope.occurredAt.getTime() / MILLISECONDS_PER_SECOND),
       ...mirror('type', envelope.type),
       ...mirror('appId', envelope.source),
       ...(envelope.correlationId === null ? {} : mirror('correlationId', envelope.correlationId)),
@@ -171,7 +174,9 @@ function parsePayload(content: Buffer): unknown {
 function parseTime(rawTime: unknown, timestampSeconds: unknown): Date {
   if (rawTime === undefined) {
     const fallback =
-      typeof timestampSeconds === 'number' ? new Date(timestampSeconds * 1_000) : undefined;
+      typeof timestampSeconds === 'number'
+        ? new Date(timestampSeconds * MILLISECONDS_PER_SECOND)
+        : undefined;
     if (fallback === undefined || Number.isNaN(fallback.getTime())) {
       throw new MalformedMessageError('Message has no valid time (header cloudEvents:time)');
     }

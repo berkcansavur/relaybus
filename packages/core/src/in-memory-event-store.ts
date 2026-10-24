@@ -17,6 +17,8 @@ import type {
 } from './event-store.js';
 import { createUuidV7, type IdentifierGenerator } from './identifier.js';
 
+const DEFAULT_LIST_LIMIT = 100;
+
 export interface InMemoryEventStoreOptions {
   /** Allow use when `NODE_ENV` is `production`. Data is lost on restart. Default false. */
   readonly allowInProduction?: boolean;
@@ -352,7 +354,7 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
   }
 
   async listDeliveries(query: DeliveryQuery): Promise<DeliveryRecord[]> {
-    const limit = query.limit ?? 100;
+    const limit = query.limit ?? DEFAULT_LIST_LIMIT;
     return [...this.#deliveries.values()]
       .filter((delivery) => matchesQuery(delivery, this.#events.get(delivery.eventId)!, query))
       .sort(

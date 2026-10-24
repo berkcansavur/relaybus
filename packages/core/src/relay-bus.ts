@@ -226,6 +226,8 @@ const DEFAULTS = {
 } as const;
 
 const TRANSPORT_HANDLER_PREFIX = 'relaybus.transport';
+/** Batches `drain` runs at most before it gives up. */
+const DEFAULT_DRAIN_BATCHES = 1_000;
 const WAKE_DELAY_MS = 25;
 
 /** The events of one publish call with what their envelopes and deliveries inherit. */
@@ -585,7 +587,7 @@ export class RelayBus<TTransaction = unknown> {
    * Runs batches until nothing is due. Deliveries scheduled in the future
    * (retries, delays) are not waited for. Intended for tests.
    */
-  async drain(maxBatches = 1_000): Promise<number> {
+  async drain(maxBatches = DEFAULT_DRAIN_BATCHES): Promise<number> {
     let total = 0;
     for (let batch = 0; batch < maxBatches; batch += 1) {
       const processed = await this.runOnce();

@@ -31,6 +31,43 @@ export default tseslint.config(
     },
   },
   {
+    // Size, complexity and style limits of the tag monorepo (coding standards R34 and the function
+    // limits), as errors: the published sources have no violations left.
+    files: ['packages/*/src/**/*.ts'],
+    // The store contract suite is a test suite shipped as a function; tests are exempt, as in the tag monorepo.
+    ignores: ['packages/testing/src/event-store-contract.ts'],
+    rules: {
+      'max-lines': ['error', { max: 800, skipBlankLines: true, skipComments: true }],
+      'max-lines-per-function': ['error', { max: 60, skipBlankLines: true, skipComments: true }],
+      complexity: ['error', 10],
+      'max-depth': ['error', 3],
+      '@typescript-eslint/explicit-function-return-type': [
+        'error',
+        {
+          allowExpressions: true,
+          allowTypedFunctionExpressions: true,
+          allowHigherOrderFunctions: true,
+          allowDirectConstAssertionInArrowFunctions: true,
+        },
+      ],
+      'no-magic-numbers': [
+        'error',
+        {
+          ignore: [-1, 0, 1, 2],
+          ignoreArrayIndexes: true,
+          enforceConst: true,
+          detectObjects: false,
+        },
+      ],
+      'no-else-return': ['error', { allowElseIf: false }],
+      '@typescript-eslint/no-explicit-any': 'error',
+      'no-restricted-syntax': [
+        'error',
+        { selector: 'TSEnumDeclaration', message: 'Use a union of string literals, not an enum.' },
+      ],
+    },
+  },
+  {
     // Owner's logging rule: a log line names the class and method it is written in.
     files: ['packages/*/src/**/*.ts'],
     plugins: { relaybus: { rules: { 'log-prefix': logPrefix } } },

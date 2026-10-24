@@ -7,6 +7,9 @@ import {
 } from './names.js';
 import { laneExpression } from './sql-fragments.js';
 
+/** Hex digits of the statement hash in the schema marker. */
+const SCHEMA_MARKER_DIGITS = 32;
+
 /**
  * Statements that create the schema, tables and indexes, in dependency order,
  * and upgrade a 0.1.0 schema in place. Every statement is idempotent
@@ -133,7 +136,7 @@ function completionHistoryStatements(names: PostgresNames): string[] {
  * deadlock with them.
  */
 export function postgresSchemaMarker(statements: readonly string[]): string {
-  return `relaybus schema ${createHash('sha256').update(statements.join(';')).digest('hex').slice(0, 32)}`;
+  return `relaybus schema ${createHash('sha256').update(statements.join(';')).digest('hex').slice(0, SCHEMA_MARKER_DIGITS)}`;
 }
 
 /**

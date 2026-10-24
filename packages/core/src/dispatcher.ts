@@ -60,7 +60,16 @@ interface InFlightDelivery {
 type HandlerOutcome = 'completed' | 'unconfirmed';
 
 /** Delays between attempts to record a completion before leaving it to lease expiry. */
-const COMPLETION_RETRY_DELAYS_MS = [50, 250, 1_000] as const;
+const FIRST_COMPLETION_RETRY_MS = 50;
+const SECOND_COMPLETION_RETRY_MS = 250;
+const LAST_COMPLETION_RETRY_MS = 1_000;
+const COMPLETION_RETRY_DELAYS_MS = [
+  FIRST_COMPLETION_RETRY_MS,
+  SECOND_COMPLETION_RETRY_MS,
+  LAST_COMPLETION_RETRY_MS,
+] as const;
+/** Lease renewals per lease duration. */
+const RENEWALS_PER_LEASE = 3;
 
 /**
  * Shortest time between the start of a claim and a claim caused by a wake-up (a publish, a notification
@@ -798,7 +807,7 @@ export class Dispatcher {
             renewing = false;
           });
       },
-      Math.max(1, Math.floor(settings.leaseDurationMs / 3)),
+      Math.max(1, Math.floor(settings.leaseDurationMs / RENEWALS_PER_LEASE)),
     );
     timer.unref();
     return () => clearInterval(timer);

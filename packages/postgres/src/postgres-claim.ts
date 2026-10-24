@@ -243,8 +243,8 @@ export class PostgresClaims<TTransaction> {
   #generation(owner: string, advance = false): bigint {
     const current = this.#state.generations.get(owner) ?? BigInt(Date.now());
     const next = advance
-      ? current + 1n > BigInt(Date.now())
-        ? current + 1n
+      ? current + GENERATION_STEP > BigInt(Date.now())
+        ? current + GENERATION_STEP
         : BigInt(Date.now())
       : current;
     this.#state.generations.set(owner, next);
@@ -387,6 +387,9 @@ export class PostgresClaims<TTransaction> {
     );
   }
 }
+
+/** How far a reconciliation moves the generation at least. */
+const GENERATION_STEP = 1n;
 
 /** Whether the claim statement saw work it could not take: a takeover in progress, unexamined free lanes, or a stale snapshot. */
 function leftWorkBehind(row: PostgresRow): boolean {

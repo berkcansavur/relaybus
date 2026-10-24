@@ -175,6 +175,11 @@ export interface ResolvedTransportSettings {
   readonly random: () => number;
 }
 
+/** Default `prefetch` when not ordered. */
+const DEFAULT_PREFETCH = 50;
+/** Default `deliveryLimit`. */
+const DEFAULT_DELIVERY_LIMIT = 10;
+
 const DEFAULT_HANDLER_RETRY: RetryPolicy = {
   attempts: 3,
   initialDelayMs: 200,
@@ -229,7 +234,10 @@ function resolveBasics(options: RabbitMqTransportOptions): BasicSettings {
     );
   }
   const ordered = options.ordered ?? false;
-  const prefetch = assertPositiveInteger(options.prefetch ?? (ordered ? 1 : 50), 'prefetch');
+  const prefetch = assertPositiveInteger(
+    options.prefetch ?? (ordered ? 1 : DEFAULT_PREFETCH),
+    'prefetch',
+  );
   if (ordered && prefetch !== 1) {
     throw new ConfigurationError(`ordered consumption needs prefetch 1, received ${prefetch}`);
   }
@@ -267,7 +275,10 @@ function resolveTopology(
       'deadLetterExchange',
     ),
     deadLetterQueue: optionalNonEmpty(options.deadLetterQueue, 'deadLetterQueue'),
-    deliveryLimit: assertPositiveInteger(options.deliveryLimit ?? 10, 'deliveryLimit'),
+    deliveryLimit: assertPositiveInteger(
+      options.deliveryLimit ?? DEFAULT_DELIVERY_LIMIT,
+      'deliveryLimit',
+    ),
   };
 }
 

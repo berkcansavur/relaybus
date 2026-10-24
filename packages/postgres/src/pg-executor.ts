@@ -20,6 +20,9 @@ export interface PgExecutorOptions {
   readonly logger?: RelayBusLogger;
 }
 
+/** Hex digits of the statement hash in a prepared statement name. */
+const STATEMENT_NAME_DIGITS = 24;
+
 /**
  * Executor for a `pg` {@link Pool}. A transaction is a dedicated pool client
  * between `BEGIN` and `COMMIT`; it is handed to callers as the transaction
@@ -95,7 +98,7 @@ export class PgExecutor implements PostgresExecutor<PoolClient> {
   #nameOf(sql: string): string {
     let name = this.#names.get(sql);
     if (name === undefined) {
-      name = `relaybus_${createHash('sha256').update(sql).digest('hex').slice(0, 24)}`;
+      name = `relaybus_${createHash('sha256').update(sql).digest('hex').slice(0, STATEMENT_NAME_DIGITS)}`;
       this.#names.set(sql, name);
     }
     return name;

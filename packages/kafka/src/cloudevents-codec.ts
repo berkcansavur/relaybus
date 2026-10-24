@@ -60,6 +60,8 @@ const HEADER = {
 
 const PROTOCOL_HEADERS: ReadonlySet<string> = new Set([...Object.values(HEADER), CONTENT_TYPE]);
 
+/** RFC 3339 years have four digits. */
+const MAXIMUM_RFC3339_YEAR = 9999;
 const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/i;
 
 const strictUtf8 = new TextDecoder('utf-8', { fatal: true });
@@ -118,7 +120,7 @@ function serializePayload(envelope: EventEnvelope): string {
 
 function formatTime(envelope: EventEnvelope): string {
   const year = envelope.occurredAt.getUTCFullYear();
-  if (Number.isNaN(year) || year < 0 || year > 9999) {
+  if (Number.isNaN(year) || year < 0 || year > MAXIMUM_RFC3339_YEAR) {
     throw new UnencodableEventError(
       `Event ${envelope.id} has an occurredAt that is not an RFC 3339 instant (invalid date or year outside 0..9999)`,
     );

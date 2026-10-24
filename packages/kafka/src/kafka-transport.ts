@@ -748,9 +748,12 @@ function resolveRestartSettings(
   };
 }
 
+/** Largest `maxInFlightRequests`. */
+const MAXIMUM_IN_FLIGHT_REQUESTS = 5;
+
 /** Returns `value` when it is an integer from 1 to 5. */
 function assertMaxInFlightRequests(value: number): number {
-  if (!Number.isInteger(value) || value < 1 || value > 5) {
+  if (!Number.isInteger(value) || value < 1 || value > MAXIMUM_IN_FLIGHT_REQUESTS) {
     throw new ConfigurationError(
       `maxInFlightRequests must be an integer from 1 to 5, received ${value}`,
     );
