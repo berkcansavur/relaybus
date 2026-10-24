@@ -130,6 +130,8 @@ export default defineConfig({
       { text: 'Recipes', link: '/recipes/prisma' },
       { text: 'FAQ', link: '/faq' },
       { text: 'Comparison', link: '/comparison' },
+      { text: 'Performance', link: '/performance' },
+      { text: 'Upgrading', link: '/upgrading' },
       { text: 'Releases', link: '/releases' },
     ],
     sidebar,

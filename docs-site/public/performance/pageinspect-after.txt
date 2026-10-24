@@ -1,0 +1,26 @@
+version: PostgreSQL 17.11 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+scenario: publish one event with one handler, claim it, complete it
+
+heap page of relaybus_deliveries (1 line pointers)
+  lp  xmin   xmax   ctid    flags
+  1   782    784    (0,1)   XMIN_COMMITTED
+indexes of relaybus_deliveries: 6
+  relaybus_deliveries_completed_idx              entries=0
+  relaybus_deliveries_dead_idx                   entries=0
+  relaybus_deliveries_event_handler_unique       entries=1  -> heap tids (0,1)
+  relaybus_deliveries_key_pending_idx            entries=0
+  relaybus_deliveries_lane_due_idx               entries=1  -> heap tids (0,1)
+  relaybus_deliveries_pkey                       entries=1  -> heap tids (0,1)
+
+lane 218 is the only lane row this claim touched. Its page, versions of that row only:
+  lp  xmin   xmax   ctid    flags
+  18  779    783    (3,56)  HOT_UPDATED|XMIN_COMMITTED|XMAX_COMMITTED
+  56  783    783    (3,57)  HOT_UPDATED|HEAP_ONLY|XMIN_COMMITTED|XMAX_COMMITTED
+  57  783    784    (3,57)  HEAP_ONLY|XMIN_COMMITTED
+indexes of relaybus_lanes: 1 (primary key on the lane number, 256 entries before and after: the updates added none)
+
+tuple counters (may lag by about a second):
+  relaybus_deliveries      inserted=1 updated=0 hot_updated=0 deleted=1
+  relaybus_events          inserted=1 updated=0 hot_updated=0 deleted=0
+  relaybus_key_sequences   inserted=0 updated=0 hot_updated=0 deleted=0
+  relaybus_lanes           inserted=256 updated=2 hot_updated=2 deleted=0

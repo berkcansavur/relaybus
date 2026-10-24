@@ -1,0 +1,24 @@
+version: PostgreSQL 17.11 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+scenario: publish one event with one handler, claim it, complete it
+
+heap page of relaybus_deliveries (3 line pointers)
+  lp  xmin   xmax   ctid    flags
+  1   775    776    (0,2)   XMIN_COMMITTED|XMAX_COMMITTED
+  2   776    777    (0,3)   XMIN_COMMITTED
+  3   777    0      (0,3)   XMAX_INVALID
+indexes of relaybus_deliveries: 10
+  relaybus_deliveries_completed_idx              entries=1  -> heap tids (0,3)
+  relaybus_deliveries_dead_idx                   entries=0
+  relaybus_deliveries_due_idx                    entries=2  -> heap tids (0,1) (0,2)
+  relaybus_deliveries_due_unkeyed_idx            entries=2  -> heap tids (0,1) (0,2)
+  relaybus_deliveries_event_handler_unique       entries=3  -> heap tids (0,1) (0,2) (0,3)
+  relaybus_deliveries_handler_created_idx        entries=3  -> heap tids (0,1) (0,2) (0,3)
+  relaybus_deliveries_key_processing_idx         entries=0
+  relaybus_deliveries_key_unfinished_idx         entries=0
+  relaybus_deliveries_pkey                       entries=3  -> heap tids (0,1) (0,2) (0,3)
+  relaybus_deliveries_status_created_idx         entries=3  -> heap tids (0,3) (0,1) (0,2)
+
+tuple counters (may lag by about a second):
+  relaybus_deliveries      inserted=1 updated=2 hot_updated=0 deleted=0
+  relaybus_events          inserted=1 updated=0 hot_updated=0 deleted=0
+  relaybus_key_sequences   inserted=0 updated=0 hot_updated=0 deleted=0

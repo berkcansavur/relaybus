@@ -139,6 +139,8 @@ same on every database. The tables are created with aggressive autovacuum settin
 
 ## Upgrading from 0.1.0
 
+The step-by-step guide, including `completionHistory` and PgBouncer settings, is [Upgrading from 0.1 to 0.2](https://berkcansavur.github.io/relaybus/upgrading).
+
 `setup()` upgrades a 0.1.0 schema in place, in one transaction under the same advisory lock, and is safe to run again:
 it adds `lane` to every delivery (hash of the key, or of the event id) and `handlers` to every event (from the
 existing deliveries), turns `processing` deliveries into `pending` (their attempt stays counted, as a lost lease would

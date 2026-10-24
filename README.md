@@ -234,6 +234,10 @@ Every default can be changed; see each package's README for the full option list
 - Adversarial reviews whose findings were fixed with regression tests.
 - Mutation testing, CodeQL, OpenSSF Scorecard and npm provenance in CI.
 
+## Performance
+
+Against 0.1.0, 0.2.0 publishes 1.1 to 1.9 times faster and dispatches 1.3 to 18 times faster on PostgreSQL (2 to 26 times on MongoDB) with about half the WAL per delivery, with 0 lost, duplicate or out-of-order deliveries. Method, machine and every number: [Performance: 0.2.0 vs 0.1.0](https://berkcansavur.github.io/relaybus/performance). Moving from 0.1: [Upgrading from 0.1 to 0.2](https://berkcansavur.github.io/relaybus/upgrading).
+
 ## Releases
 
 Every push to `main` with releasable [Conventional Commits](https://www.conventionalcommits.org/) publishes all `@relaybus/*` packages to npm with one shared version, computed by semantic-release. While the version is below 1.0.0 a breaking change bumps the minor version. There is no committed changelog: the [GitHub Releases](https://github.com/berkcansavur/relaybus/releases) page is the changelog. Prereleases are published from the `next` and `beta` branches under the matching npm dist-tags. Details: [docs/releasing.md](docs/releasing.md).
