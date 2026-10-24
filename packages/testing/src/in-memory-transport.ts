@@ -62,22 +62,29 @@ export class InMemoryTransport implements Transport {
   ): Promise<number> {
     let calls = 0;
     for (const handler of this.#subscribers.get(destination) ?? []) {
-      for (let attempt = 0; ; attempt += 1) {
-        calls += 1;
-        try {
-          await handler(envelope);
-          break;
-        } catch (error) {
-          if (attempt >= maxRedeliveries) {
-            throw error;
-          }
-        }
-      }
+      calls += await deliverWithRedeliveries(handler, { envelope, maxRedeliveries });
     }
     return calls;
   }
 
   async close(): Promise<void> {
     this.closed = true;
+  }
+}
+
+/** Hands `envelope` to one handler, again after each failure up to `maxRedeliveries` times; returns the calls. */
+async function deliverWithRedeliveries(
+  handler: TransportMessageHandler,
+  delivery: { readonly envelope: EventEnvelope; readonly maxRedeliveries: number },
+): Promise<number> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await handler(delivery.envelope);
+      return attempt + 1;
+    } catch (error) {
+      if (attempt >= delivery.maxRedeliveries) {
+        throw error;
+      }
+    }
   }
 }
