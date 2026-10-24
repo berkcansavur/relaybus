@@ -54,15 +54,12 @@ export class PgExecutor implements PostgresExecutor<PoolClient> {
 
   async transaction<T>(work: (transaction: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.#pool.connect();
-    // The pool only listens while a client is idle: an error event of a checked-out client (the
-    // server ending the session, for example at idle_in_transaction_session_timeout) would be unhandled.
-    const onSessionEnded = (error: Error): void => {
-      this.#logger.warn(
-        `[PgExecutor](transaction) The server ended the session of an open transaction, the transaction fails | error=${error.message}`,
-      );
-    };
-    client.on('error', onSessionEnded);
+    let released = false;
     const release = (destroy: boolean): void => {
+      if (released) {
+        return;
+      }
+      released = true;
       client.removeListener('error', onSessionEnded);
       if (destroy) {
         client.release(true);
@@ -70,6 +67,17 @@ export class PgExecutor implements PostgresExecutor<PoolClient> {
         client.release();
       }
     };
+    // The pool only listens while a client is idle: an error event of a checked-out client (the
+    // server ending the session, for example at idle_in_transaction_session_timeout) would be
+    // unhandled. The connection is dead, so it goes back to the pool at once, destroyed; the
+    // transaction fails at its next statement or its commit.
+    const onSessionEnded = (error: Error): void => {
+      this.#logger.warn(
+        `[PgExecutor](transaction) The server ended the session of an open transaction, the transaction fails | error=${error.message}`,
+      );
+      release(true);
+    };
+    client.on('error', onSessionEnded);
     try {
       await client.query('BEGIN');
       const result = await work(client);

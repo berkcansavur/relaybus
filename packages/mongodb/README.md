@@ -293,12 +293,10 @@ short, as the core documentation recommends.
 
 ### Transaction time budget
 
-`bus.transaction` passes the bus `transactionTimeout` (default `'5s'`) to the store, which runs the transaction with the
-driver's client-side operation timeout (`timeoutMS`; tested with driver 7, a driver without it ignores the option
-and the bus check below still applies) over the whole `withTransaction`,
-retries included, and `maxCommitTimeMS` on the commit. An operation sent through the session after the budget ran out
-fails, the transaction aborts, and the caller gets a `TransactionTimeoutError` with the driver error as `cause`. The
-store's own transactions are not affected.
+`bus.transaction` passes the bus `transactionTimeout` (default `'5s'`) to the store, which bounds the commit on the
+server with `maxCommitTimeMS`. A transaction that ran past the budget is aborted before its commit, with all its writes,
+and the caller gets a `TransactionTimeoutError`. The driver's `timeoutMS` is not set on the transaction, because it would
+make operations that pass their own `timeoutMS` with the session throw. The store's own transactions are not affected.
 
 ## Indexes
 

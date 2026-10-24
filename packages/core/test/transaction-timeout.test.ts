@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   ConfigurationError,
   InMemoryEventStore,
+  InMemoryTransaction,
   RelayBusError,
   TransactionTimeoutError,
 } from '@relaybus/core';
@@ -88,6 +89,18 @@ describe('transaction time budget', () => {
         return 'in time';
       }),
     ).resolves.toBe('in time');
+  });
+
+  it('keeps the error of a commit that fails after the budget, whose outcome is unknown', async () => {
+    const { bus, store, clock } = timedBus();
+    const lostCommit = new Error('Connection terminated while committing');
+    vi.spyOn(store, 'transaction').mockImplementation(async (work) => {
+      await work(new InMemoryTransaction());
+      clock.advance(5_000);
+      throw lostCommit;
+    });
+
+    await expect(bus.transaction(async () => 'done')).rejects.toBe(lostCommit);
   });
 
   it.each([0, '0s', -1])('rejects transactionTimeout %j', (transactionTimeout) => {

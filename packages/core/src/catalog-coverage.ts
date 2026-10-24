@@ -54,7 +54,7 @@ const declarations = new WeakSet<object>();
  * Declares that this service consumes events of a catalog, typically one
  * shared between services through a contracts package. `start()` fails unless
  * every declared event has a local handler (`subscribeCatalog`, `subscribe`,
- * `@EventConsumer`, `@Subscribe`); a route to a transport does not count.
+ * `@RelayBusCatalogConsumer`, `@RelayBusConsumer`); a route to a transport does not count.
  * Without `events`, every event of the catalog is declared. Unknown names do
  * not compile and are rejected at runtime with a {@link ConfigurationError}.
  *

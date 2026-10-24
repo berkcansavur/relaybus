@@ -216,9 +216,8 @@ export class MongoEventStore implements EventStore<ClientSession> {
    * not safe for side effects outside the session (HTTP calls, other databases),
    * so keep those out of `work`; relaybus handlers are already at-least-once.
    *
-   * With `options.timeoutMs` (from `bus.transaction`) the driver's operation timeout (`timeoutMS`)
-   * bounds the whole transaction, so an operation sent after the budget ran out fails and the
-   * transaction aborts, and `maxCommitTimeMS` bounds the commit on the server.
+   * With `options.timeoutMs` (from `bus.transaction`) the server bounds the commit with
+   * `maxCommitTimeMS`; the bus aborts a transaction that ran past the budget before its commit.
    *
    * @throws ConfigurationError when the deployment does not support transactions.
    */

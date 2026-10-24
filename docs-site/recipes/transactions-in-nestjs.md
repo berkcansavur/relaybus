@@ -90,7 +90,7 @@ RelayBusModule.forRootAsync({
 Every relaybus transaction is held to `transactionTimeout` (default `'5s'`), enforced by the database where it can be:
 
 - **PostgreSQL:** `statement_timeout`, and with the `pg` executor also `idle_in_transaction_session_timeout` and, on PostgreSQL 17+, `transaction_timeout`, all set for the transaction only. A transaction left idle by a slow HTTP call is ended by the server and its locks are released.
-- **MongoDB:** the driver's `timeoutMS` over the whole `withTransaction` and `maxCommitTimeMS` on the commit.
+- **MongoDB:** `maxCommitTimeMS` on the commit.
 
 A transaction that still runs past the budget is rolled back before its commit. The caller gets a `TransactionTimeoutError` (`RELAYBUS_TRANSACTION_TIMEOUT`), with the database's error as `cause`, whose message names the usual reason: a call to another service inside the transaction. Move the call out instead of raising the budget.
 

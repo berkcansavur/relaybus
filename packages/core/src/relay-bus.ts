@@ -158,7 +158,7 @@ export interface RelayBusOptions<TTransaction = unknown> {
    * Time budget of every `bus.transaction` (and `@RelayBusTransaction()` method). The store makes
    * the database enforce it where it can (PostgreSQL: `statement_timeout`, plus
    * `idle_in_transaction_session_timeout` and on PostgreSQL 17+ `transaction_timeout`; MongoDB:
-   * `maxCommitTimeMS` and a client-side operation timeout), and a transaction that still runs past
+   * `maxCommitTimeMS`), and a transaction that still runs past
    * it is rolled back with a {@link TransactionTimeoutError}. Keep calls to other services out of
    * transactions instead of raising it. Default `'5s'`.
    */

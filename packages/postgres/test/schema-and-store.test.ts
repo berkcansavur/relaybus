@@ -210,7 +210,7 @@ describe('PgExecutor', () => {
   it('survives the server ending the session of an open transaction', async () => {
     const warn = vi.fn();
     const client = Object.assign(new EventEmitter(), {
-      query: vi.fn(async () => ({ rows: [] })),
+      query: vi.fn(async (_sql: string) => ({ rows: [] as unknown[] })),
       release: vi.fn(),
     });
     const pool = { connect: vi.fn(async () => client), query: vi.fn() };
@@ -219,9 +219,23 @@ describe('PgExecutor', () => {
     });
     expect(executor.sessionTimeouts).toBe(true);
 
-    await executor.transaction(async () => {
-      client.emit('error', new Error('terminating connection due to idle-in-transaction timeout'));
+    client.query.mockImplementation(async (sql: string) => {
+      if (sql === 'COMMIT' && client.release.mock.calls.length > 0) {
+        throw new Error('Client was closed and is not queryable');
+      }
+      return { rows: [] };
     });
+    await expect(
+      executor.transaction(async () => {
+        client.emit(
+          'error',
+          new Error('terminating connection due to idle-in-transaction timeout'),
+        );
+        // The dead connection went back to the pool at once, destroyed.
+        expect(client.release).toHaveBeenCalledWith(true);
+      }),
+    ).rejects.toThrow('Client was closed and is not queryable');
+    expect(client.release).toHaveBeenCalledTimes(1);
 
     expect(warn).toHaveBeenCalledWith(
       '[PgExecutor](transaction) The server ended the session of an open transaction, the transaction fails | error=terminating connection due to idle-in-transaction timeout',

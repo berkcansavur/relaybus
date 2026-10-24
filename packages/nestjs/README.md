@@ -296,8 +296,7 @@ waiting on something slow is ended by the server and its row locks are released:
   `idle_in_transaction_session_timeout` and, on PostgreSQL 17+, `transaction_timeout` (detected
   per transaction). Adapters other than `pg` get `statement_timeout` only, because a server-ended
   session would leave their checked-out connection without an `error` listener.
-- **MongoDB:** the driver's operation timeout (`timeoutMS`) over the whole `withTransaction` and
-  `maxCommitTimeMS` on the commit.
+- **MongoDB:** `maxCommitTimeMS` on the commit.
 
 A transaction that still runs past the budget is rolled back before it commits. Either way the
 caller gets a `TransactionTimeoutError` (`RELAYBUS_TRANSACTION_TIMEOUT`, with the database error as
