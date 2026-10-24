@@ -110,6 +110,67 @@ Rules, all enforced at boot (the application fails to start, no silent skips):
   class and method, so decorators that wrap the method later do not drop them, and subclasses
   inherit the handlers of their base class.
 
+## `@EventConsumer(catalog, options?)`
+
+```ts
+export const OrderEvents = defineCatalog({ OrderPlaced, OrderShipped }, { name: 'OrderEvents' });
+
+@Injectable()
+@EventConsumer(OrderEvents, { transactional: true })
+export class ShippingHandlers implements HandlersOf<typeof OrderEvents> {
+  onOrderPlaced(event: EventOf<typeof OrderPlaced>, context: HandlerContext) {}
+  onOrderShipped(event: EventOf<typeof OrderShipped>) {}
+}
+
+RelayBusModule.forRoot({ store, catalogs: [OrderEvents] });
+```
+
+Registers every `on${EventName}` method the class defines, under the stable id
+`ClassName.on${EventName}`, with `this` bound to the provider. `implements HandlersOf<...>` makes
+the compiler reject a class that misses a handler; `PartialHandlersOf<C, 'OrderShipped'>`
+documents a deliberate subset. Options are core's `SubscribeOptions` without `id`, applied to every
+handler of the class.
+
+- `catalogs: [OrderEvents]` in the module options is the boot check: if no provider (via
+  `@EventConsumer`, `@Subscribe` or a configured route) handles an event, the application fails to
+  start with the list of missing events and the methods they expect.
+- It works next to `@Subscribe` in the same class. A `@Subscribe` that would take the same default
+  id (`@Subscribe(OrderPlaced) onOrderPlaced()`) fails init naming both; give it an explicit `id`.
+- Same rules as `@Subscribe`: singleton providers only, `useExisting` aliases register once,
+  subclasses inherit the decoration and use their own class name in ids.
+- A class decorated with `@EventConsumer` that defines none of the catalog's methods fails init,
+  which catches misspelled method names.
+- Declarations are inherited from base classes; a subclass that declares the same catalog again
+  replaces the inherited declaration, and one catalog declared twice on one class throws.
+
+### Microservices: consuming part of a shared catalog
+
+```ts
+// shipping service
+@Injectable()
+@EventConsumer(OrderEvents, { events: ['OrderPlaced'] })
+export class ShippingHandlers {
+  onOrderPlaced(event: EventOf<typeof OrderPlaced>) {}
+}
+
+RelayBusModule.forRoot({
+  store,
+  transports: [rabbit],
+  subscriptions: [{ transport: 'rabbit', destinations: ['orders'] }],
+  routes: [{ event: OrderShipped, transport: 'rabbit', destination: 'shipments' }],
+  catalogs: [
+    consume(OrderEvents, { events: ['OrderPlaced'] }),
+    produce(OrderEvents, { events: ['OrderShipped'] }),
+  ],
+});
+```
+
+- With `events`, exactly those methods are registered (other `on${EventName}` methods are
+  ignored), and a class that misses one of them does not compile and fails init.
+- `consume(...)` fails the boot when a consumed event has no handler in the application;
+  `produce(...)` fails it when a produced event has no route. See `@relaybus/core`, "Microservices:
+  shared catalogs".
+
 ## Lifecycle
 
 1. `onModuleInit`: handlers are discovered and registered on the bus.

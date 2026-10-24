@@ -1,15 +1,20 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import type { StartedRabbitMQContainer } from '@testcontainers/rabbitmq';
 import { InMemoryEventStore, RelayBus, defineEvent } from '@relaybus/core';
 import { RabbitMqTransport } from '../src/rabbitmq-transport.js';
-import { eventually, remoteEnvelope, startBroker, unique } from './support/broker.js';
+import {
+  eventually,
+  remoteEnvelope,
+  startBroker,
+  unique,
+  type TestBroker,
+} from './support/broker.js';
 import { TcpProxy } from './support/tcp-proxy.js';
 
 class OrderPlaced extends defineEvent<{ orderId: string }>('order.placed.v1') {}
 
 const silent = { log: () => undefined, warn: () => undefined, error: () => undefined };
 
-let broker: StartedRabbitMQContainer;
+let broker: TestBroker;
 let proxy: TcpProxy;
 const buses: RelayBus[] = [];
 

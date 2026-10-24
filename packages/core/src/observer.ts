@@ -9,8 +9,10 @@ export type FailureStage =
   | 'reschedule'
   | 'bury'
   | 'release'
+  | 'relinquish'
   | 'extend-lease'
   | 'purge'
+  | 'watch'
   | 'observer';
 
 /**

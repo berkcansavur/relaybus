@@ -1,9 +1,9 @@
-import { MongoDBContainer, type StartedMongoDBContainer } from '@testcontainers/mongodb';
+import { inject } from 'vitest';
 import { MongoClient } from 'mongodb';
 import { createUuidV7 } from '@relaybus/core';
 import { GenericContainer, Wait, type StartedTestContainer } from 'testcontainers';
 
-const MONGO_IMAGE = 'mongo:7';
+import { MONGO_IMAGE } from './mongo-server.js';
 
 export interface MongoReplicaSet {
   readonly connectionString: string;
@@ -11,10 +11,13 @@ export interface MongoReplicaSet {
   stop(): Promise<void>;
 }
 
-/** Starts a single-node replica set, the smallest deployment that supports transactions. */
+/**
+ * Connects to the single-node replica set that the global setup started for this run,
+ * the smallest deployment that supports transactions. Every test file shares it and
+ * stays apart through `uniqueDatabaseName()`.
+ */
 export async function startReplicaSet(): Promise<MongoReplicaSet> {
-  const container: StartedMongoDBContainer = await new MongoDBContainer(MONGO_IMAGE).start();
-  const connectionString = container.getConnectionString();
+  const connectionString = inject('mongoConnectionString');
   return {
     connectionString,
     connect: () =>
@@ -22,13 +25,11 @@ export async function startReplicaSet(): Promise<MongoReplicaSet> {
         directConnection: true,
         monitorCommands: true,
       }).connect(),
-    stop: async () => {
-      await container.stop();
-    },
+    stop: async () => {},
   };
 }
 
-/** Starts a plain mongod without replication, which cannot run transactions. */
+/** Starts a dedicated plain mongod without replication, which cannot run transactions. */
 export async function startStandalone(): Promise<{
   connect(): Promise<MongoClient>;
   stop(): Promise<void>;

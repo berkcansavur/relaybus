@@ -27,9 +27,18 @@ eventStoreContract('MyEventStore', {
 });
 ```
 
-It covers transactional visibility, idempotent appends, leasing and fencing,
-retries and dead letters, release, per-key ordering in commit order, starvation,
-purge, statistics, data fidelity and cross-instance claim races.
+It covers transactional visibility, idempotent appends (a handler that already
+completed is never delivered again), leasing and fencing, batched completion
+(`completeMany`), lost leases (redelivery, attempt counting for crashed workers,
+poison deliveries), retries and dead letters, release, relinquish, per-key
+ordering in commit order, starvation, purge, statistics, data fidelity and
+cross-instance claim races.
+
+A store may lease groups of deliveries (lanes) instead of single deliveries, so
+the contract never assumes that two claimers see each other's unclaimed work: a
+claimer that keeps claiming drains the workload. Pass `keepsCompletedRecords:
+true` when the store keeps a completion history; run the suite once per mode the
+store supports.
 
 ## FakeClock
 

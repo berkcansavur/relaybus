@@ -3,6 +3,9 @@ coverage
 reports
 pnpm-lock.yaml
 CHANGELOG.md
+benchmarks/results
+benchmarks/baselines
+benchmarks/.cache
 # Generated documentation output and files copied from the package READMEs
 docs-site/.vitepress/dist
 docs-site/.vitepress/cache

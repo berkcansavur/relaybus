@@ -7,6 +7,12 @@ export const REDELIVERIES_HEADER = 'x-relaybus-redeliveries';
 export const FIRST_FAILURE_HEADER = 'x-relaybus-first-failure-at';
 /** Why a message was moved to the dead-letter queue by the consumer. */
 export const DEAD_LETTER_REASON_HEADER = 'x-relaybus-dead-letter-reason';
+/**
+ * The routing key a message was originally published with. Set on retry copies,
+ * which travel through the default exchange and return with the queue name as
+ * routing key, so decoders still see the original one.
+ */
+export const ORIGINAL_ROUTING_KEY_HEADER = 'x-relaybus-routing-key';
 
 const RELAYBUS_STATE_HEADERS: readonly string[] = [REDELIVERIES_HEADER, FIRST_FAILURE_HEADER];
 /** Counters the broker stamps on its own redeliveries; they must not travel in a copy. */
@@ -66,8 +72,8 @@ export function chooseRetryTier(
 
 /** Reads a non-negative integer that a copy carries as a header (string or number). */
 export function readCounterHeader(message: AmqpMessage, name: string): number | undefined {
-  // A message that decoded has headers: `cloudEvents:specversion` is required.
-  const value = message.properties.headers![name];
+  // A message decoded by a custom decoder (plain JSON, structured mode) may have no headers.
+  const value = message.properties.headers?.[name];
   const parsed = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
   return typeof parsed === 'number' && Number.isSafeInteger(parsed) && parsed >= 0
     ? parsed
@@ -109,4 +115,18 @@ export function copyForRepublish(
       headers,
     },
   };
+}
+
+/** The routing key the message was published with: the original one for a retry copy. */
+export function originalRoutingKey(message: AmqpMessage): string {
+  const original = message.properties.headers?.[ORIGINAL_ROUTING_KEY_HEADER];
+  return typeof original === 'string' ? original : message.fields.routingKey;
+}
+
+/** The message as first published: a retry copy gets its original routing key back. */
+export function withOriginalRoutingKey(message: AmqpMessage): AmqpMessage {
+  const routingKey = originalRoutingKey(message);
+  return routingKey === message.fields.routingKey
+    ? message
+    : { ...message, fields: { ...message.fields, routingKey } };
 }

@@ -35,7 +35,9 @@ const EVENT_HEADER_PREFIX = 'relaybus:';
 const SPEC_VERSION = '1.0';
 const JSON_CONTENT_TYPE = 'application/json';
 const SHORT_STRING_LIMIT_BYTES = 255;
-const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/i;
+/** RFC 3339 date-time, the format of the CloudEvents `time` attribute. */
+export const RFC3339_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/i;
 
 /** A serialized event, ready for `channel.publish`. */
 export interface EncodedMessage {

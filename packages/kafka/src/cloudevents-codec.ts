@@ -36,7 +36,8 @@ export interface DecodableMessage {
 }
 
 const SPEC_VERSION = '1.0';
-const CONTENT_TYPE = 'content-type';
+/** Name of the Kafka header that carries the media type of the record value. */
+export const CONTENT_TYPE = 'content-type';
 const JSON_MEDIA_TYPE = 'application/json';
 const CLOUDEVENTS_PREFIX = 'ce_';
 const ESCAPE_PREFIX = 'x-relaybus-h-';
@@ -155,7 +156,8 @@ export function decodeEnvelope(message: DecodableMessage): EventEnvelope {
   };
 }
 
-function invalid(reason: string): InvalidKafkaMessageError {
+/** Creates the error thrown for every malformed record. */
+export function invalid(reason: string): InvalidKafkaMessageError {
   return new InvalidKafkaMessageError(reason);
 }
 
@@ -165,7 +167,8 @@ function escapeUserHeaderName(name: string): string {
   return reserved ? `${ESCAPE_PREFIX}${name}` : name;
 }
 
-function readHeaders(incoming: KafkaIncomingHeaders | undefined): Map<string, string> {
+/** Reads headers strictly: a repeated header or a protocol header that is not UTF-8 is invalid. */
+export function readHeaders(incoming: KafkaIncomingHeaders | undefined): Map<string, string> {
   const headers = new Map<string, string>();
   for (const [name, raw] of Object.entries(incoming ?? {})) {
     if (raw === undefined) {
@@ -179,7 +182,8 @@ function readHeaders(incoming: KafkaIncomingHeaders | undefined): Map<string, st
   return headers;
 }
 
-function decodeText(raw: KafkaBytes | string, strict: boolean, label: string): string {
+/** Decodes header or value bytes as UTF-8; `strict` rejects invalid sequences. */
+export function decodeText(raw: KafkaBytes | string, strict: boolean, label: string): string {
   if (typeof raw === 'string') {
     return raw;
   }
@@ -209,23 +213,32 @@ function resolveTime(text: string | undefined, recordTimestamp: string | undefin
   if (text !== undefined && text.length > 0) {
     return parseTime(text);
   }
-  const milliseconds = Number(recordTimestamp);
-  const time = new Date(milliseconds);
-  if (recordTimestamp === undefined || recordTimestamp === '' || Number.isNaN(time.getTime())) {
+  const time = readRecordTimestamp(recordTimestamp);
+  if (time === undefined) {
     throw invalid(`${HEADER.time} is missing and the record has no usable timestamp`);
   }
   return time;
 }
 
-function parseTime(text: string): Date {
+/** The record timestamp (epoch milliseconds in a string) as a date, or undefined when unusable. */
+export function readRecordTimestamp(recordTimestamp: string | undefined): Date | undefined {
+  const time = new Date(Number(recordTimestamp));
+  return recordTimestamp === undefined || recordTimestamp === '' || Number.isNaN(time.getTime())
+    ? undefined
+    : time;
+}
+
+/** Parses an RFC 3339 timestamp; anything else is invalid. `label` names the attribute in the error. */
+export function parseTime(text: string, label: string = HEADER.time): Date {
   const time = new Date(text);
   if (!RFC3339_PATTERN.test(text) || Number.isNaN(time.getTime())) {
-    throw invalid(`${HEADER.time} is not an RFC 3339 timestamp: '${text}'`);
+    throw invalid(`${label} is not an RFC 3339 timestamp: '${text}'`);
   }
   return time;
 }
 
-function parsePayload(value: KafkaBytes | null): unknown {
+/** Parses the record value as UTF-8 JSON; a missing value or invalid JSON is invalid. */
+export function parsePayload(value: KafkaBytes | null): unknown {
   if (value === null) {
     throw invalid('Message has no value');
   }
@@ -238,14 +251,20 @@ function parsePayload(value: KafkaBytes | null): unknown {
 }
 
 function resolveKey(subject: string | undefined, recordKey: KafkaBytes | null): string | null {
-  const keyText = recordKey === null ? null : decodeText(recordKey, true, 'Message key');
+  const keyText = readRecordKey(recordKey);
   if (subject !== undefined && keyText !== null && subject !== keyText) {
     throw invalid(`${HEADER.subject} does not match the message key`);
   }
   return subject ?? keyText;
 }
 
-function collectUserHeaders(headers: Map<string, string>): Record<string, string> {
+/** The record key as UTF-8 text, or null when the record has none. Invalid UTF-8 is invalid. */
+export function readRecordKey(recordKey: KafkaBytes | null): string | null {
+  return recordKey === null ? null : decodeText(recordKey, true, 'Message key');
+}
+
+/** Headers that are not CloudEvents attributes, with escaped names restored. */
+export function collectUserHeaders(headers: Map<string, string>): Record<string, string> {
   const entries: [string, string][] = [];
   for (const [name, value] of headers) {
     if (!PROTOCOL_HEADERS.has(name)) {

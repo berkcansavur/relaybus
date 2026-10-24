@@ -1,4 +1,19 @@
 import { hostname } from 'node:os';
+import {
+  resolveCatalogHandlers,
+  type Catalog,
+  type CatalogEventSelection,
+  type HandlersOf,
+  type SubscribeCatalogOptions,
+} from './catalog.js';
+import {
+  assertCatalogsCovered,
+  toCatalogRequirement,
+  type CatalogDeclaration,
+  type CatalogRequirement,
+  type EventTypeRegistrations,
+} from './catalog-coverage.js';
+import { CatalogPublisher } from './catalog-publisher.js';
 import { systemClock, type Clock } from './clock.js';
 import { Dispatcher, type DispatcherSettings } from './dispatcher.js';
 import { toMilliseconds, toTimerMilliseconds, type Duration } from './duration.js';
@@ -76,6 +91,15 @@ export interface DispatcherOptions {
   readonly leaseDuration?: Duration;
   /** How long `stop` waits for running handlers before aborting them. Default `'30s'`. */
   readonly shutdownTimeout?: Duration;
+  /**
+   * Longest a finished delivery waits so that deliveries finishing around the
+   * same time are completed with one store call (when the store supports it).
+   * A delivery that finishes while nothing else runs is completed at once.
+   * `0` completes every delivery on its own. Default `'2ms'`.
+   */
+  readonly completionBatchWindow?: Duration;
+  /** Most deliveries completed in one store call. Default 200. */
+  readonly completionBatchSize?: number;
 }
 
 export interface RetentionOptions {
@@ -143,6 +167,16 @@ export interface RelayBusOptions<TTransaction = unknown> {
   readonly clock?: Clock;
   readonly generateIdentifier?: IdentifierGenerator;
   readonly random?: () => number;
+  /**
+   * Catalogs this process is checked against when it starts. `start()` throws a
+   * {@link ConfigurationError} listing every event that is not covered:
+   * - a catalog: every event needs a handler or a route;
+   * - `consume(catalog, { events })`: each declared event needs a local handler;
+   * - `produce(catalog, { events })`: each declared event needs a route to a transport.
+   *
+   * See `registerCatalog`.
+   */
+  readonly catalogs?: readonly (Catalog | CatalogDeclaration)[];
 }
 
 export interface PublishOptions<TTransaction = unknown> {
@@ -182,6 +216,8 @@ const DEFAULTS = {
   pollInterval: '1s',
   leaseDuration: '30s',
   shutdownTimeout: '30s',
+  completionBatchWindow: '2ms',
+  completionBatchSize: 200,
   completedRetention: '7d',
   retentionInterval: '1h',
   routeTimeoutMs: 30_000,
@@ -211,6 +247,7 @@ export class RelayBus<TTransaction = unknown> {
   readonly #generateIdentifier: IdentifierGenerator;
   readonly #dispatcher: Dispatcher;
   readonly #dispatcherEnabled: boolean;
+  readonly #catalogRequirements: CatalogRequirement[] = [];
   readonly #setupStore: boolean;
   readonly #retention: { completedMs: number | null; deadMs: number | null; intervalMs: number };
   #retentionTimer: NodeJS.Timeout | undefined;
@@ -260,6 +297,9 @@ export class RelayBus<TTransaction = unknown> {
       if (transport.subscribe === undefined) {
         throw new ConfigurationError(`Transport '${transport.name}' cannot subscribe`);
       }
+    }
+    for (const catalog of options.catalogs ?? []) {
+      this.registerCatalog(catalog);
     }
     this.#dispatcherEnabled = options.dispatcher?.enabled ?? true;
     this.#dispatcher = new Dispatcher({
@@ -324,6 +364,65 @@ export class RelayBus<TTransaction = unknown> {
       },
       this.#defaults,
     );
+  }
+
+  /**
+   * Subscribes the `on${EventName}` methods of `handlers` to the events of
+   * `catalog`, or to the events named in `options.events`, with the stable
+   * handler ids `${prefix}.on${EventName}`. The prefix is `options.idPrefix`,
+   * else the catalog name, else the class name of `handlers`. Methods run with
+   * `this` bound to `handlers`; methods of events that are not selected are
+   * ignored. A missing handler of a selected event fails to compile, and
+   * throws {@link ConfigurationError} at runtime, as does an invalid or taken
+   * id; handlers registered before the failure stay registered.
+   *
+   * ```ts
+   * bus.subscribeCatalog(OrderEvents, new BillingHandlers(), { events: ['OrderPlaced'] });
+   * ```
+   */
+  subscribeCatalog<TCatalog extends Catalog, const TName extends keyof TCatalog>(
+    catalog: TCatalog,
+    handlers: NoInfer<HandlersOf<TCatalog, TName, TTransaction>>,
+    options: SubscribeCatalogOptions<NoInfer<TCatalog>, TName> & {
+      readonly events: readonly TName[];
+    },
+  ): void;
+  /** Without a statically known `events` list, every handler of the catalog is required. */
+  subscribeCatalog<TCatalog extends Catalog>(
+    catalog: TCatalog,
+    handlers: HandlersOf<TCatalog, keyof TCatalog, TTransaction>,
+    options?: SubscribeCatalogOptions<NoInfer<TCatalog>>,
+  ): void;
+  subscribeCatalog<TCatalog extends Catalog>(
+    catalog: TCatalog,
+    handlers: object,
+    options: SubscribeCatalogOptions<TCatalog, keyof TCatalog> = {},
+  ): void {
+    for (const binding of resolveCatalogHandlers(catalog, handlers, options)) {
+      this.subscribe(binding.eventClass as EventClass<unknown>, binding.handle, binding.options);
+    }
+  }
+
+  /**
+   * Adds a catalog, or a `consume` / `produce` declaration, to the checks
+   * `start()` runs; `start()` throws a {@link ConfigurationError} naming each
+   * event that is not covered and what it lacks. Equivalent to the `catalogs`
+   * option.
+   */
+  registerCatalog(catalog: Catalog | CatalogDeclaration): void {
+    this.#catalogRequirements.push(toCatalogRequirement(catalog));
+  }
+
+  /**
+   * A view of this bus that publishes only the events of `catalog`, or only
+   * the events named in `options.events` (for example the events this service
+   * produces). Other events fail to compile and are rejected at runtime.
+   */
+  forCatalog<TCatalog extends Catalog, const TName extends keyof TCatalog = keyof TCatalog>(
+    catalog: TCatalog,
+    options: CatalogEventSelection<TName> = {},
+  ): CatalogPublisher<TCatalog, TTransaction, TName> {
+    return new CatalogPublisher<TCatalog, TTransaction, TName>(catalog, this, options);
   }
 
   /** Registered handlers and routes, for diagnostics. */
@@ -406,6 +505,8 @@ export class RelayBus<TTransaction = unknown> {
           : `Cannot start a relaybus that is ${this.#state}`,
       );
     }
+    // Before any side effect, so a failed check leaves the bus idle and startable.
+    assertCatalogsCovered(this.#catalogRequirements, (type) => this.#registrationsOf(type));
     this.#state = 'starting';
     this.#starting = this.#startComponents();
     try {
@@ -425,6 +526,11 @@ export class RelayBus<TTransaction = unknown> {
     }
     if (this.#state === 'starting') {
       await this.#starting!.catch(() => undefined);
+    }
+    if (this.#state === 'idle') {
+      // Batches run by hand may have left settlements that the dispatcher keeps retrying in the background.
+      await this.#dispatcher.stop();
+      return;
     }
     if (this.#state !== 'running') {
       return;
@@ -653,6 +759,12 @@ export class RelayBus<TTransaction = unknown> {
     return { id: this.#generateIdentifier(), handler: registration.id, availableAt };
   }
 
+  #registrationsOf(eventType: string): EventTypeRegistrations {
+    const registrations = this.#registry.forEventType(eventType);
+    const routes = registrations.filter((registration) => registration.forwardsToTransport).length;
+    return { handlers: registrations.length - routes, routes };
+  }
+
   #registerRoute(route: RouteOptions): void {
     const transport = this.#requireTransport(route.transport);
     const { type } = describeEvent(route.event);
@@ -682,7 +794,8 @@ export class RelayBus<TTransaction = unknown> {
   }
 
   #scheduleWake(): void {
-    if (this.#state !== 'running') {
+    // A store that reports new deliveries wakes the dispatcher itself, right after the commit.
+    if (this.#state !== 'running' || this.#dispatcher.watchesNewDeliveries) {
       return;
     }
     // The publishing transaction commits after publish returns; claim shortly after.
@@ -807,6 +920,14 @@ function createDispatcherSettings(
     shutdownTimeoutMs: toTimerMilliseconds(
       options?.shutdownTimeout ?? DEFAULTS.shutdownTimeout,
       'dispatcher.shutdownTimeout',
+    ),
+    completionBatchWindowMs: toMilliseconds(
+      options?.completionBatchWindow ?? DEFAULTS.completionBatchWindow,
+      'dispatcher.completionBatchWindow',
+    ),
+    completionBatchSize: positiveInteger(
+      options?.completionBatchSize ?? DEFAULTS.completionBatchSize,
+      'dispatcher.completionBatchSize',
     ),
   };
 }

@@ -160,7 +160,7 @@ describe('setup across table prefixes', () => {
       `SELECT count(*)::int AS tables FROM information_schema.tables WHERE table_schema = $1`,
       [schema],
     );
-    expect(result.rows[0]).toEqual({ tables: 36 });
+    expect(result.rows[0]).toEqual({ tables: 60 });
   });
 });
 
@@ -204,8 +204,8 @@ describe('purge of events without deliveries', () => {
     try {
       await holder.query('BEGIN');
       await holder.query(
-        `INSERT INTO "${schema}".relaybus_deliveries (id, event_id, handler, status, attempts, available_at, created_at, updated_at)
-         VALUES ('late', $1, 'h', 'pending', 0, now(), now(), now())`,
+        `INSERT INTO "${schema}".relaybus_deliveries (id, event_id, handler, lane, status, attempts, available_at, created_at, updated_at)
+         VALUES ('late', $1, 'h', 0, 'pending', 0, now(), now(), now())`,
         [event.id],
       );
       // The uncommitted delivery holds a KEY SHARE lock on the event, so the sweep skips it.

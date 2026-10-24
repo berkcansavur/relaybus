@@ -1,0 +1,368 @@
+{
+  "$comment": "Budgets of the deterministic performance design tests (test-support/perf-budget.ts). A budget may only be lowered (scripts/check-perf-budgets.mjs enforces it against the base branch); lowering one locks in a measured gain. Raising one needs a reason in the pull request.",
+  "core.dispatcher.backlog.claimsPer100Deliveries": {
+    "budget": 24,
+    "unit": "claims",
+    "description": "Claims per 100 deliveries while a default dispatcher (concurrency 10, batch 10) drains a 1,000-delivery backlog; handlers take 1-5 ms, store calls 1 ms (fake timers)."
+  },
+  "core.dispatcher.backlog.missingClaimSizePercent": {
+    "budget": 58,
+    "unit": "%",
+    "description": "How far the average non-empty claim of that drain falls short of the batch size (0 = every claim full)."
+  },
+  "core.dispatcher.backlog.completeManyCallsPer100Deliveries": {
+    "budget": 24,
+    "unit": "calls",
+    "description": "completeMany calls per 100 deliveries in the same drain."
+  },
+  "core.dispatcher.hotKeys.claimsPer100Deliveries": {
+    "budget": 10,
+    "unit": "claims",
+    "description": "Claims per 100 deliveries draining 10 hot keys x 50 events at default settings."
+  },
+  "core.dispatcher.trickle.claimsPerDelivery": {
+    "budget": 3,
+    "unit": "claims",
+    "description": "Claims per delivery when single events are published to an idle default dispatcher, one at a time."
+  },
+  "core.dispatcher.idle.claimsPer10PollIntervals": {
+    "budget": 10,
+    "unit": "claims",
+    "description": "Claims of an idle dispatcher during 10 poll intervals (1 s each, fake timers), start-up claim included."
+  },
+  "postgres.claim.idleCold.statements": {
+    "budget": 4,
+    "unit": "round trips",
+    "description": "Round trips (a transaction counts BEGIN and COMMIT) of a claim on a store with nothing due and no lane held."
+  },
+  "postgres.claim.idle.laneWrites": {
+    "budget": 0,
+    "unit": "updated rows",
+    "description": "Lane rows an idle claim updates."
+  },
+  "postgres.claim.idleWarm.statements": {
+    "budget": 4,
+    "unit": "round trips",
+    "description": "Round trips of a claim with nothing due while the worker still holds the idle lane of its last delivery."
+  },
+  "postgres.claim.backlogCold.statements": {
+    "budget": 8,
+    "unit": "round trips",
+    "description": "Round trips of the first claim (limit 50) of a worker on a 1,000-delivery unkeyed backlog."
+  },
+  "postgres.claim.backlogWarm.statements": {
+    "budget": 8,
+    "unit": "round trips",
+    "description": "Round trips of the second claim (limit 50) on that backlog."
+  },
+  "postgres.claim.hotKeysWarm.statements": {
+    "budget": 1,
+    "unit": "round trips",
+    "description": "Round trips of a claim (limit 10) of the next deliveries of 10 hot keys x 100 events after the heads completed."
+  },
+  "postgres.claim.hotKeysAllInFlight.statements": {
+    "budget": 6,
+    "unit": "round trips",
+    "description": "Round trips of a claim that finds every one of the 10 hot keys in flight."
+  },
+  "postgres.claim.distinctKeysCold.statements": {
+    "budget": 12,
+    "unit": "round trips",
+    "description": "Round trips of the first claim (limit 200) on 1,000 events with distinct keys."
+  },
+  "postgres.publish.unkeyedSingle.statements": {
+    "budget": 3,
+    "unit": "round trips",
+    "description": "Round trips of publishing one fresh unkeyed event with one handler in its own transaction. 0.1.0 needed 4 (BEGIN, two inserts, COMMIT)."
+  },
+  "postgres.publish.keyedSingle.statements": {
+    "budget": 3,
+    "unit": "round trips",
+    "description": "Round trips of publishing one fresh keyed event in its own transaction."
+  },
+  "postgres.publish.keyedBatch100.statements": {
+    "budget": 3,
+    "unit": "round trips",
+    "description": "Round trips of publishing 100 fresh keyed events (7 keys) in one call; must not grow with the batch."
+  },
+  "postgres.publish.repeatedEventNewHandler.statements": {
+    "budget": 5,
+    "unit": "round trips",
+    "description": "Round trips of publishing an existing event id again with one more handler."
+  },
+  "postgres.complete.single.statements": {
+    "budget": 1,
+    "unit": "round trips",
+    "description": "Round trips of completeMany with one lease."
+  },
+  "postgres.complete.batch50.statements": {
+    "budget": 1,
+    "unit": "round trips",
+    "description": "Round trips of completeMany with 50 leases."
+  },
+  "postgres.tuples.deliveries.updatesPerDelivery": {
+    "budget": 0,
+    "unit": "updated rows",
+    "description": "Delivery rows updated per delivery, publish to completion (claim batch 50)."
+  },
+  "postgres.tuples.deliveries.deletesPerDelivery": {
+    "budget": 1,
+    "unit": "deleted rows",
+    "description": "Delivery rows deleted per delivery."
+  },
+  "postgres.tuples.events.updatesPerEvent": {
+    "budget": 0,
+    "unit": "updated rows",
+    "description": "Event rows updated per event while dispatching."
+  },
+  "postgres.tuples.lanes.nonHotUpdatesPercent": {
+    "budget": 0,
+    "unit": "%",
+    "description": "Share of lane row updates that are not heap-only (HOT)."
+  },
+  "postgres.tuples.lanes.updatesPerDelivery": {
+    "budget": 1.57,
+    "unit": "updated rows",
+    "description": "Lane row updates per delivery when 500 deliveries are drained 50 at a time."
+  },
+  "postgres.tuples.eventCompletions.updatesPerEvent.oneHandler": {
+    "budget": 0,
+    "unit": "updated rows",
+    "description": "event_completions updates per event with one handler."
+  },
+  "postgres.tuples.eventCompletions.updatesPerEvent.fiveHandlers": {
+    "budget": 1.3,
+    "unit": "updated rows",
+    "description": "event_completions updates per event with five handlers whose completions arrive in groups of 3, 1 ms apart."
+  },
+  "postgres.tuples.keySequences.nonHotUpdatesPercent": {
+    "budget": 0,
+    "unit": "%",
+    "description": "Share of key_sequences updates that are not HOT (200 keyed publishes over 20 keys)."
+  },
+  "postgres.wal.dispatchBatch10.bytesPerDelivery": {
+    "budget": 795,
+    "unit": "bytes",
+    "description": "WAL bytes per delivery for claim and completion only, batch 10 (no full-page writes)."
+  },
+  "postgres.wal.dispatchBatch200.bytesPerDelivery": {
+    "budget": 719,
+    "unit": "bytes",
+    "description": "WAL bytes per delivery for claim and completion only, batch 200."
+  },
+  "postgres.wal.publish.bytesPerEvent": {
+    "budget": 1150,
+    "unit": "bytes",
+    "description": "WAL bytes per event, published 10 per call."
+  },
+  "postgres.schema.deliveryIndexes": {
+    "budget": 6,
+    "unit": "indexes",
+    "description": "Indexes on the deliveries table."
+  },
+  "postgres.explain.claimBacklogWarm.buffers": {
+    "budget": 3437,
+    "unit": "buffers",
+    "description": "Shared buffers of every statement of a warm claim (limit 50) over a 50,000-delivery backlog (1,000 keys)."
+  },
+  "postgres.explain.claimBacklogWarm.largeTableSequentialScans": {
+    "budget": 0,
+    "unit": "scans",
+    "description": "Sequential scans of deliveries or events in that claim."
+  },
+  "postgres.explain.complete50.buffers": {
+    "budget": 323,
+    "unit": "buffers",
+    "description": "Shared buffers of completing 50 leases over the 50,000-delivery backlog."
+  },
+  "postgres.explain.complete50.largeTableSequentialScans": {
+    "budget": 0,
+    "unit": "scans",
+    "description": "Sequential scans of deliveries or events in that completion."
+  },
+  "postgres.explain.extendLease.buffers": {
+    "budget": 8,
+    "unit": "buffers",
+    "description": "Shared buffers of one lease renewal."
+  },
+  "postgres.explain.extendLease.largeTableSequentialScans": {
+    "budget": 0,
+    "unit": "scans",
+    "description": "Sequential scans of deliveries or events in a renewal."
+  },
+  "postgres.explain.publishKeyedSingle.buffers": {
+    "budget": 41,
+    "unit": "buffers",
+    "description": "Shared buffers of publishing one keyed event over the 50,000-delivery backlog."
+  },
+  "postgres.explain.publishKeyedSingle.largeTableSequentialScans": {
+    "budget": 0,
+    "unit": "scans",
+    "description": "Sequential scans of deliveries or events in that publish."
+  },
+  "postgres.explain.claimIdle.buffers": {
+    "budget": 600,
+    "unit": "buffers",
+    "description": "Shared buffers of a claim on an idle store holding 5,000 deliveries due in an hour, after 5,000 completed ones were vacuumed away."
+  },
+  "postgres.explain.claimIdle.largeTableSequentialScans": {
+    "budget": 0,
+    "unit": "scans",
+    "description": "Sequential scans of deliveries or events in that claim."
+  },
+  "postgres.explain.claim.maximumEstimatedCost": {
+    "budget": 25000,
+    "unit": "cost units",
+    "description": "Highest planner cost estimate of a claim statement with 8 handlers, on 50,000 unkeyed deliveries (cold and warm) and on 20,000 deliveries of 10 hot keys whose heads are in flight. A statement above jit_above_cost (100,000 by default) is JIT-compiled on every call, which took about 100 ms."
+  },
+  "postgres.explain.claimHotKeysAllInFlight.buffers": {
+    "budget": 2720,
+    "unit": "buffers",
+    "description": "Shared buffers of a claim that finds all 10 hot keys (1,000 events) in flight."
+  },
+  "postgres.explain.claimHotKeysAllInFlight.largeTableSequentialScans": {
+    "budget": 2,
+    "unit": "scans",
+    "description": "Sequential scans of deliveries or events in that claim."
+  },
+  "postgres.latency.defaults.p95Ms": {
+    "budget": 1100,
+    "unit": "ms",
+    "description": "p95 from a publishing process's commit to handler start in another process with default dispatcher settings (poll 1 s), 30 spaced events, the listening connection killed halfway."
+  },
+  "postgres.latency.defaults.maxMs": {
+    "budget": 1500,
+    "unit": "ms",
+    "description": "Maximum of that latency; must stay below one poll interval plus a margin even without notifications."
+  },
+  "mongodb.claim.idleCold.commands": {
+    "budget": 4,
+    "unit": "commands",
+    "description": "Commands of a claim on a store with nothing due and no lane held."
+  },
+  "mongodb.claim.backlogCold.commands": {
+    "budget": 20,
+    "unit": "commands",
+    "description": "Commands of the first claim (limit 50) on a 1,000-delivery backlog."
+  },
+  "mongodb.claim.backlogWarm.commands": {
+    "budget": 12,
+    "unit": "commands",
+    "description": "Commands of the next claim (limit 50) on that backlog after the first batch completed."
+  },
+  "mongodb.claim.hotKeysWarm.commands": {
+    "budget": 23,
+    "unit": "commands",
+    "description": "Commands of a claim of the next deliveries of 10 hot keys x 100 events."
+  },
+  "mongodb.claim.hotKeysAllInFlight.commands": {
+    "budget": 36,
+    "unit": "commands",
+    "description": "Commands of a claim that finds all 10 hot keys in flight."
+  },
+  "mongodb.publish.single.commands": {
+    "budget": 4,
+    "unit": "commands",
+    "description": "Commands (commit included) of publishing one event in its own transaction."
+  },
+  "mongodb.publish.batch100.commands": {
+    "budget": 4,
+    "unit": "commands",
+    "description": "Commands of publishing 100 events in one call; must not grow with the batch."
+  },
+  "mongodb.complete.single.commands": {
+    "budget": 4,
+    "unit": "commands",
+    "description": "Commands of completeMany with one lease."
+  },
+  "mongodb.complete.batch50.commands": {
+    "budget": 4,
+    "unit": "commands",
+    "description": "Commands of completeMany with 50 leases."
+  },
+  "mongodb.explain.claimCandidates.excessDocsExamined": {
+    "budget": 21,
+    "unit": "documents",
+    "description": "Documents a claim's candidate query examines beyond twice what it returns (20,000 deliveries)."
+  },
+  "mongodb.explain.claimCandidates.collectionScans": {
+    "budget": 0,
+    "unit": "scans",
+    "description": "Collection scans among a claim's candidate queries."
+  },
+  "mongodb.oplog.dispatch.entriesPerDelivery": {
+    "budget": 1,
+    "unit": "entries",
+    "description": "Oplog operations on the store's database per delivery for claim and completion (batch 50)."
+  },
+  "mongodb.oplog.dispatch.bytesPerDelivery": {
+    "budget": 170,
+    "unit": "bytes",
+    "description": "Oplog bytes per delivery for claim and completion (batch 50)."
+  },
+  "mongodb.schema.deliveryIndexes": {
+    "budget": 11,
+    "unit": "indexes",
+    "description": "Indexes on the deliveries collection, _id included."
+  },
+  "mongodb.schema.deliveryIndexesWithoutPartialFilter": {
+    "budget": 6,
+    "unit": "indexes",
+    "description": "Indexes on deliveries without a partial filter: every insert and delete pays for them."
+  },
+  "mongodb.latency.defaults.p95Ms": {
+    "budget": 1100,
+    "unit": "ms",
+    "description": "p95 from a publishing process's commit to handler start in another process with default dispatcher settings (poll 1 s), 30 spaced events."
+  },
+  "mongodb.latency.defaults.maxMs": {
+    "budget": 1500,
+    "unit": "ms",
+    "description": "Maximum of that latency; must stay below one poll interval plus a margin."
+  },
+  "mongodb.oplog.publish.entriesPerEvent": {
+    "budget": 2.5,
+    "unit": "entries",
+    "description": "Oplog operations per published event (1,000 events, half keyed over 50 keys, 10 per call, one handler)."
+  },
+  "mongodb.oplog.publish.bytesPerEvent": {
+    "budget": 1009,
+    "unit": "bytes",
+    "description": "Oplog bytes per published event (1,000 events with UUID-length ids, half keyed over 50 keys, 10 per call, one handler). 0.1.0 wrote 954 with the same test."
+  },
+  "postgres.explain.claimBacklogWarm.extraBuffers50kVs5k": {
+    "budget": 1099,
+    "unit": "buffers",
+    "description": "How many more buffers that claim reads at 50,000 pending deliveries than at 5,000: a claim must not pay for the depth of the queue."
+  },
+  "postgres.publish.unkeyedSingle.parsedStatements": {
+    "budget": 0,
+    "unit": "statements",
+    "description": "Statements the server parses and plans from their text for a publish of one fresh unkeyed event in its own transaction, once the connection has run a publish before (BEGIN and COMMIT not counted). 0.1.0 sent 2 unprepared statements per publish."
+  },
+  "postgres.publish.keyedSingle.parsedStatements": {
+    "budget": 0,
+    "unit": "statements",
+    "description": "The same for one fresh keyed event."
+  },
+  "postgres.dispatch.parsedStatementsPerBatch": {
+    "budget": 0,
+    "unit": "statements",
+    "description": "Statements the server parses and plans from their text for a warm claim of 10 and the completion of what it claimed."
+  },
+  "postgres.wal.publishSingle.bytesPerEvent": {
+    "budget": 1144,
+    "unit": "bytes",
+    "description": "WAL bytes per event when each of 200 events is published alone in its own transaction (one handler, unkeyed; no full-page writes). With the benchmark's event (publish P=1 batch=1) 0.1.0 writes 1,740 bytes per event and this release 1,475 (docs/performance/publish-path.md)."
+  },
+  "postgres.explain.generic.largeTableSequentialScans": {
+    "budget": 0,
+    "unit": "scans",
+    "description": "Sequential scans of deliveries or events in the forced generic plans of a warm claim, a takeover claim, completing 50, a renewal and a keyed and an unkeyed publish over 50,000 deliveries."
+  },
+  "postgres.explain.generic.maximumEstimatedCost": {
+    "budget": 25000,
+    "unit": "cost units",
+    "description": "Highest planner cost estimate of those generic plans (measured 10,608); jit_above_cost is 100,000 by default, and claims are held to the same 25,000 as postgres.explain.claim.maximumEstimatedCost."
+  }
+}

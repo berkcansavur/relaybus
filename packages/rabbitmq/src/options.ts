@@ -3,12 +3,15 @@ import {
   createRetryPolicy,
   toMilliseconds,
   type Duration,
+  type EventEnvelope,
   type RelayBusLogger,
   type RetryPolicy,
   type RetryPolicyOptions,
 } from '@relaybus/core';
-import type { AmqpConnection } from './amqp-types.js';
+import type { AmqpConnection, AmqpMessage } from './amqp-types.js';
+import { completeDecodedEvent, type RabbitMqMessageDecoder } from './inbound-decoders.js';
 import { buildRetryLadder } from './redelivery.js';
+import { decodeEnvelope } from './wire-format.js';
 
 /** Connection settings accepted by `amqplib.connect`, given as an object instead of a URL. */
 export interface BrokerConnectionSettings {
@@ -125,6 +128,18 @@ export interface RabbitMqTransportOptions {
   readonly publishTimeout?: Duration;
   /** How long `close` waits for running handlers. Default `'30s'`. */
   readonly shutdownTimeout?: Duration;
+  /**
+   * How consumed messages become events. Default: CloudEvents binary mode as
+   * relaybus producers write it (`cloudEvents:*` headers, AMQP properties as
+   * fallback); any other message is malformed and dead-lettered. Set it to
+   * consume messages from services that do not use relaybus:
+   * {@link decodeCloudEvent} also accepts structured mode, {@link plainJsonDecoder}
+   * maps plain JSON messages, and a function of your own can do anything else
+   * (switch on `message.fields.routingKey` to decode routing keys differently).
+   * Whatever a decoder throws marks the message as malformed: it is
+   * dead-lettered, the consumer keeps running.
+   */
+  readonly decode?: RabbitMqMessageDecoder;
   /** Default: `console`. */
   readonly logger?: RelayBusLogger;
   /** Random source for jitter. Default `Math.random`. Intended for tests. */
@@ -153,6 +168,8 @@ export interface ResolvedTransportSettings {
   readonly allowUnroutable: boolean;
   readonly publishTimeoutMs: number;
   readonly shutdownTimeoutMs: number;
+  /** Turns a consumed message into a complete envelope; throws for a malformed one. */
+  readonly decode: (message: AmqpMessage) => EventEnvelope;
   readonly logger: RelayBusLogger;
   readonly random: () => number;
 }
@@ -228,6 +245,7 @@ export function resolveSettings(options: RabbitMqTransportOptions): ResolvedTran
     allowUnroutable: options.allowUnroutable ?? false,
     publishTimeoutMs: positiveDuration(options.publishTimeout ?? '30s', 'publishTimeout'),
     shutdownTimeoutMs: toMilliseconds(options.shutdownTimeout ?? '30s', 'shutdownTimeout'),
+    decode: resolveDecode(options.decode),
     logger: options.logger ?? console,
     random: options.random ?? Math.random,
   };
@@ -244,6 +262,15 @@ export function resolveQueueName(settings: ResolvedTransportSettings): string {
     );
   }
   return `${settings.queuePrefix}.${settings.consumerGroup}`;
+}
+
+function resolveDecode(
+  decode: RabbitMqMessageDecoder | undefined,
+): (message: AmqpMessage) => EventEnvelope {
+  if (decode === undefined) {
+    return decodeEnvelope;
+  }
+  return (message) => completeDecodedEvent(decode(message), message);
 }
 
 function resolveConnect(options: RabbitMqTransportOptions): () => Promise<AmqpConnection> {

@@ -53,7 +53,9 @@ export interface TestBus {
 export function createTestBus(
   options: Partial<RelayBusOptions<InMemoryTransaction>> = {},
 ): TestBus {
-  const store = (options.store as InMemoryEventStore | undefined) ?? new InMemoryEventStore();
+  const store =
+    (options.store as InMemoryEventStore | undefined) ??
+    new InMemoryEventStore({ retainCompleted: true });
   const clock = new FakeClock();
   const logger = createLogger();
   const observer = createObserver();

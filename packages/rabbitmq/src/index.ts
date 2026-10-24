@@ -21,3 +21,12 @@ export type {
   RedeliveryOptions,
 } from './options.js';
 export { RabbitMqTransport } from './rabbitmq-transport.js';
+export { fromHeader, fromPayloadField } from './field-extractors.js';
+export {
+  decodeCloudEvent,
+  plainJsonDecoder,
+  type DecodedEvent,
+  type PlainJsonDecoderOptions,
+  type PlainJsonMessage,
+  type RabbitMqMessageDecoder,
+} from './inbound-decoders.js';

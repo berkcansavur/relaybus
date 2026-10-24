@@ -1,33 +1,31 @@
-import type { DeliveryDocument } from './documents.js';
-
 /** What one claim call has learned about the deliveries of a single handler and key. */
 interface KeyKnowledge {
   /** Lowest sequence known to be unfinished. Every later delivery of the key must wait. */
   openSequence: number | undefined;
-  /** Whether some delivery of the key holds a live lease, so none may start. */
-  leaseHeld: boolean;
   /** Pending deliveries that waited behind `openSequence`, candidates for parking. */
   waiting: string[];
+  /** Lane of the key (all deliveries of a key share one). Undefined until a delivery waited. */
+  laneId: number | undefined;
 }
-
-export type KeyVerdict = 'open-predecessor' | 'live-lease';
 
 /**
  * Bookkeeping of one claim call. A claim scans due deliveries in due order and
- * meets many deliveries of the same key; whatever it learns about a key from
- * the database once (an unfinished predecessor, a live lease, its own claim)
- * answers every later delivery of that key without another query.
+ * meets many deliveries of the same key; what it learns about a key from the
+ * database once (its lowest unfinished delivery) answers every later delivery
+ * of that key without another query.
  */
 export class ClaimScan {
   readonly #keys = new Map<string, KeyKnowledge>();
 
-  /** Why the delivery must wait according to what this scan already knows, if it does. */
-  verdict(orderingId: string, sequence: number): KeyVerdict | undefined {
+  /** Whether an unfinished delivery this scan knows of comes before the delivery with `sequence`. */
+  waits(orderingId: string, sequence: number): boolean {
     const known = this.#keys.get(orderingId);
-    if (known?.openSequence !== undefined && sequence > known.openSequence) {
-      return 'open-predecessor';
-    }
-    return known?.leaseHeld === true ? 'live-lease' : undefined;
+    return known?.openSequence !== undefined && sequence > known.openSequence;
+  }
+
+  /** Whether this scan already learned anything about the key. */
+  knows(orderingId: string): boolean {
+    return this.#keys.has(orderingId);
   }
 
   /** Records an unfinished delivery of the key with this sequence. */
@@ -36,46 +34,38 @@ export class ClaimScan {
     known.openSequence = Math.min(known.openSequence ?? sequence, sequence);
   }
 
-  /** Records that this scan leased the delivery, which is now unfinished and holds a live lease. */
-  noteClaimed(orderingId: string, sequence: number): void {
-    this.noteOpen(orderingId, sequence);
-    this.#know(orderingId).leaseHeld = true;
-  }
-
-  /** Records that a live lease of the key blocks every delivery of it. */
-  noteLeaseHeld(orderingId: string): void {
-    this.#know(orderingId).leaseHeld = true;
-  }
-
-  /** Remembers a delivery that waited behind an unfinished predecessor. */
-  noteWaiting(orderingId: string, delivery: DeliveryDocument): void {
-    if (delivery.status === 'pending') {
-      this.#know(orderingId).waiting.push(delivery._id);
-    }
+  /** Remembers a pending delivery of lane `laneId` that waited behind an unfinished predecessor. */
+  noteWaiting(orderingId: string, deliveryId: string, laneId: number): void {
+    const known = this.#know(orderingId);
+    known.waiting.push(deliveryId);
+    known.laneId = laneId;
   }
 
   /**
    * Ids of the waiting deliveries of every key that accumulated at least
-   * `minimum` of them. Shorter queues stay in the claim index: moving them out
-   * and back would cost more than skipping them.
+   * `minimum` of them, or that lives in one of `handedBack`. Shorter queues
+   * of a lane that stays held remain in the claim index: moving them out and
+   * back would cost more than skipping them. In a lane handed back they are
+   * all its due work, and leaving them ready would make every later claim take
+   * the lane for nothing.
    */
-  waitingBacklogs(minimum: number): string[] {
+  waitingBacklogs(minimum: number, handedBack: ReadonlySet<number>): string[] {
     return [...this.#keys.values()]
-      .filter((known) => known.waiting.length >= minimum)
+      .filter((known) => known.waiting.length >= minimum || handedBack.has(known.laneId!))
       .flatMap((known) => known.waiting);
   }
 
   #know(orderingId: string): KeyKnowledge {
     let known = this.#keys.get(orderingId);
     if (known === undefined) {
-      known = { openSequence: undefined, leaseHeld: false, waiting: [] };
+      known = { openSequence: undefined, waiting: [], laneId: undefined };
       this.#keys.set(orderingId, known);
     }
     return known;
   }
 }
 
-/** Identity of the ordering lane of a handler and key. */
+/** Identity of the ordering of a handler and key. */
 export function orderingIdentity(handler: string, key: string): string {
   return `${handler}\u0000${key}`;
 }

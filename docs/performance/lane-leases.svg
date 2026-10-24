@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 640" width="960" height="640" role="img" aria-labelledby="t d">
+  <title id="t">Lane lease model</title>
+  <desc id="d">Deliveries hash into 256 lanes by ordering key. A worker leases lanes: the lane row holds an epoch, the owner, the lease expiry and the ids of the claimed deliveries. A claim writes one lane row, a completion deletes delivery rows, and a worker that dies loses its lane to another worker, which bumps the epoch and charges an attempt to the deliveries that were in flight.</desc>
+  <style>
+    svg { --bg: #ffffff; --text: #1f2328; --muted: #57606a; --box: #f6f8fa; --line: #8c959f; --bad: #cf222e; --good: #1a7f37; --info: #0969da; --live: #ddf4ff; --dead: #ffebe9; --ok: #dafbe1; --warn: #fff8c5; --warnline: #9a6700; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+    @media (prefers-color-scheme: dark) {
+      svg { --bg: #0d1117; --text: #e6edf3; --muted: #9198a1; --box: #161b22; --line: #6e7681; --bad: #ff7b72; --good: #3fb950; --info: #58a6ff; --live: #0c2d4d; --dead: #3d1418; --ok: #0f2d1a; --warn: #3b2e00; --warnline: #d29922; }
+    }
+    .bg { fill: var(--bg); }
+    .t { fill: var(--text); font-size: 14px; }
+    .h { fill: var(--text); font-size: 17px; font-weight: 700; }
+    .m { fill: var(--muted); font-size: 12.5px; }
+    .mono { fill: var(--text); font-size: 13px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .b { fill: var(--box); stroke: var(--line); stroke-width: 1.2; }
+    .a { fill: var(--live); stroke: var(--info); stroke-width: 1.4; }
+    .g { fill: var(--ok); stroke: var(--good); stroke-width: 1.4; }
+    .w { fill: var(--warn); stroke: var(--warnline); stroke-width: 1.4; }
+    .x { fill: var(--dead); stroke: var(--bad); stroke-width: 1.4; stroke-dasharray: 5 3; }
+    .arrow { stroke: var(--line); stroke-width: 1.6; fill: none; marker-end: url(#head); }
+    .info { fill: var(--info); font-size: 13px; font-weight: 700; }
+    .good { fill: var(--good); font-size: 13px; font-weight: 700; }
+    .bad { fill: var(--bad); font-size: 13px; font-weight: 700; }
+    .sep { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
+  </style>
+  <defs>
+    <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" style="fill: var(--line)"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="960" height="640"/>
+
+  <text class="h" x="24" y="30">Deliveries belong to lanes, workers lease lanes</text>
+  <rect class="a" x="24" y="48" width="34" height="34" rx="4"/><text class="m" x="41.0" y="70" text-anchor="middle">0</text>
+  <rect class="a" x="60" y="48" width="34" height="34" rx="4"/><text class="m" x="77.0" y="70" text-anchor="middle">1</text>
+  <rect class="g" x="96" y="48" width="34" height="34" rx="4"/><text class="m" x="113.0" y="70" text-anchor="middle">2</text>
+  <rect class="g" x="132" y="48" width="34" height="34" rx="4"/><text class="m" x="149.0" y="70" text-anchor="middle">3</text>
+  <rect class="b" x="168" y="48" width="34" height="34" rx="4"/><text class="m" x="185.0" y="70" text-anchor="middle">4</text>
+  <rect class="a" x="204" y="48" width="34" height="34" rx="4"/><text class="m" x="221.0" y="70" text-anchor="middle">5</text>
+  <rect class="b" x="240" y="48" width="34" height="34" rx="4"/><text class="m" x="257.0" y="70" text-anchor="middle">6</text>
+  <rect class="g" x="276" y="48" width="34" height="34" rx="4"/><text class="m" x="293.0" y="70" text-anchor="middle">7</text>
+  <rect class="b" x="312" y="48" width="34" height="34" rx="4"/><text class="m" x="329.0" y="70" text-anchor="middle">8</text>
+  <rect class="b" x="348" y="48" width="34" height="34" rx="4"/><text class="m" x="365.0" y="70" text-anchor="middle">9</text>
+  <rect class="a" x="384" y="48" width="34" height="34" rx="4"/><text class="m" x="401.0" y="70" text-anchor="middle">10</text>
+  <rect class="g" x="420" y="48" width="34" height="34" rx="4"/><text class="m" x="437.0" y="70" text-anchor="middle">11</text>
+  <rect class="b" x="456" y="48" width="34" height="34" rx="4"/><text class="m" x="473.0" y="70" text-anchor="middle">12</text>
+  <rect class="b" x="492" y="48" width="34" height="34" rx="4"/><text class="m" x="509.0" y="70" text-anchor="middle">13</text>
+  <rect class="a" x="528" y="48" width="34" height="34" rx="4"/><text class="m" x="545.0" y="70" text-anchor="middle">14</text>
+  <rect class="g" x="564" y="48" width="34" height="34" rx="4"/><text class="m" x="581.0" y="70" text-anchor="middle">15</text>
+  <rect class="a" x="600" y="48" width="34" height="34" rx="4"/><text class="m" x="617.0" y="70" text-anchor="middle">16</text>
+  <rect class="a" x="636" y="48" width="34" height="34" rx="4"/><text class="m" x="653.0" y="70" text-anchor="middle">17</text>
+  <rect class="b" x="672" y="48" width="34" height="34" rx="4"/><text class="m" x="689.0" y="70" text-anchor="middle">18</text>
+  <rect class="b" x="708" y="48" width="34" height="34" rx="4"/><text class="m" x="725.0" y="70" text-anchor="middle">19</text>
+  <rect class="g" x="744" y="48" width="34" height="34" rx="4"/><text class="m" x="761.0" y="70" text-anchor="middle">20</text>
+  <rect class="b" x="780" y="48" width="34" height="34" rx="4"/><text class="m" x="797.0" y="70" text-anchor="middle">21</text>
+  <rect class="a" x="816" y="48" width="34" height="34" rx="4"/><text class="m" x="833.0" y="70" text-anchor="middle">22</text>
+  <rect class="b" x="852" y="48" width="34" height="34" rx="4"/><text class="m" x="869.0" y="70" text-anchor="middle">23</text>
+  <text class="m" x="892" y="70">... 255</text>
+  <rect class="a" x="24" y="96" width="16" height="12" rx="3"/><text class="m" x="46" y="107">held by worker A</text>
+  <rect class="g" x="178" y="96" width="16" height="12" rx="3"/><text class="m" x="200" y="107">held by worker B</text>
+  <rect class="b" x="332" y="96" width="16" height="12" rx="3"/><text class="m" x="354" y="107">free: no owner, or lease expired</text>
+  <text class="m" x="24" y="128">lane = hash(ordering key, or event id when there is none) mod 256, so every delivery of a key sits in one lane and has one owner at a time.</text>
+
+  <rect class="b" x="24" y="146" width="430" height="150" rx="8"/>
+  <text class="info" x="38" y="168">lane row 14 (one per lane, 256 in total)</text>
+  <text class="mono" x="38" y="192">epoch            7           fencing token</text>
+  <text class="mono" x="38" y="212">lease_owner      worker-A</text>
+  <text class="mono" x="38" y="232">lease_expires_at 12:00:30</text>
+  <text class="mono" x="38" y="252">in_flight        [d41, d42, d43]</text>
+  <text class="m" x="38" y="276">lease token of d41 = "14:7"  (lane : epoch)</text>
+
+  <rect class="b" x="486" y="146" width="450" height="150" rx="8"/>
+  <text class="info" x="500" y="168">deliveries table</text>
+  <text class="mono" x="500" y="192">d41  lane 14  pending  order-42  seq 3</text>
+  <text class="mono" x="500" y="212">d42  lane 14  pending  order-42  seq 4</text>
+  <text class="mono" x="500" y="232">d43  lane 14  pending  order-77  seq 1</text>
+  <text class="mono" x="500" y="252">d44  lane 14  pending  (due later)</text>
+  <text class="m" x="500" y="276">rows never change while they run: no status or lease column to update</text>
+  <path class="arrow" d="M456 220 H484"/>
+
+  <line class="sep" x1="24" y1="316" x2="936" y2="316"/>
+  <text class="h" x="24" y="344">Happy path: one lane write per batch, one delete per batch</text>
+  <rect class="b" x="24" y="358" width="212" height="92" rx="8"/>
+  <text class="t" x="36" y="380">1  claim</text>
+  <text class="m" x="36" y="398">read due deliveries of held</text>
+  <text class="m" x="36" y="416">lanes, then one lane update:</text>
+  <text class="good" x="36" y="434">in_flight += batch</text>
+  <path class="arrow" d="M238 404 H256"/>
+  <rect class="b" x="258" y="358" width="212" height="92" rx="8"/>
+  <text class="t" x="270" y="380">2  run handlers</text>
+  <text class="m" x="270" y="398">renew = one lane update</text>
+  <text class="m" x="270" y="416">(extend lease), no delivery</text>
+  <text class="m" x="270" y="434">row is touched</text>
+  <path class="arrow" d="M472 404 H490"/>
+  <rect class="b" x="492" y="358" width="212" height="92" rx="8"/>
+  <text class="t" x="504" y="380">3  completeMany</text>
+  <text class="m" x="504" y="398">lock lane rows FOR SHARE,</text>
+  <text class="m" x="504" y="416">check epoch + in_flight,</text>
+  <text class="good" x="504" y="434">DELETE the delivery rows</text>
+  <path class="arrow" d="M706 404 H724"/>
+  <rect class="b" x="726" y="358" width="210" height="92" rx="8"/>
+  <text class="t" x="738" y="380">4  next claim</text>
+  <text class="m" x="738" y="398">prunes finished ids from</text>
+  <text class="m" x="738" y="416">in_flight, frees the lane</text>
+  <text class="m" x="738" y="434">when nothing is running</text>
+
+  <line class="sep" x1="24" y1="470" x2="936" y2="470"/>
+  <text class="h" x="24" y="498">Crash path: another worker takes the lane, the old epoch is fenced</text>
+  <rect class="x" x="24" y="512" width="212" height="100" rx="8"/>
+  <text class="t" x="36" y="534">worker A dies</text>
+  <text class="m" x="36" y="552">lane 14 keeps epoch 7 and</text>
+  <text class="m" x="36" y="570">in_flight [d41, d42, d43],</text>
+  <text class="m" x="36" y="588">the lease runs out</text>
+  <path class="arrow" d="M238 562 H256"/>
+  <rect class="w" x="258" y="512" width="212" height="100" rx="8"/>
+  <text class="t" x="270" y="534">worker B claims</text>
+  <text class="m" x="270" y="552">takes lane 14: epoch 8,</text>
+  <text class="bad" x="270" y="570">charges 1 attempt to each</text>
+  <text class="m" x="270" y="588">id that was in flight</text>
+  <path class="arrow" d="M472 562 H490"/>
+  <rect class="g" x="492" y="512" width="212" height="100" rx="8"/>
+  <text class="t" x="504" y="534">redelivery</text>
+  <text class="m" x="504" y="552">d41, d42, d43 run again,</text>
+  <text class="m" x="504" y="570">attempt + 1, a poison one</text>
+  <text class="m" x="504" y="588">ends in the dead letters</text>
+  <path class="arrow" d="M706 562 H724"/>
+  <rect class="b" x="726" y="512" width="210" height="100" rx="8"/>
+  <text class="t" x="738" y="534">stale writes fail</text>
+  <text class="m" x="738" y="552">A (if alive) holds token</text>
+  <text class="m" x="738" y="570">"14:7": complete, extend,</text>
+  <text class="m" x="738" y="588">retry all find epoch 8</text>
+</svg>

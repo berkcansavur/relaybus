@@ -236,6 +236,7 @@ export class RabbitMqTransport implements Transport {
           this.#publishConfirmed(exchange, routingKey, content, options, true),
         shutdownTimeoutMs: this.#settings.shutdownTimeoutMs,
         onMessage,
+        decode: this.#settings.decode,
         onConsumerLost: (reason) => this.#supervisor.recover(reason),
         logger: this.#settings.logger,
         random: this.#settings.random,

@@ -7,6 +7,7 @@ import type {
   EventHeaders,
 } from '@relaybus/core';
 import type { PostgresRow } from './executor.js';
+import { LANE_COUNT } from './names.js';
 
 // Rows come from statements written in this package, so their shape is known.
 // Casting here is the single place where driver output is trusted.
@@ -43,12 +44,42 @@ export function mapEventEnvelope(row: PostgresRow): EventEnvelope {
   };
 }
 
+/**
+ * The fencing token of a claimed delivery names its lane and the lane's epoch,
+ * so every state change can check the lane without reading the delivery first.
+ */
+export function formatLeaseToken(lane: number, epoch: string, claims: number): string {
+  return `${lane}:${epoch}:${claims}`;
+}
+
+export interface LaneLease {
+  readonly lane: number;
+  readonly epoch: string;
+  /** How many claims of this delivery ended before this one; every end of a claim bumps it, so an old lease can never match a newer claim. */
+  readonly claims: number;
+}
+
+const LEASE_TOKEN_PATTERN = /^(\d{1,3}):(\d{1,18}):(\d{1,9})$/;
+
+/** Splits a lease token; undefined when it was not issued by this store. */
+export function parseLeaseToken(token: string): LaneLease | undefined {
+  const match = LEASE_TOKEN_PATTERN.exec(token);
+  if (match === null || Number(match[1]) >= LANE_COUNT) {
+    return undefined;
+  }
+  return { lane: Number(match[1]), epoch: match[2]!, claims: Number(match[3]) };
+}
+
 export function mapClaimedDelivery(row: PostgresRow, leaseExpiresAt: Date): ClaimedDelivery {
   return {
     deliveryId: text(row, 'delivery_id'),
-    leaseToken: text(row, 'lease_token'),
+    leaseToken: formatLeaseToken(
+      readCount(row, 'lane'),
+      text(row, 'epoch'),
+      readCount(row, 'claims'),
+    ),
     handler: text(row, 'handler'),
-    attempt: readCount(row, 'attempts'),
+    attempt: readCount(row, 'attempt'),
     leaseExpiresAt,
     event: mapEventEnvelope(row),
   };
@@ -73,5 +104,5 @@ export function mapDeliveryRecord(row: PostgresRow): DeliveryRecord {
 }
 
 export function mapOldestDueAt(rows: readonly PostgresRow[]): Date | null {
-  return rows.length === 0 ? null : new Date(text(rows[0]!, 'oldest_due_at'));
+  return nullableDate(rows[0]!, 'oldest_due_at');
 }

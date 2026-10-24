@@ -81,6 +81,12 @@ export const sections = [
           'Per-key ordering in commit order: how the sequence is assigned and what it does and does not promise.',
       },
       {
+        title: 'Compile-time safety with event catalogs',
+        path: 'concepts/event-catalogs',
+        description:
+          'Group events in a catalog so the TypeScript compiler rejects a missing handler, a wrong payload or an event published to the wrong catalog, and a boot check catches the rest.',
+      },
+      {
         title: 'Dead letters',
         path: 'concepts/dead-letters',
         description:
@@ -138,6 +144,12 @@ export const sections = [
           'Publish outbox events to RabbitMQ with publisher confirms and consume them with an idempotent inbox.',
       },
       {
+        title: 'Interoperating with non-relaybus services',
+        path: 'recipes/interoperating-with-other-services',
+        description:
+          'Exchange events with services that do not use relaybus over Kafka and RabbitMQ: the wire format, and decoding plain JSON and structured CloudEvents with exactly-once handling.',
+      },
+      {
         title: 'Testing with FakeClock',
         path: 'recipes/testing-with-fakeclock',
         description:
@@ -153,6 +165,12 @@ export const sections = [
         path: 'comparison',
         description:
           'How relaybus compares with @nestjs/event-emitter, @nestjs/cqrs, @nestjs/outbox, BullMQ, pg-boss and using Kafka directly.',
+      },
+      {
+        title: 'Tuning for your workload',
+        path: 'tuning',
+        description:
+          'Recommended relaybus settings for a single-connection API, a high-traffic API, a worker fleet, PgBouncer in transaction mode and a MongoDB replica set.',
       },
       {
         title: 'FAQ',

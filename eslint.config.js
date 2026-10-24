@@ -8,6 +8,7 @@ export default tseslint.config(
       '**/coverage/**',
       'reports/**',
       '.stryker-tmp/**',
+      'benchmarks/.cache/**',
       'docs-site/.vitepress/cache/**',
     ],
   },
@@ -15,7 +16,10 @@ export default tseslint.config(
   ...tseslint.configs.recommendedTypeChecked,
   {
     languageOptions: {
-      parserOptions: { project: ['./tsconfig.json'], tsconfigRootDir: import.meta.dirname },
+      parserOptions: {
+        project: ['./tsconfig.json', './benchmarks/tsconfig.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
     },
     rules: {
       '@typescript-eslint/no-floating-promises': 'error',

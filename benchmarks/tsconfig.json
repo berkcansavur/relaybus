@@ -1,0 +1,28 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "..",
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "allowImportingTsExtensions": true,
+    "experimentalDecorators": false,
+    "emitDecoratorMetadata": false,
+    "paths": {
+      "@relaybus/core": ["../packages/core/src/index.ts"],
+      "@relaybus/postgres": ["../packages/postgres/src/index.ts"],
+      "@relaybus/mongodb": ["../packages/mongodb/src/index.ts"],
+      "pg": ["../packages/postgres/node_modules/@types/pg/index.d.ts"],
+      "mongodb": ["../packages/mongodb/node_modules/mongodb/mongodb.d.ts"],
+      "@testcontainers/postgresql": [
+        "../packages/postgres/node_modules/@testcontainers/postgresql/build/index.d.ts"
+      ],
+      "@testcontainers/mongodb": [
+        "../packages/mongodb/node_modules/@testcontainers/mongodb/build/index.d.ts"
+      ]
+    }
+  },
+  "include": ["./**/*.ts"],
+  "exclude": ["./.cache/**", "./results/**", "./baselines/**"]
+}

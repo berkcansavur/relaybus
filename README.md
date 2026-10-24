@@ -89,16 +89,16 @@ Full comparison and sources: <https://berkcansavur.github.io/relaybus/comparison
 
 ## Guarantees
 
-| Property             | Behaviour                                                                                                                                                                                  |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Atomic publish       | Events are written in the caller's transaction. Rolled back with it, committed with it.                                                                                                    |
-| No lost events       | Committed events are delivered to every subscribed handler and route, retried until they succeed or are dead-lettered. Nothing is dropped silently.                                        |
-| Delivery             | At-least-once to every handler. A handler subscribed with `transactional: true` that writes through its transaction takes effect exactly once.                                             |
-| Independent handlers | Each handler has its own delivery record: one failing handler never re-runs the others.                                                                                                    |
-| Ordering             | Optional per key: events with the same `key` are handled one at a time per handler, in commit order. No global ordering.                                                                   |
-| Concurrency          | Deliveries are leased (`SKIP LOCKED` on SQL, compare-and-set on MongoDB). Every state change is fenced by the lease token, so a stalled worker cannot overwrite the worker that took over. |
-| Retries              | Capped exponential backoff with full jitter, per handler. Non-retryable errors and exhausted deliveries go to dead letters you can inspect and requeue.                                    |
-| Shutdown             | Running handlers finish or are released without losing an attempt.                                                                                                                         |
+| Property             | Behaviour                                                                                                                                                                                                                                          |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Atomic publish       | Events are written in the caller's transaction. Rolled back with it, committed with it.                                                                                                                                                            |
+| No lost events       | Committed events are delivered to every subscribed handler and route, retried until they succeed or are dead-lettered. Nothing is dropped silently.                                                                                                |
+| Delivery             | At-least-once to every handler. A handler subscribed with `transactional: true` that writes through its transaction takes effect exactly once.                                                                                                     |
+| Independent handlers | Each handler has its own delivery record: one failing handler never re-runs the others.                                                                                                                                                            |
+| Ordering             | Optional per key: events with the same `key` are handled one at a time per handler, in commit order. No global ordering.                                                                                                                           |
+| Concurrency          | Workers lease lanes (hash buckets of the ordering key), not rows: one lane row is written per claimed batch and no delivery row. Every state change is fenced by the lane's epoch, so a stalled worker cannot overwrite the worker that took over. |
+| Retries              | Capped exponential backoff with full jitter, per handler. Non-retryable errors and exhausted deliveries go to dead letters you can inspect and requeue.                                                                                            |
+| Shutdown             | Running handlers finish or are released without losing an attempt.                                                                                                                                                                                 |
 
 What relaybus does **not** claim: exactly-once side effects outside your
 database (an HTTP call can repeat; send an idempotency key), or global ordering.
@@ -141,8 +141,9 @@ flowchart LR
 1. `publish` writes the event and one delivery per subscribed handler or route
    into the active transaction. Events with a key get a per-key sequence that
    follows commit order.
-2. The dispatcher in every process claims due deliveries with a lease, runs the
-   handler, renews the lease while it runs and marks the delivery completed.
+2. The dispatcher in every process leases lanes, claims their due deliveries in
+   batches, runs the handlers, renews the lease while they run and completes
+   finished deliveries in batches (completing deletes the delivery row).
 3. A failure reschedules the delivery with backoff, or dead-letters it after the
    last attempt. A worker that crashes leaves an expired lease, and another
    worker takes the delivery over.
@@ -202,7 +203,7 @@ stop work when a timeout, lease loss or shutdown aborts the handler.
 ```ts
 const dead = await bus.listDeliveries({ status: 'dead', handler: 'Shipping.ship' });
 await bus.requeue(dead.map((delivery) => delivery.id));
-const stats = await bus.statistics(); // pending, processing, completed, dead, oldestDueAt
+const stats = await bus.statistics(); // pending, processing, dead, oldestDueAt; completed only with a completion history
 ```
 
 Observers receive every lifecycle event (published, started, succeeded, retry

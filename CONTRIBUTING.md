@@ -29,7 +29,9 @@ pnpm test
 | `pnpm format:check`     | Prettier, check mode (used by CI)                                  |
 | `pnpm test`             | All tests (unit + integration)                                     |
 | `pnpm test:unit`        | Unit project only, no Docker needed                                |
-| `pnpm test:integration` | Integration project only, needs Docker                             |
+| `pnpm test:integration` | Integration projects only, needs Docker                            |
+| `pnpm test:affected`    | Only tests that import files changed since `HEAD` (`--changed`)    |
+| `pnpm test:pull-images` | Pre-pulls the Docker images the integration tests use              |
 | `pnpm coverage`         | All tests with V8 coverage; fails below the thresholds             |
 | `pnpm mutation`         | Stryker mutation testing                                           |
 | `pnpm release:dry-run`  | semantic-release dry run (needs a GitHub token, see docs)          |
@@ -40,6 +42,15 @@ pnpm test
 - Integration tests are named `*.integration.test.ts` and run against real services through Testcontainers.
 - **Contract suite for new stores.** Every `EventStore` implementation must pass the shared contract suite exported by `@relaybus/testing`. Adding a store means adding an integration test that calls the contract suite with your store factory, then adding store-specific tests for anything outside the contract (leasing details, transactions, indexes).
 - Property-based tests use `fast-check` where invariants matter (ordering keys, retry backoff bounds).
+
+### How the integration tests run
+
+`vitest.global-setup.ts` starts one server per backend (two PostgreSQL versions, a MongoDB replica set, RabbitMQ, Kafka) in parallel before the integration tests and stops them afterwards. Each test file keeps apart through its own Postgres database, a unique Mongo database name, and unique RabbitMQ and Kafka names, so files run in parallel (project `integration`). Files that depend on lease timing or restart a server (`lane-leases`, `claim-concurrency`, `broker-restart`) run one at a time after the rest (project `integration-serial`). A test that needs its own server (the standalone mongod, the RabbitMQ restart test) starts a dedicated container.
+
+- Test PostgreSQL runs with its data directory on tmpfs and `fsync=off`, `synchronous_commit=off`, `full_page_writes=off`. No test asserts durability or crash recovery; set `RELAYBUS_TEST_DURABLE_POSTGRES=1` to use the image defaults.
+- A path filter such as `pnpm vitest run packages/postgres` starts only that package's backend. `RELAYBUS_TEST_BACKENDS=postgres,mongodb` (or `all`) chooses explicitly. A run without integration tests starts nothing.
+- A new integration test must isolate itself with `uniqueSchema()`, `uniqueDatabaseName()` or `unique()` and must not assert on server-wide state. Add it to `serialIntegrationTests` in `vitest.config.ts` if it depends on wall-clock timing.
+- `pnpm test:affected` is the quick local loop. A change in `packages/core` reaches every package, so expect a full run there.
 
 ## Coverage policy
 

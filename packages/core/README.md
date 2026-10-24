@@ -78,31 +78,42 @@ Use a database store in production: [`@relaybus/postgres`](../postgres) or
 
 ## `new RelayBus(options)`
 
-| Option                                    | Default                                       | Description                                                                     |
-| ----------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------- |
-| `store`                                   | required                                      | `EventStore` implementation.                                                    |
-| `source`                                  | `'relaybus'`                                  | Service name recorded on every event.                                           |
-| `transactionMode`                         | `'required'`                                  | `'optional'` lets `publish` open its own transaction.                           |
-| `transactionResolver`                     | —                                             | Returns the caller's active transaction, e.g. from `@nestjs-cls/transactional`. |
-| `unroutedEvents`                          | `'warn'`                                      | `'throw'` rejects events without any handler or route.                          |
-| `retry`                                   | 10 attempts, `1s`, ×2, max `10m`, full jitter | Default handler retry policy. `attempts: Infinity` retries forever.             |
-| `handlerTimeout`                          | `false`                                       | Default handler timeout.                                                        |
-| `dispatcher.enabled`                      | `true`                                        | Run handlers in this process.                                                   |
-| `dispatcher.concurrency`                  | `10`                                          | Handlers running at once.                                                       |
-| `dispatcher.batchSize`                    | concurrency                                   | Deliveries claimed per query.                                                   |
-| `dispatcher.pollInterval`                 | `'1s'`                                        | Idle wait between claims; retries are picked up on this cadence.                |
-| `dispatcher.leaseDuration`                | `'30s'`                                       | Lease length, renewed every third while a handler runs.                         |
-| `dispatcher.shutdownTimeout`              | `'30s'`                                       | Wait for running handlers on `stop`, then release them.                         |
-| `retention.completed`                     | `'7d'`                                        | Delete completed deliveries after this; also the deduplication horizon.         |
-| `retention.dead`                          | `false`                                       | Delete dead letters after this.                                                 |
-| `retention.interval`                      | `'1h'`                                        | Cleanup cadence.                                                                |
-| `transports` / `routes` / `subscriptions` | —                                             | Broker integration, see below.                                                  |
-| `setupStore`                              | `true`                                        | Create tables and indexes on `start`.                                           |
-| `observers`                               | `[]`                                          | Lifecycle hooks for logs, metrics and tracing.                                  |
-| `logger`                                  | `console`                                     | `{ log, warn, error }`.                                                         |
-| `clock`, `generateIdentifier`, `random`   | system                                        | Replace in tests.                                                               |
+| Option                                    | Default                                       | Description                                                                                                                                   |
+| ----------------------------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `store`                                   | required                                      | `EventStore` implementation.                                                                                                                  |
+| `source`                                  | `'relaybus'`                                  | Service name recorded on every event.                                                                                                         |
+| `transactionMode`                         | `'required'`                                  | `'optional'` lets `publish` open its own transaction.                                                                                         |
+| `transactionResolver`                     | —                                             | Returns the caller's active transaction, e.g. from `@nestjs-cls/transactional`.                                                               |
+| `unroutedEvents`                          | `'warn'`                                      | `'throw'` rejects events without any handler or route.                                                                                        |
+| `retry`                                   | 10 attempts, `1s`, ×2, max `10m`, full jitter | Default handler retry policy. `attempts: Infinity` retries forever.                                                                           |
+| `handlerTimeout`                          | `false`                                       | Default handler timeout.                                                                                                                      |
+| `dispatcher.enabled`                      | `true`                                        | Run handlers in this process.                                                                                                                 |
+| `dispatcher.concurrency`                  | `10`                                          | Handlers running at once.                                                                                                                     |
+| `dispatcher.batchSize`                    | concurrency                                   | Deliveries claimed per query.                                                                                                                 |
+| `dispatcher.pollInterval`                 | `'1s'`                                        | Idle wait between claims; retries are picked up on this cadence.                                                                              |
+| `dispatcher.leaseDuration`                | `'30s'`                                       | Lease length, renewed every third while a handler runs.                                                                                       |
+| `dispatcher.shutdownTimeout`              | `'30s'`                                       | Wait for running handlers on `stop`, then release them.                                                                                       |
+| `dispatcher.completionBatchWindow`        | `'2ms'`                                       | Deliveries that finish within this window are completed with one store call; `0` completes one by one.                                        |
+| `dispatcher.completionBatchSize`          | `200`                                         | Most deliveries completed in one store call.                                                                                                  |
+| `retention.completed`                     | `'7d'`                                        | Delete events whose deliveries all completed after this; also the deduplication horizon. A completed delivery is deleted at once (see below). |
+| `retention.dead`                          | `false`                                       | Delete dead letters after this.                                                                                                               |
+| `retention.interval`                      | `'1h'`                                        | Cleanup cadence.                                                                                                                              |
+| `transports` / `routes` / `subscriptions` | —                                             | Broker integration, see below.                                                                                                                |
+| `setupStore`                              | `true`                                        | Create tables and indexes on `start`.                                                                                                         |
+| `observers`                               | `[]`                                          | Lifecycle hooks for logs, metrics and tracing.                                                                                                |
+| `logger`                                  | `console`                                     | `{ log, warn, error }`.                                                                                                                       |
+| `clock`, `generateIdentifier`, `random`   | system                                        | Replace in tests.                                                                                                                             |
 
 Durations are milliseconds or strings such as `'250ms'`, `'30s'`, `'5m'`, `'1h'`, `'7d'`.
+
+**How the dispatcher schedules claims.** A claim that fills its batch is followed by the next one at once. Otherwise the
+dispatcher sleeps until it is woken: by a publish, by the store reporting new deliveries from any process (the PostgreSQL
+store through `LISTEN/NOTIFY`, the MongoDB store through a change stream), or by settled deliveries once 70% of a batch
+(of `min(concurrency, batchSize)`) is free again, so slots are refilled in groups rather than one by one. A smaller number
+of free slots is refilled after 10 ms without a claim, and the poll interval stays the safety net. Wake-ups within 5 ms
+of a claim are merged into one claim. Settled unkeyed deliveries do not trigger a claim when their handler's last claim
+got less than it asked for (nothing more was due); a settled keyed delivery always may, since it unblocks the next of
+its key.
 
 ## Publishing
 
@@ -124,6 +135,123 @@ The handler receives the envelope and a context with `attempt`, `maxAttempts`,
 - After a timeout or lease loss the handler's `signal` is aborted; the retry waits
   for the abandoned run to settle so runs never overlap.
 
+## Event catalogs
+
+A catalog groups the events of one domain so the compiler checks that every event
+has a handler and that only those events are published through it.
+
+```ts
+class OrderPlaced extends defineEvent<{ orderId: string }>('order.placed.v1') {}
+class OrderShipped extends defineEvent<{ orderId: string; carrier: string }>('order.shipped.v1') {}
+
+export const OrderEvents = defineCatalog({ OrderPlaced, OrderShipped }, { name: 'OrderEvents' });
+
+// A class that misses a handler does not compile:
+class ShippingHandlers implements HandlersOf<typeof OrderEvents> {
+  onOrderPlaced(event: EventOf<typeof OrderPlaced>, context: HandlerContext) {}
+  onOrderShipped(event: EventOf<typeof OrderShipped>) {}
+}
+bus.subscribeCatalog(OrderEvents, new ShippingHandlers()); // ids: OrderEvents.onOrderPlaced, ...
+
+// Or declare the handlers as an object; missing or extra keys do not compile:
+bus.subscribeCatalog(
+  OrderEvents,
+  defineHandlers(OrderEvents, {
+    onOrderPlaced: (event) => reserveStock(event.payload.orderId),
+    onOrderShipped: (event) => notify(event.payload.carrier),
+  }),
+  { idPrefix: 'fulfilment' },
+);
+
+// Publish through a view that only accepts the catalog's events:
+const orders = bus.forCatalog(OrderEvents);
+await orders.publish(new OrderPlaced({ orderId }), { transaction });
+await orders.publish(new UserRegistered({ userId })); // compile error
+```
+
+- `defineCatalog(events, { name? })` returns a frozen catalog with frozen entries. It rejects
+  empty catalogs, entries that are not event classes, names that are not identifiers of letters,
+  digits and underscores (a name becomes part of a method name and a handler id) and two entries
+  with one event type.
+- `HandlersOf<C>` requires an `on${Key}` method per event; `HandlersOf<C, 'A' | 'B'>` requires
+  only those (`PartialHandlersOf<C, 'A' | 'B'>` is the same type), and `HandlersOf<C, K, Tx>` types
+  `context.transaction`. `EventOf<typeof OrderPlaced>` is the envelope type of one event;
+  `CatalogEvents<C, K?>` is the union of the catalog's (selected) events.
+- `bus.subscribeCatalog(catalog, handlers, { events?, idPrefix?, ...subscribeOptions })` registers
+  the `on${Key}` method of every event (or of the `events` listed) with the stable id
+  `${idPrefix ?? catalog name ?? class name}.on${Key}` and `this` bound to `handlers`. Methods of
+  events that are not listed are ignored. A missing method does not compile and throws a
+  `ConfigurationError` naming it. Handlers are narrowed only by an `events` list the compiler can see;
+  options whose `events` may be absent require every handler.
+- `defineHandlers(catalog, handlers, { events? })` checks completeness, extra keys (including
+  handlers of events that are not listed) and payload types at compile time and at runtime. A
+  handler may type its context, for example `HandlerContext<PoolClient>`.
+- **Boot check:** `new RelayBus({ catalogs: [OrderEvents] })` (or `bus.registerCatalog`) makes
+  `start()` throw a `ConfigurationError` listing every catalog event that has no handler or route
+  and the method it expects. A failed check leaves the bus idle, before any I/O, so it can be fixed
+  and started again. For services that share a catalog, declare the role instead; see below.
+- `forCatalog(...).publish` also checks the event type at runtime. TypeScript compares event
+  classes by shape, so two events with identical payload types are interchangeable to the compiler;
+  the runtime check still rejects the one that is not in the catalog, before anything is stored.
+
+### Microservices: shared catalogs
+
+In a system of services the catalog usually lives in a shared contracts package, and each service
+produces some of its events and consumes others. Declare what this service does with each part:
+
+```ts
+import { consume, produce } from '@relaybus/core';
+import { OrderEvents } from '@acme/contracts';
+
+// orders service: publishes OrderPlaced to the broker, handles OrderShipped
+class DeliveryStatusHandlers implements HandlersOf<typeof OrderEvents, 'OrderShipped'> {
+  onOrderShipped(event: EventOf<typeof OrderShipped>) {}
+}
+
+const bus = new RelayBus({
+  store,
+  transports: [kafka],
+  routes: [{ event: OrderPlaced, transport: 'kafka', destination: 'orders' }],
+  subscriptions: [{ transport: 'kafka', destinations: ['shipments'] }],
+  catalogs: [
+    produce(OrderEvents, { events: ['OrderPlaced'] }),
+    consume(OrderEvents, { events: ['OrderShipped'] }),
+  ],
+});
+bus.subscribeCatalog(OrderEvents, new DeliveryStatusHandlers(), { events: ['OrderShipped'] });
+const orders = bus.forCatalog(OrderEvents, { events: ['OrderPlaced'] });
+await orders.publish(new OrderPlaced({ orderId }), { transaction, key: orderId });
+await orders.publish(new OrderShipped({ orderId, carrier })); // compile error: not produced here
+
+// shipping service: handles OrderPlaced only
+class ShipmentHandlers implements HandlersOf<typeof OrderEvents, 'OrderPlaced'> {
+  onOrderPlaced(event: EventOf<typeof OrderPlaced>) {}
+}
+```
+
+- `consume(catalog, { events? })`: each listed event (default: all) needs a **local handler**;
+  a route does not count. `produce(catalog, { events? })`: each listed event needs a **route to a
+  transport**, so nothing is published without a destination; a local handler does not count.
+  Both can be declared for one catalog, and for one event. Unknown names do not compile and are
+  rejected at runtime, as are empty and duplicate lists. A bare catalog keeps its meaning: every
+  event needs a handler or a route.
+- `start()` lists every gap, per event:
+
+  ```text
+  ConfigurationError: Catalog events this service does not cover:
+    - OrderEvents.OrderShipped (order.shipped.v1): consumed here, needs handler method onOrderShipped
+    - OrderEvents.OrderPlaced (order.placed.v1): produced here, needs a route to a transport
+  ```
+
+- `bus.forCatalog(catalog, { events })` publishes only the listed events: others do not compile
+  and are rejected at runtime before anything is stored.
+- Received events (`bus.receive`, called by Kafka and RabbitMQ consumers) are matched to the
+  catalog handlers by event type, idempotently on the event id, and the payload is validated
+  against the event's schema before the handler runs; a payload that fails it is dead-lettered.
+- Per-key order holds **per handler and event type**: events of one type and key reach a
+  handler in publish order (Kafka: same partition; RabbitMQ: `ordered: true`). Events of two
+  types under one key travel through separate routes and handlers and can interleave.
+
 ## Transports
 
 ```ts
@@ -144,6 +272,16 @@ transports acknowledge only after it resolves and dead-letter `InvalidEnvelopeEr
 
 `listDeliveries(query)`, `requeue(ids)`, `statistics()`, `purgeExpired()`,
 `handlers()`, `runOnce()` and `drain()` (tests), `start()` and `stop()`.
+
+**Completed deliveries are deleted.** Completing a delivery removes its row instead
+of updating it, which is what keeps the write cost of a delivery constant (see
+`docs/performance/write-amplification.md`). `listDeliveries({ status: 'completed' })`
+and `statistics().completed` therefore report nothing unless the store keeps a
+completion history (`completionHistory: true` on the SQL stores,
+`retainCompleted: true` on `InMemoryEventStore`). Deduplication does not depend
+on it: an event remembers every handler it ever had a delivery for, so a
+redelivered or republished event never runs a completed handler again, for as
+long as the event is kept (`retention.completed`).
 
 ## Writing a store
 

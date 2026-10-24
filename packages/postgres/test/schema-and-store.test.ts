@@ -22,7 +22,7 @@ describe('identifier validation', () => {
   it('applies a custom schema and prefix', () => {
     const names = resolvePostgresNames({ schema: 'messaging', tablePrefix: 'bus_' });
     expect(names.events).toBe('"messaging"."bus_events"');
-    expect(names.indexes.deliveryDue).toBe('"bus_deliveries_due_idx"');
+    expect(names.indexes.deliveryLaneDue).toBe('"bus_deliveries_lane_due_idx"');
   });
 
   it('accepts an empty prefix', () => {
@@ -54,9 +54,22 @@ describe('schema SQL', () => {
     const statements = createPostgresSchemaStatements();
     expect(statements.length).toBeGreaterThan(8);
     for (const statement of statements) {
-      expect(statement).toMatch(/IF NOT EXISTS/);
+      // Guarded creation, a conditional upgrade block, a drop of an obsolete index, a storage
+      // parameter, an insert that skips existing lanes or the schema marker: running any of them again changes nothing.
+      expect(statement).toMatch(
+        /IF NOT EXISTS|IF EXISTS|ON CONFLICT \(lane\) DO NOTHING|ALTER TABLE .* SET \(autovacuum|COMMENT ON TABLE/,
+      );
     }
     expect(statements[0]).not.toMatch(/CREATE SCHEMA/);
+  });
+
+  it('ends with a marker that changes with the statements before it', () => {
+    const plain = createPostgresSchemaStatements();
+    const withHistory = createPostgresSchemaStatements({ completionHistory: true });
+    expect(plain.at(-1)).toMatch(
+      /^COMMENT ON TABLE "public"\."relaybus_lanes" IS 'relaybus schema [0-9a-f]{32}'$/,
+    );
+    expect(withHistory.at(-1)).not.toBe(plain.at(-1));
   });
 
   it('creates a custom schema first', () => {
@@ -106,6 +119,40 @@ describe('PostgresEventStore options', () => {
     expect(() => new PostgresEventStore({ executor: fakeExecutor(), purgeBatchSize })).toThrow(
       ConfigurationError,
     );
+  });
+
+  it('rejects a wakeUp other than notify or poll', () => {
+    expect(
+      () => new PostgresEventStore({ executor: fakeExecutor(), wakeUp: 'listen' as never }),
+    ).toThrow("wakeUp must be 'notify' or 'poll', received listen");
+  });
+
+  it('listens for nothing with wakeUp poll, even on a pool', async () => {
+    const pool = { options: {}, on: vi.fn() } as unknown as Pool;
+    const store = new PostgresEventStore({ pool, wakeUp: 'poll' });
+    await expect(store.watchNewDeliveries(() => undefined)).resolves.toBeUndefined();
+  });
+
+  it('rejects a preparedStatements that is not a boolean', () => {
+    expect(
+      () => new PostgresEventStore({ executor: fakeExecutor(), preparedStatements: 1 as never }),
+    ).toThrow('preparedStatements must be a boolean, received 1');
+  });
+
+  it('asks the executor to prepare its statements unless preparedStatements is false', async () => {
+    const prepared = vi.fn(async () => [{ count: 0 }]);
+    await new PostgresEventStore<undefined>({
+      executor: { transaction: (work) => work(undefined), query: prepared },
+    }).relinquish('w');
+    expect(prepared).toHaveBeenCalledWith(expect.any(String), ['w'], undefined, {
+      prepare: true,
+    });
+    const unprepared = vi.fn(async () => [{ count: 0 }]);
+    await new PostgresEventStore<undefined>({
+      executor: { transaction: (work) => work(undefined), query: unprepared },
+      preparedStatements: false,
+    }).relinquish('w');
+    expect(unprepared).toHaveBeenCalledWith(expect.any(String), ['w'], undefined, undefined);
   });
 
   it('claims nothing for an empty handler list without touching the database', async () => {
@@ -183,6 +230,103 @@ describe('PgExecutor', () => {
     expect(client.release).toHaveBeenCalledWith(true);
   });
 
+  it('sends a statement to prepare as a named statement whose name follows from its text', async () => {
+    const { pool, executor } = createPool(async () => ({ rows: [] }));
+    pool.query.mockResolvedValue({ rows: [] });
+    await executor.query('SELECT $1', ['x'], undefined, { prepare: true });
+    await executor.query('SELECT $1', ['y'], undefined, { prepare: true });
+    await executor.query('SELECT $1::int', [1], undefined, { prepare: true });
+    await executor.query('SELECT $1', ['z'], undefined, { prepare: false });
+    const [first, second, third, fourth] = pool.query.mock.calls as unknown[][];
+    expect(first![0]).toEqual({
+      name: expect.stringMatching(/^relaybus_[0-9a-f]{24}$/),
+      text: 'SELECT $1',
+      values: ['x'],
+    });
+    expect((second![0] as { name: string }).name).toBe((first![0] as { name: string }).name);
+    expect((third![0] as { name: string }).name).not.toBe((first![0] as { name: string }).name);
+    expect(fourth).toEqual(['SELECT $1', ['z']]);
+  });
+
+  it.each(['26000', '42P05'])(
+    'stops preparing for good when the server answers %s, running the statement again unprepared',
+    async (code) => {
+      const { pool, executor } = createPool(async () => ({ rows: [] }));
+      const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const logged = new PgExecutor(pool as unknown as Pool, { logger });
+      pool.query.mockImplementation(async (config: unknown) => {
+        if (typeof config === 'object') {
+          throw Object.assign(new Error('prepared statement does not exist'), { code });
+        }
+        return { rows: [{ ok: true }] };
+      });
+      await expect(logged.query('SELECT 1', [], undefined, { prepare: true })).resolves.toEqual([
+        { ok: true },
+      ]);
+      await expect(logged.query('SELECT 2', [], undefined, { prepare: true })).resolves.toEqual([
+        { ok: true },
+      ]);
+      expect(pool.query.mock.calls.map(([config]) => typeof config)).toEqual([
+        'object',
+        'string',
+        'string',
+      ]);
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `[PgExecutor](query) The server does not keep prepared statements per connection`,
+        ),
+      );
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(`code=${code}`));
+      void executor;
+    },
+  );
+
+  it('fails a statement of a transaction whose prepared statement the server lost, preparing nothing after', async () => {
+    const lost = Object.assign(new Error('prepared statement does not exist'), { code: '26000' });
+    const { client, executor } = createPool(async () => {
+      throw lost;
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(
+        executor.query('SELECT 1', [], client as unknown as PoolClient, { prepare: true }),
+      ).rejects.toBe(lost);
+      expect(warn).toHaveBeenCalledTimes(1);
+      client.query.mockResolvedValue({ rows: [] });
+      await executor.query('SELECT 1', [], client as unknown as PoolClient, { prepare: true });
+      expect(client.query).toHaveBeenLastCalledWith('SELECT 1', []);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('warns once when statements sent before the switch fail the same way', async () => {
+    const { pool } = createPool(async () => ({ rows: [] }));
+    const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const executor = new PgExecutor(pool as unknown as Pool, { logger });
+    pool.query.mockImplementation(async (config: unknown) => {
+      if (typeof config === 'object') {
+        throw Object.assign(new Error('prepared statement does not exist'), { code: '26000' });
+      }
+      return { rows: [] };
+    });
+    await Promise.all([
+      executor.query('SELECT 1', [], undefined, { prepare: true }),
+      executor.query('SELECT 2', [], undefined, { prepare: true }),
+    ]);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('rethrows any other error of a prepared statement and keeps preparing', async () => {
+    const { pool, executor } = createPool(async () => ({ rows: [] }));
+    const broken = Object.assign(new Error('syntax error'), { code: '42601' });
+    pool.query.mockRejectedValueOnce(broken).mockResolvedValue({ rows: [] });
+    await expect(executor.query('SELEC 1', [], undefined, { prepare: true })).rejects.toBe(broken);
+    await executor.query('SELECT 1', [], undefined, { prepare: true });
+    expect(typeof (pool.query.mock.calls[1] as unknown[])[0]).toBe('object');
+  });
+
   it('runs queries on the pool, or on the transaction when given one', async () => {
     const { pool, client, executor } = createPool(async () => ({ rows: [{ a: 1 }] }));
     pool.query.mockResolvedValue({ rows: [{ b: 2 }] });
@@ -190,5 +334,211 @@ describe('PgExecutor', () => {
     await expect(
       executor.query('SELECT $1', ['x'], client as unknown as PoolClient),
     ).resolves.toEqual([{ a: 1 }]);
+  });
+});
+
+describe('wake-up notifications', () => {
+  function appendingStore(
+    notify: () => Promise<unknown>,
+    settings: { readonly wakeUp?: 'notify' | 'poll' } = {},
+  ) {
+    const sent: unknown[][] = [];
+    const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
+    const store = new PostgresEventStore<undefined>({
+      executor: {
+        transaction: (work) => work(undefined),
+        query: async (sql, parameters) => {
+          if (sql.startsWith('SELECT pg_notify')) {
+            sent.push(['notify']);
+            await notify();
+            return [];
+          }
+          sent.push([...parameters]);
+          return [{ id: 'e', inserted: true, sequence: null, deliveries: 1 }];
+        },
+      },
+      logger: logger as never,
+      ...settings,
+    });
+    const entries = (availableAt: Date) => [
+      {
+        event: {
+          id: 'e',
+          type: 't',
+          source: 's',
+          key: null,
+          payload: {},
+          headers: {},
+          correlationId: null,
+          causationId: null,
+          occurredAt: availableAt,
+        },
+        deliveries: [{ id: 'd', handler: 'h', availableAt }],
+      },
+    ];
+    // Publishes in a transaction of the store, which knows when it committed.
+    const append = (availableAt: Date) =>
+      store.transaction((transaction) =>
+        store.append(transaction, entries(availableAt), new Date(0)),
+      );
+    // Publishes in a transaction of the caller, whose commit the store does not see.
+    const appendInCallerTransaction = (availableAt: Date) =>
+      store.append(undefined, entries(availableAt), new Date(0));
+    return { store, sent, logger, entries, append, appendInCallerTransaction };
+  }
+
+  it('notifies the first due publish at once and the rest of the interval once, after it', async () => {
+    vi.useFakeTimers();
+    try {
+      const { sent, append, appendInCallerTransaction } = appendingStore(async () => undefined);
+      await append(new Date(0));
+      await append(new Date(0));
+      await append(new Date(0));
+      expect(sent.map((parameters) => parameters[4])).toEqual([
+        '1970-01-01T00:00:00.000Z',
+        null,
+        null,
+      ]);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(sent.at(-1)).toEqual(['notify']);
+      // A publish of deliveries due later wakes nobody.
+      await vi.advanceTimersByTimeAsync(100);
+      await append(new Date(60_000));
+      expect(sent.at(-1)![4]).toBeNull();
+      // A caller's own transaction always carries its notification, whatever was sent just before.
+      await append(new Date(0));
+      await appendInCallerTransaction(new Date(0));
+      expect(sent.slice(-2).map((parameters) => parameters[4])).toEqual([
+        '1970-01-01T00:00:00.000Z',
+        '1970-01-01T00:00:00.000Z',
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('notifies nothing with wakeUp poll', async () => {
+    vi.useFakeTimers();
+    try {
+      const { sent, append } = appendingStore(async () => undefined, { wakeUp: 'poll' });
+      await append(new Date(0));
+      await append(new Date(0));
+      await vi.advanceTimersByTimeAsync(50);
+      // One publishing statement per append, none with a notification time, and no trailing notification.
+      expect(sent).toHaveLength(2);
+      expect(sent.every((parameters) => parameters.at(-1) === null)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('logs a failed trailing notification and sends none after close', async () => {
+    vi.useFakeTimers();
+    try {
+      const failing = appendingStore(async () => {
+        throw new Error('gone');
+      });
+      await failing.append(new Date(0));
+      await failing.append(new Date(0));
+      await vi.advanceTimersByTimeAsync(10);
+      expect(failing.logger.error).toHaveBeenCalledWith(
+        expect.stringContaining(
+          '[PostgresEventStore](wakeAfterCommit) Waking the dispatchers failed',
+        ),
+      );
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+      const failingText = appendingStore(() => Promise.reject('text'));
+      await failingText.append(new Date(0));
+      await failingText.append(new Date(0));
+      await vi.advanceTimersByTimeAsync(10);
+      expect(failingText.logger.error).toHaveBeenCalledWith(expect.stringContaining('error=text'));
+
+      const closing = appendingStore(async () => undefined);
+      await closing.append(new Date(0));
+      await closing.append(new Date(0));
+      await closing.store.close();
+      await vi.advanceTimersByTimeAsync(50);
+      expect(closing.sent).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('sends no wake-up for a transaction that commits after close', async () => {
+    vi.useFakeTimers();
+    try {
+      const { store, sent, logger, entries, append } = appendingStore(async () => undefined);
+      await append(new Date(0));
+      let commit!: () => void;
+      const committing = new Promise<void>((resolve) => {
+        commit = resolve;
+      });
+      // Within the notification interval: this append leaves its wake-up for after the commit.
+      const open = store.transaction(async (transaction) => {
+        await store.append(transaction, entries(new Date(0)), new Date(0));
+        await committing;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await store.close();
+      commit();
+      await open;
+      await vi.advanceTimersByTimeAsync(50);
+      expect(sent.filter((parameters) => parameters[0] === 'notify')).toEqual([]);
+      expect(logger.error).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('sends no wake-up once the pool passed in is ending', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = {
+        query: vi.fn(async (statement: string | { text: string }) =>
+          typeof statement === 'string'
+            ? { rows: [] }
+            : { rows: [{ id: 'e', inserted: true, sequence: null, deliveries: 1 }] },
+        ),
+        release: vi.fn(),
+      };
+      const pool = {
+        on: vi.fn(),
+        connect: vi.fn(async () => client),
+        query: vi.fn(async () => {
+          throw new Error('Cannot use a pool after calling end on the pool');
+        }),
+        ending: false,
+      };
+      const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
+      const store = new PostgresEventStore({
+        pool: pool as unknown as Pool,
+        logger: logger as never,
+      });
+      const entry = {
+        event: {
+          id: 'e',
+          type: 't',
+          source: 's',
+          key: null,
+          payload: {},
+          headers: {},
+          correlationId: null,
+          causationId: null,
+          occurredAt: new Date(0),
+        },
+        deliveries: [{ id: 'd', handler: 'h', availableAt: new Date(0) }],
+      };
+      const append = () =>
+        store.transaction((transaction) => store.append(transaction, [entry], new Date(0)));
+      await append();
+      await append();
+      // The owner of the pool ends it without closing the store, while the wake-up is pending.
+      pool.ending = true;
+      await vi.advanceTimersByTimeAsync(50);
+      expect(pool.query).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

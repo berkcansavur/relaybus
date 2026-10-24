@@ -27,6 +27,7 @@ describe('claim under contention', () => {
         new PostgresEventStore({
           connectionString: database.connectionString,
           schema,
+          completionHistory: true,
           poolConfig: { max: 6 },
         }),
     );

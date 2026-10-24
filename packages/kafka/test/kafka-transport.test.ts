@@ -12,6 +12,9 @@ import {
   PublishTimeoutError,
   type InvalidMessagePolicy,
   UnencodableEventError,
+  fromHeader,
+  plainJsonDecoder,
+  type KafkaInboundRecord,
   type KafkaTransportOptions,
 } from '../src/index.js';
 import { EVENT_NAMES, FakeKafka, asIncoming, createEnvelope, createLogger } from './fakes.js';
@@ -884,5 +887,100 @@ describe('close', () => {
     consumer.disconnectError = new Error('consumer stuck');
     await expect(transport.close()).rejects.toThrow('consumer stuck');
     expect(producer.disconnected).toBe(true);
+  });
+});
+
+describe('inbound decoder', () => {
+  it('hands the decoder the record with its location and completes the decoded event', async () => {
+    const decode = vi.fn((record: KafkaInboundRecord) => ({
+      id: `custom-${record.offset}`,
+      type: 'order.placed.v1',
+      payload: JSON.parse(String(record.value)) as unknown,
+    }));
+    const { consumer, received } = await subscribed({ decode });
+    await consumer.deliver({
+      key: Buffer.from('k-1'),
+      value: Buffer.from('{"orderId":"5"}'),
+      headers: { origin: 'legacy' },
+      timestamp: '1767225600000',
+    });
+    expect(decode).toHaveBeenCalledWith({
+      topic: 'orders',
+      partition: 0,
+      offset: '7',
+      key: Buffer.from('k-1'),
+      value: Buffer.from('{"orderId":"5"}'),
+      headers: { origin: 'legacy' },
+      timestamp: '1767225600000',
+    });
+    expect(received).toEqual([
+      {
+        id: 'custom-7',
+        type: 'order.placed.v1',
+        source: 'orders',
+        key: 'k-1',
+        payload: { orderId: '5' },
+        headers: {},
+        correlationId: null,
+        causationId: null,
+        occurredAt: new Date(1767225600000),
+      },
+    ]);
+  });
+
+  it('decodes plain JSON records with plainJsonDecoder', async () => {
+    const { consumer, received } = await subscribed({
+      decode: plainJsonDecoder({ type: fromHeader('event-type') }),
+    });
+    await consumer.deliver({
+      value: Buffer.from('{"orderId":"5"}'),
+      headers: { 'event-type': Buffer.from('order.placed.v1') },
+      timestamp: '1767225600000',
+    });
+    expect(received[0]).toMatchObject({ id: 'kafka:orders:0:7', type: 'order.placed.v1' });
+  });
+
+  it('dead-letters a record whose custom decoder throws any error, and keeps consuming', async () => {
+    const { consumer, onMessage, producer, logger } = await subscribed({
+      decode: () => {
+        throw new TypeError('cannot read properties of undefined');
+      },
+    });
+    await consumer.deliver({ value: Buffer.from('garbage'), headers: { origin: 'legacy' } });
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(producer.sent).toHaveLength(1);
+    expect(producer.sent[0]!.topic).toBe('orders.dead');
+    expect(producer.sent[0]!.messages[0]!.headers).toMatchObject({
+      origin: 'legacy',
+      'relaybus-invalid-reason': 'cannot read properties of undefined',
+    });
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('Dead-lettered malformed message'),
+    );
+  });
+
+  it('applies the invalid-message policy to records plainJsonDecoder rejects', async () => {
+    const policy = vi.fn(async () => undefined);
+    const { consumer, onMessage } = await subscribed({
+      decode: plainJsonDecoder({ type: 'order.placed.v1' }),
+      onInvalidMessage: policy,
+    });
+    await consumer.deliver({ value: Buffer.from('not json') });
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(policy).toHaveBeenCalledWith(
+      expect.objectContaining({ offset: '7', reason: 'Message value is not valid JSON' }),
+    );
+  });
+
+  it('still rejects plain JSON by default, so the default stays strict binary mode', async () => {
+    const { consumer, onMessage, producer } = await subscribed();
+    await consumer.deliver({
+      value: Buffer.from('{"orderId":"5"}'),
+      headers: { 'event-type': Buffer.from('order.placed.v1') },
+    });
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(producer.sent[0]!.messages[0]!.headers['relaybus-invalid-reason']).toBe(
+      "ce_specversion must be '1.0'",
+    );
   });
 });
