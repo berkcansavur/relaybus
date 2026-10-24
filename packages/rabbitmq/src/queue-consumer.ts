@@ -60,6 +60,15 @@ export interface QueueConsumerSettings {
 
 type Settlement = 'ack' | 'requeue' | 'dead-letter';
 
+/** A message being processed, with the redelivery state its retries carry. */
+type ProcessedMessage = {
+  readonly channel: AmqpChannel;
+  readonly message: AmqpMessage;
+  readonly envelope: EventEnvelope;
+  redeliveries: number;
+  firstFailureAt: number | undefined;
+};
+
 /** A message to park in a retry queue, with the retry state its copy carries. */
 type RedeliverLaterInput = {
   readonly message: AmqpMessage;
@@ -197,76 +206,123 @@ export class QueueConsumer {
   }
 
   async #process(channel: AmqpChannel, message: AmqpMessage): Promise<void> {
-    const { queue, handlerRetry } = this.#settings;
-    let envelope: EventEnvelope;
-    try {
-      envelope = this.#settings.decode(withOriginalRoutingKey(message));
-    } catch (error) {
-      this.#settings.logger.error(
-        `[QueueConsumer](process) Dead-lettering malformed message | queue=${queue} routingKey=${message.fields.routingKey} ${describeError(error)}`,
-      );
-      await this.#deadLetter(channel, { message, reason: 'malformed message', error });
+    const decoded = await this.#decodeOrDeadLetter(channel, message);
+    if (decoded === undefined) {
       return;
     }
-    let redeliveries = readCounterHeader(message, REDELIVERIES_HEADER) ?? 0;
-    let firstFailureAt = readCounterHeader(message, FIRST_FAILURE_HEADER);
+    const { envelope } = decoded;
+    const delivery: ProcessedMessage = {
+      channel,
+      message,
+      envelope,
+      redeliveries: readCounterHeader(message, REDELIVERIES_HEADER) ?? 0,
+      firstFailureAt: readCounterHeader(message, FIRST_FAILURE_HEADER),
+    };
     for (let attempt = 1; ; attempt += 1) {
       try {
         await this.#settings.onMessage(envelope);
         this.#settle(channel, message, 'ack');
         return;
       } catch (error) {
-        const failure = `queue=${queue} eventId=${envelope.id} attempt=${attempt} ${describeError(error)}`;
-        if (!isRetryableError(handlerRetry, error)) {
-          this.#settings.logger.error(
-            `[QueueConsumer](process) Dead-lettering message the handler cannot process | ${failure}`,
-          );
-          await this.#deadLetter(channel, {
-            message,
-            reason: 'non-retryable handler error',
-            error,
-          });
-          return;
-        }
-        if (attempt < handlerRetry.attempts) {
-          const delayMs = computeRetryDelay(handlerRetry, attempt, this.#settings.random);
-          this.#settings.logger.warn(
-            `[QueueConsumer](process) Handler failed, retrying | ${failure} delayMs=${delayMs}`,
-          );
-          if (await this.#interrupted(delayMs)) {
-            this.#settle(channel, message, 'requeue');
-            return;
-          }
-          continue;
-        }
-        redeliveries += 1;
-        const now = Date.now();
-        firstFailureAt ??= now;
-        const delayMs = this.#redeliveryDelay(redeliveries);
-        if (now + delayMs - firstFailureAt > this.#settings.redeliveryMaxAgeMs) {
-          this.#settings.logger.error(
-            `[QueueConsumer](process) Dead-lettering message that kept failing | ${failure} redeliveries=${redeliveries - 1} failingForMs=${now - firstFailureAt} maxAgeMs=${this.#settings.redeliveryMaxAgeMs}`,
-          );
-          await this.#deadLetter(channel, {
-            message,
-            reason: 'redelivery window exhausted',
-            error,
-          });
-          return;
-        }
-        this.#settings.logger.warn(
-          `[QueueConsumer](process) Handler attempts spent, retrying later | ${failure} redeliveries=${redeliveries} delayMs=${delayMs}`,
-        );
-        if (!this.#settings.ordered) {
-          await this.#redeliverLater(channel, { message, delayMs, redeliveries, firstFailureAt });
-          return;
-        }
-        if (await this.#interrupted(delayMs)) {
-          this.#settle(channel, message, 'requeue');
+        if ((await this.#afterFailure(delivery, attempt, error)) === 'settled') {
           return;
         }
       }
     }
+  }
+
+  /** The event of `message`, or undefined after dead-lettering a message that is not one. */
+  async #decodeOrDeadLetter(
+    channel: AmqpChannel,
+    message: AmqpMessage,
+  ): Promise<{ readonly envelope: EventEnvelope } | undefined> {
+    try {
+      return { envelope: this.#settings.decode(withOriginalRoutingKey(message)) };
+    } catch (error) {
+      this.#settings.logger.error(
+        `[QueueConsumer](process) Dead-lettering malformed message | queue=${this.#settings.queue} routingKey=${message.fields.routingKey} ${describeError(error)}`,
+      );
+      await this.#deadLetter(channel, { message, reason: 'malformed message', error });
+      return undefined;
+    }
+  }
+
+  /**
+   * Decides what follows a failed attempt: dead-letter a non-retryable error, retry on the same
+   * delivery while local attempts remain, else redeliver later. `retry` runs the handler again.
+   */
+  async #afterFailure(
+    delivery: ProcessedMessage,
+    attempt: number,
+    error: unknown,
+  ): Promise<'retry' | 'settled'> {
+    const { channel, message, envelope } = delivery;
+    const { queue, handlerRetry } = this.#settings;
+    const failure = `queue=${queue} eventId=${envelope.id} attempt=${attempt} ${describeError(error)}`;
+    if (!isRetryableError(handlerRetry, error)) {
+      this.#settings.logger.error(
+        `[QueueConsumer](process) Dead-lettering message the handler cannot process | ${failure}`,
+      );
+      await this.#deadLetter(channel, {
+        message,
+        reason: 'non-retryable handler error',
+        error,
+      });
+      return 'settled';
+    }
+    if (attempt < handlerRetry.attempts) {
+      const delayMs = computeRetryDelay(handlerRetry, attempt, this.#settings.random);
+      this.#settings.logger.warn(
+        `[QueueConsumer](process) Handler failed, retrying | ${failure} delayMs=${delayMs}`,
+      );
+      return this.#waitOrRequeue(delivery, delayMs);
+    }
+    return this.#afterSpentAttempts(delivery, failure, error);
+  }
+
+  /**
+   * The local attempts are spent: dead-letter a message that kept failing past `redeliveryMaxAgeMs`,
+   * else park it in a retry queue, or, when ordered, wait and retry it in place.
+   */
+  async #afterSpentAttempts(
+    delivery: ProcessedMessage,
+    failure: string,
+    error: unknown,
+  ): Promise<'retry' | 'settled'> {
+    const { channel, message } = delivery;
+    delivery.redeliveries += 1;
+    const now = Date.now();
+    delivery.firstFailureAt ??= now;
+    const { redeliveries, firstFailureAt } = delivery;
+    const delayMs = this.#redeliveryDelay(redeliveries);
+    if (now + delayMs - firstFailureAt > this.#settings.redeliveryMaxAgeMs) {
+      this.#settings.logger.error(
+        `[QueueConsumer](process) Dead-lettering message that kept failing | ${failure} redeliveries=${redeliveries - 1} failingForMs=${now - firstFailureAt} maxAgeMs=${this.#settings.redeliveryMaxAgeMs}`,
+      );
+      await this.#deadLetter(channel, {
+        message,
+        reason: 'redelivery window exhausted',
+        error,
+      });
+      return 'settled';
+    }
+    this.#settings.logger.warn(
+      `[QueueConsumer](process) Handler attempts spent, retrying later | ${failure} redeliveries=${redeliveries} delayMs=${delayMs}`,
+    );
+    if (!this.#settings.ordered) {
+      await this.#redeliverLater(channel, { message, delayMs, redeliveries, firstFailureAt });
+      return 'settled';
+    }
+    return this.#waitOrRequeue(delivery, delayMs);
+  }
+
+  /** Waits `delayMs` before the next attempt; requeues instead when the consumer stops meanwhile. */
+  async #waitOrRequeue(delivery: ProcessedMessage, delayMs: number): Promise<'retry' | 'settled'> {
+    if (await this.#interrupted(delayMs)) {
+      this.#settle(delivery.channel, delivery.message, 'requeue');
+      return 'settled';
+    }
+    return 'retry';
   }
 
   /** The backoff before the next delayed redelivery: a retry queue's TTL, or an exact wait when ordered. */

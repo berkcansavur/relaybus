@@ -206,6 +206,21 @@ const DEFAULT_RECONNECT: RetryPolicy = {
 
 /** Validates the options and applies defaults. Throws `ConfigurationError`. */
 export function resolveSettings(options: RabbitMqTransportOptions): ResolvedTransportSettings {
+  const basics = resolveBasics(options);
+  return {
+    ...resolveTopology(options, basics),
+    ...resolveRetries(options, basics),
+    ...resolveRuntime(options, basics),
+  };
+}
+
+/** The settings the others depend on, checked first: exchange, connect behaviour, ordering, prefetch, redelivery. */
+type BasicSettings = Pick<
+  ResolvedTransportSettings,
+  'exchange' | 'failOnConnectError' | 'ordered' | 'prefetch' | 'redelivery'
+>;
+
+function resolveBasics(options: RabbitMqTransportOptions): BasicSettings {
   const exchange = nonEmpty(options.exchange ?? 'relaybus', 'exchange');
   const failOnConnectError = options.failOnConnectError ?? true;
   if (!failOnConnectError && options.reconnect === false) {
@@ -219,6 +234,26 @@ export function resolveSettings(options: RabbitMqTransportOptions): ResolvedTran
     throw new ConfigurationError(`ordered consumption needs prefetch 1, received ${prefetch}`);
   }
   const redelivery = createRetryPolicy(options.redelivery, DEFAULT_REDELIVERY);
+  return { exchange, failOnConnectError, ordered, prefetch, redelivery };
+}
+
+/** Names, connection, exchanges and queues. */
+function resolveTopology(
+  options: RabbitMqTransportOptions,
+  { exchange, prefetch }: BasicSettings,
+): Pick<
+  ResolvedTransportSettings,
+  | 'name'
+  | 'connect'
+  | 'exchange'
+  | 'prefetch'
+  | 'queuePrefix'
+  | 'consumerGroup'
+  | 'queue'
+  | 'deadLetterExchange'
+  | 'deadLetterQueue'
+  | 'deliveryLimit'
+> {
   return {
     name: nonEmpty(options.name ?? 'rabbitmq', 'name'),
     connect: resolveConnect(options),
@@ -233,6 +268,18 @@ export function resolveSettings(options: RabbitMqTransportOptions): ResolvedTran
     ),
     deadLetterQueue: optionalNonEmpty(options.deadLetterQueue, 'deadLetterQueue'),
     deliveryLimit: assertPositiveInteger(options.deliveryLimit ?? 10, 'deliveryLimit'),
+  };
+}
+
+/** Handler retries, delayed redelivery and its retry queues. */
+function resolveRetries(
+  options: RabbitMqTransportOptions,
+  { ordered, redelivery }: BasicSettings,
+): Pick<
+  ResolvedTransportSettings,
+  'handlerRetry' | 'redelivery' | 'retryLadder' | 'redeliveryMaxAgeMs' | 'ordered'
+> {
+  return {
     handlerRetry: createRetryPolicy(options.handlerRetry, DEFAULT_HANDLER_RETRY),
     redelivery,
     retryLadder: ordered ? [] : buildRetryLadder(redelivery),
@@ -241,6 +288,25 @@ export function resolveSettings(options: RabbitMqTransportOptions): ResolvedTran
       'redelivery.maxAge',
     ),
     ordered,
+  };
+}
+
+/** Reconnection, timeouts, decoding and the injected logger and randomness. */
+function resolveRuntime(
+  options: RabbitMqTransportOptions,
+  { failOnConnectError }: BasicSettings,
+): Pick<
+  ResolvedTransportSettings,
+  | 'reconnect'
+  | 'failOnConnectError'
+  | 'allowUnroutable'
+  | 'publishTimeoutMs'
+  | 'shutdownTimeoutMs'
+  | 'decode'
+  | 'logger'
+  | 'random'
+> {
+  return {
     reconnect: resolveReconnect(options.reconnect),
     failOnConnectError,
     allowUnroutable: options.allowUnroutable ?? false,
