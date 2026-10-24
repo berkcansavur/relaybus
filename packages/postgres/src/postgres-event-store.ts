@@ -430,7 +430,7 @@ function connect<TTransaction>(
     const poolLogger = options.logger ?? console;
     pool.on('error', (error) => {
       poolLogger.error(
-        `[PostgresEventStore](constructor) Idle connection failed, the pool replaces it | error=${error.message}`,
+        `[PostgresEventStore](connect) Idle connection failed, the pool replaces it | error=${error.message}`,
       );
     });
     ownedPool = pool;

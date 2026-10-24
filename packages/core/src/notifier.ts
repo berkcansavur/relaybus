@@ -64,7 +64,7 @@ export class Notifier {
   #logObserverFailure(error: unknown): void {
     const errorInfo = toErrorInfo(error);
     this.#logger.warn(
-      `[Notifier](notify) relaybus observer threw | ${errorInfo.name}: ${errorInfo.message}`,
+      `[Notifier](logObserverFailure) relaybus observer threw | ${errorInfo.name}: ${errorInfo.message}`,
     );
   }
 }

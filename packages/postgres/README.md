@@ -97,7 +97,7 @@ against a fake client only. Prisma interactive transactions default to a 5 s tim
 | `wakeUp`                                 | `'notify'`            | `'notify'`: coalesced `NOTIFY` + `LISTEN` wake other processes. `'poll'`: no notifications, other processes poll.  |
 
 **Pool errors.** A pool created from `connectionString` gets an `error` listener that logs through `logger`
-(`[PostgresEventStore](constructor) Idle connection failed ...`); `pg` then replaces the dead connection, so a failover
+(`[PostgresEventStore](connect) Idle connection failed ...`); `pg` then replaces the dead connection, so a failover
 or `pg_terminate_backend` of an idle connection does not crash the process. A `pool` you pass in is yours: attach
 `pool.on('error', ...)` to it yourself, because without a listener `pg` re-throws the error as an uncaught exception.
 

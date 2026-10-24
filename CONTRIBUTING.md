@@ -84,6 +84,13 @@ Scope: `core`, `nestjs`, `kafka`, `rabbitmq` and the `testing` helpers (`fake-cl
 
 Thresholds (break, low, high) are in `stryker.config.json`. The break threshold sits a few points under the score the current tests achieve (about 90) and must never drop below 75; raise it when the score improves.
 
+## Log lines
+
+Every log line starts with `[ClassName](methodName) message`, naming the class and method the call is
+written in (`#` dropped; outside a class, the module's main class and the enclosing function), followed
+by `| key=value` fields. The `relaybus/log-prefix` lint rule (`eslint-rules/log-prefix.js`) enforces it,
+so a log moved into another method must be renamed with it.
+
 ## Commit and PR conventions
 
 Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages and PR titles:

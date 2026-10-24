@@ -558,7 +558,7 @@ describe('failures during a claim', () => {
     expect(await deliveries.countDocuments({ lane: 'parked' })).toBe(0);
     expect(warnings).toEqual([
       expect.stringMatching(
-        /^\[MongoEventStore\]\(parkWaiting\) Parking waiting deliveries failed, a later claim parks them \| count=40 \| error=Error: connection lost$/,
+        /^\[MongoOrdering\]\(parkWaiting\) Parking waiting deliveries failed, a later claim parks them \| count=40 \| error=Error: connection lost$/,
       ),
     ]);
     expect(await claim(store, ['h'], 'worker-1', at(2))).toEqual([]);

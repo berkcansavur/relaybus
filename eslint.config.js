@@ -1,5 +1,6 @@
 import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
+import logPrefix from './eslint-rules/log-prefix.js';
 
 export default tseslint.config(
   {
@@ -30,6 +31,12 @@ export default tseslint.config(
     },
   },
   {
+    // Owner's logging rule: a log line names the class and method it is written in.
+    files: ['packages/*/src/**/*.ts'],
+    plugins: { relaybus: { rules: { 'log-prefix': logPrefix } } },
+    rules: { 'relaybus/log-prefix': 'error' },
+  },
+  {
     files: ['packages/*/test/**/*.ts'],
     rules: {
       '@typescript-eslint/no-unsafe-assignment': 'off',
@@ -41,12 +48,18 @@ export default tseslint.config(
     },
   },
   {
-    files: ['*.js', '*.config.ts', 'tsup.base.ts', 'packages/*/tsup.config.ts'],
+    files: [
+      '*.js',
+      'eslint-rules/**/*.js',
+      '*.config.ts',
+      'tsup.base.ts',
+      'packages/*/tsup.config.ts',
+    ],
     ...tseslint.configs.disableTypeChecked,
   },
   {
     // Release tooling: plain Node ESM, outside the TypeScript project.
-    files: ['*.mjs', 'scripts/**/*.mjs', 'docs-site/**/*.mjs'],
+    files: ['*.mjs', 'scripts/**/*.mjs', 'docs-site/**/*.mjs', 'eslint-rules/**/*.mjs'],
     ...tseslint.configs.disableTypeChecked,
     languageOptions: {
       ...tseslint.configs.disableTypeChecked.languageOptions,

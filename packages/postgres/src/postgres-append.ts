@@ -148,7 +148,7 @@ export class PostgresAppend<TTransaction> {
         this.#state.lastNotificationAt = Date.now();
         this.#state.query(this.#state.statements.append.notify, []).catch((error: unknown) => {
           this.#state.logger.error(
-            `[PostgresEventStore](wakeAfterCommit) Waking the dispatchers failed, they find the deliveries when they poll | error=${error instanceof Error ? error.message : String(error)}`,
+            `[PostgresAppend](wakeAfterCommit) Waking the dispatchers failed, they find the deliveries when they poll | error=${error instanceof Error ? error.message : String(error)}`,
           );
         });
       },

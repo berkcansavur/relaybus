@@ -675,7 +675,7 @@ describe('a claim that needs more than the lanes it holds', () => {
     const claimed = await claim(store, ['h2', 'h3'], 'worker-1', at(1), 10);
     expect(claimed.map((delivery) => delivery.handler).sort()).toEqual(['h2', 'h3']);
     expect(errors).toEqual([
-      expect.stringContaining('[PostgresEventStore](claim) Taking more lanes failed'),
+      expect.stringContaining('[PostgresClaims](claimMoreLanes) Taking more lanes failed'),
     ]);
     await expect(claim(store, ['h1'], 'worker-2', at(2), 10)).rejects.toThrow('take failed');
     // A failure that is not an Error is reported by its text.

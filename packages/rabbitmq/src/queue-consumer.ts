@@ -240,7 +240,7 @@ export class QueueConsumer {
       return { envelope: this.#settings.decode(withOriginalRoutingKey(message)) };
     } catch (error) {
       this.#settings.logger.error(
-        `[QueueConsumer](process) Dead-lettering malformed message | queue=${this.#settings.queue} routingKey=${message.fields.routingKey} ${describeError(error)}`,
+        `[QueueConsumer](decodeOrDeadLetter) Dead-lettering malformed message | queue=${this.#settings.queue} routingKey=${message.fields.routingKey} ${describeError(error)}`,
       );
       await this.#deadLetter(channel, { message, reason: 'malformed message', error });
       return undefined;
@@ -261,7 +261,7 @@ export class QueueConsumer {
     const failure = `queue=${queue} eventId=${envelope.id} attempt=${attempt} ${describeError(error)}`;
     if (!isRetryableError(handlerRetry, error)) {
       this.#settings.logger.error(
-        `[QueueConsumer](process) Dead-lettering message the handler cannot process | ${failure}`,
+        `[QueueConsumer](afterFailure) Dead-lettering message the handler cannot process | ${failure}`,
       );
       await this.#deadLetter(channel, {
         message,
@@ -273,7 +273,7 @@ export class QueueConsumer {
     if (attempt < handlerRetry.attempts) {
       const delayMs = computeRetryDelay(handlerRetry, attempt, this.#settings.random);
       this.#settings.logger.warn(
-        `[QueueConsumer](process) Handler failed, retrying | ${failure} delayMs=${delayMs}`,
+        `[QueueConsumer](afterFailure) Handler failed, retrying | ${failure} delayMs=${delayMs}`,
       );
       return this.#waitOrRequeue(delivery, delayMs);
     }
@@ -297,7 +297,7 @@ export class QueueConsumer {
     const delayMs = this.#redeliveryDelay(redeliveries);
     if (now + delayMs - firstFailureAt > this.#settings.redeliveryMaxAgeMs) {
       this.#settings.logger.error(
-        `[QueueConsumer](process) Dead-lettering message that kept failing | ${failure} redeliveries=${redeliveries - 1} failingForMs=${now - firstFailureAt} maxAgeMs=${this.#settings.redeliveryMaxAgeMs}`,
+        `[QueueConsumer](afterSpentAttempts) Dead-lettering message that kept failing | ${failure} redeliveries=${redeliveries - 1} failingForMs=${now - firstFailureAt} maxAgeMs=${this.#settings.redeliveryMaxAgeMs}`,
       );
       await this.#deadLetter(channel, {
         message,
@@ -307,7 +307,7 @@ export class QueueConsumer {
       return 'settled';
     }
     this.#settings.logger.warn(
-      `[QueueConsumer](process) Handler attempts spent, retrying later | ${failure} redeliveries=${redeliveries} delayMs=${delayMs}`,
+      `[QueueConsumer](afterSpentAttempts) Handler attempts spent, retrying later | ${failure} redeliveries=${redeliveries} delayMs=${delayMs}`,
     );
     if (!this.#settings.ordered) {
       await this.#redeliverLater(channel, { message, delayMs, redeliveries, firstFailureAt });

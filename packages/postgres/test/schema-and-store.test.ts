@@ -442,9 +442,7 @@ describe('wake-up notifications', () => {
       await failing.append(new Date(0));
       await vi.advanceTimersByTimeAsync(10);
       expect(failing.logger.error).toHaveBeenCalledWith(
-        expect.stringContaining(
-          '[PostgresEventStore](wakeAfterCommit) Waking the dispatchers failed',
-        ),
+        expect.stringContaining('[PostgresAppend](wakeAfterCommit) Waking the dispatchers failed'),
       );
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
       const failingText = appendingStore(() => Promise.reject('text'));

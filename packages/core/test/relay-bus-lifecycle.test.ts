@@ -45,7 +45,7 @@ describe('lifecycle', () => {
     expect(setup).toHaveBeenCalledTimes(1);
     expect(transport.connected).toBe(true);
     expect(logger.log).toHaveBeenCalledWith(
-      '[RelayBus](start) relaybus started | handlers=1 dispatcher=true',
+      '[RelayBus](startComponents) relaybus started | handlers=1 dispatcher=true',
     );
     await bus.publish(new OrderPlaced({ orderId: '1' }));
     await waitFor(() => handled.mock.calls.length === 1);
@@ -411,12 +411,12 @@ describe('observers', () => {
       error: expect.objectContaining({ message: 'metrics backend down' }),
     });
     expect(logger.warn).toHaveBeenCalledWith(
-      '[Notifier](notify) relaybus observer threw | Error: metrics backend down',
+      '[Notifier](logObserverFailure) relaybus observer threw | Error: metrics backend down',
     );
     vi.spyOn(store, 'purge').mockRejectedValue(new Error('locked'));
     await expect(busWithFailing.purgeExpired()).rejects.toThrow('locked');
     expect(logger.warn).toHaveBeenCalledWith(
-      '[Notifier](notify) relaybus observer threw | Error: failure hook broken',
+      '[Notifier](logObserverFailure) relaybus observer threw | Error: failure hook broken',
     );
     expect(logger.error).toHaveBeenCalledWith(
       '[Notifier](failure) relaybus purge failed | Error: locked',
@@ -442,7 +442,7 @@ describe('observers', () => {
     bus.subscribe(OrderPlaced, () => undefined, { id: 'h' });
     await bus.publish(new OrderPlaced({ orderId: '1' }));
     expect(logger.warn).toHaveBeenCalledWith(
-      '[Notifier](notify) relaybus observer threw | Error: second',
+      '[Notifier](logObserverFailure) relaybus observer threw | Error: second',
     );
   });
 

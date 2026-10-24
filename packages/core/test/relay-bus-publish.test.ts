@@ -224,7 +224,7 @@ describe('RelayBus.publish', () => {
     const envelope = await bus.publish(new OrderPlaced({ orderId: '1' }));
     expect(envelope.type).toBe('order.placed.v1');
     expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining('[RelayBus](publish) No handler or route for event type'),
+      expect.stringContaining('[RelayBus](reportUnrouted) No handler or route for event type'),
     );
     expect(observer.onPublished).not.toHaveBeenCalled();
     expect(await bus.listDeliveries()).toEqual([]);

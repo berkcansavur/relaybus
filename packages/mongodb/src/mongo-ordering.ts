@@ -153,7 +153,7 @@ export class MongoOrdering {
       await this.#parkDeliveries(deliveryIds);
     } catch (error) {
       this.#state.logger.warn(
-        `[MongoEventStore](parkWaiting) Parking waiting deliveries failed, a later claim parks them | count=${deliveryIds.length} | error=${String(error)}`,
+        `[MongoOrdering](parkWaiting) Parking waiting deliveries failed, a later claim parks them | count=${deliveryIds.length} | error=${String(error)}`,
       );
     }
   }

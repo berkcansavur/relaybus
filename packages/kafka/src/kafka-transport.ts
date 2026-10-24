@@ -548,12 +548,12 @@ export class KafkaTransport implements Transport {
         if (attempt >= maxAttempts || this.#state === 'closed') {
           this.#stalledPartitions.add(partitionKey);
           this.#logger.error(
-            `[KafkaTransport](${method}) Giving up for now, the record stays uncommitted and will be redelivered | ${location} attempts=${attempt} error=${reason}`,
+            `[KafkaTransport](withRetries) Giving up for now, the record stays uncommitted and will be redelivered | operation=${method} ${location} attempts=${attempt} error=${reason}`,
           );
           throw toHandlerFailure(error);
         }
         this.#logger.warn(
-          `[KafkaTransport](${method}) Attempt failed, retrying | ${location} attempt=${attempt} error=${reason}`,
+          `[KafkaTransport](withRetries) Attempt failed, retrying | operation=${method} ${location} attempt=${attempt} error=${reason}`,
         );
         await this.#sleepWithHeartbeats(
           Math.min(initialBackoffMs * 2 ** (attempt - 1), maxBackoffMs),

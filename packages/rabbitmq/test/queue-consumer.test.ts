@@ -123,7 +123,7 @@ describe('QueueConsumer', () => {
     expect(republish).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining(
-        '[QueueConsumer](process) Handler failed, retrying | queue=relaybus.billing',
+        '[QueueConsumer](afterFailure) Handler failed, retrying | queue=relaybus.billing',
       ),
     );
   });
@@ -323,7 +323,7 @@ describe('QueueConsumer', () => {
         'malformed message',
       );
       expect(logger.error).toHaveBeenCalledWith(
-        '[QueueConsumer](process) Dead-lettering malformed message | queue=relaybus.billing routingKey=order.placed.v1 error=Message body is not valid JSON errorName=MalformedMessageError code=RELAYBUS_RABBITMQ_MALFORMED_MESSAGE',
+        '[QueueConsumer](decodeOrDeadLetter) Dead-lettering malformed message | queue=relaybus.billing routingKey=order.placed.v1 error=Message body is not valid JSON errorName=MalformedMessageError code=RELAYBUS_RABBITMQ_MALFORMED_MESSAGE',
       );
       expect(republish.mock.calls[0]![3].headers).toMatchObject({
         [DEAD_LETTER_ERROR_NAME_HEADER]: 'MalformedMessageError',

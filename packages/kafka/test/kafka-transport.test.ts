@@ -383,7 +383,7 @@ describe('inbound processing', () => {
     expect(logger.warn).toHaveBeenCalledTimes(2);
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining(
-        '[KafkaTransport](deliver) Attempt failed, retrying | topic=orders partition=0 offset=7 attempt=1 error=db down',
+        '[KafkaTransport](withRetries) Attempt failed, retrying | operation=deliver topic=orders partition=0 offset=7 attempt=1 error=db down',
       ),
     );
   });

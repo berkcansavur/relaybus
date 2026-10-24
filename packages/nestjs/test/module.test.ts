@@ -63,7 +63,9 @@ describe('RelayBusModule.forRoot', () => {
       await createApplication({ imports: [relayBusRoot()] }, false),
     );
 
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('[RelayBus](start) relaybus started'));
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining('[RelayBus](startComponents) relaybus started'),
+    );
     const contexts = log.mock.contexts as Logger[];
     expect(
       contexts.some((logger) => (logger as unknown as { context: string }).context === 'RelayBus'),

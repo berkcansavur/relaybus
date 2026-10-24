@@ -166,7 +166,7 @@ export class ConnectionSupervisor {
     for (let attempt = 1; !this.#closed; attempt += 1) {
       const delayMs = computeRetryDelay(policy, attempt, this.#settings.random);
       this.#settings.logger.log(
-        `[ConnectionSupervisor](reconnect) Reconnecting | attempt=${attempt} delayMs=${delayMs}`,
+        `[ConnectionSupervisor](reconnectUntilConnected) Reconnecting | attempt=${attempt} delayMs=${delayMs}`,
       );
       await abortableSleep(delayMs, this.#stop.signal);
       if (this.#closed) {
@@ -175,12 +175,12 @@ export class ConnectionSupervisor {
       try {
         await this.#establish();
         this.#settings.logger.log(
-          `[ConnectionSupervisor](reconnect) Reconnected | attempt=${attempt}`,
+          `[ConnectionSupervisor](reconnectUntilConnected) Reconnected | attempt=${attempt}`,
         );
         return;
       } catch (error) {
         this.#settings.logger.warn(
-          `[ConnectionSupervisor](reconnect) Attempt failed | attempt=${attempt} error=${toErrorInfo(error).message}`,
+          `[ConnectionSupervisor](reconnectUntilConnected) Attempt failed | attempt=${attempt} error=${toErrorInfo(error).message}`,
         );
       }
     }

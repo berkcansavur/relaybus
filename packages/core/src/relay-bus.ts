@@ -661,7 +661,7 @@ export class RelayBus<TTransaction = unknown> {
     }
     this.#state = 'running';
     this.#logger.log(
-      `[RelayBus](start) relaybus started | handlers=${this.#registry.all().length} dispatcher=${this.#dispatcherEnabled}`,
+      `[RelayBus](startComponents) relaybus started | handlers=${this.#registry.all().length} dispatcher=${this.#dispatcherEnabled}`,
     );
   }
 
@@ -750,7 +750,7 @@ export class RelayBus<TTransaction = unknown> {
     if (this.#unroutedEvents === 'throw') {
       throw new ConfigurationError(message);
     }
-    this.#logger.warn(`[RelayBus](publish) ${message}`);
+    this.#logger.warn(`[RelayBus](reportUnrouted) ${message}`);
   }
 
   async #appendInTransaction(

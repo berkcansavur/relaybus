@@ -116,7 +116,7 @@ export class PostgresClaims<TTransaction> {
         throw error;
       }
       this.#state.logger.error(
-        `[PostgresEventStore](claim) Claiming from free lanes failed, returning the deliveries already claimed | claimed=${claimed.length} | error=${error instanceof Error ? error.message : String(error)}`,
+        `[PostgresClaims](claimFreeLanesAfterHeld) Claiming from free lanes failed, returning the deliveries already claimed | claimed=${claimed.length} | error=${error instanceof Error ? error.message : String(error)}`,
       );
       return undefined;
     }
@@ -136,7 +136,7 @@ export class PostgresClaims<TTransaction> {
         throw error;
       }
       this.#state.logger.error(
-        `[PostgresEventStore](claim) Taking more lanes failed, returning the deliveries already claimed | claimed=${claimed.length} | error=${error instanceof Error ? error.message : String(error)}`,
+        `[PostgresClaims](claimMoreLanes) Taking more lanes failed, returning the deliveries already claimed | claimed=${claimed.length} | error=${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -309,7 +309,7 @@ export class PostgresClaims<TTransaction> {
     } catch (error) {
       this.#state.unreconciled.add(leaseOwner);
       this.#state.logger.error(
-        `[PostgresEventStore](reconcile) Giving back unreturned deliveries failed, it is retried before the next claim | owner=${leaseOwner} | error=${error instanceof Error ? error.message : String(error)}`,
+        `[PostgresClaims](reconcile) Giving back unreturned deliveries failed, it is retried before the next claim | owner=${leaseOwner} | error=${error instanceof Error ? error.message : String(error)}`,
       );
       return false;
     }

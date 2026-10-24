@@ -498,7 +498,9 @@ describe('claims of an owner draining its held lanes', () => {
     expect(third).toHaveLength(1);
     expect(state).toMatchObject({ fullClaims: 3, heldClaims: 1 });
     expect(errors).toEqual([
-      expect.stringContaining('[PostgresEventStore](claim) Claiming from free lanes failed'),
+      expect.stringContaining(
+        '[PostgresClaims](claimFreeLanesAfterHeld) Claiming from free lanes failed',
+      ),
     ]);
     expect(await store.complete(third[0]!, NOW)).toBe(true);
     // Short of the limit, so not draining; the next claim fills from the held lane and is again.
