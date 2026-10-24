@@ -17,3 +17,4 @@ export {
   type PostgresPoolOptions,
   type PostgresWakeUp,
 } from './postgres-event-store.js';
+export { ReconcileFailedError } from './errors.js';

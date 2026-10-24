@@ -267,9 +267,12 @@ describe('subscribe', () => {
   it('fails start-up when the group is not joined in time', async () => {
     const { transport, consumer } = setup({ startupTimeout: 5 });
     consumer.emitOnRun = undefined;
-    await expect(transport.subscribe(['orders'], async () => undefined)).rejects.toThrow(
-      /did not join group 'billing' within 5ms/,
-    );
+    const subscription = transport.subscribe(['orders'], async () => undefined);
+    await expect(subscription).rejects.toThrow(/did not join group 'billing' within 5ms/);
+    await expect(subscription).rejects.toMatchObject({
+      name: 'GroupJoinTimeoutError',
+      code: 'RELAYBUS_KAFKA_GROUP_JOIN_TIMEOUT',
+    });
   });
 
   it.each([
@@ -865,9 +868,14 @@ describe('close', () => {
     consumer.emitOnRun = undefined;
     const pending = transport.subscribe(['orders'], async () => undefined);
     const assertion = expect(pending).rejects.toThrow(/is closed/);
+    const closed = expect(pending).rejects.toMatchObject({
+      name: 'TransportClosedError',
+      code: 'RELAYBUS_KAFKA_TRANSPORT_CLOSED',
+    });
     await new Promise((resolve) => setTimeout(resolve, 5));
     await transport.close();
     await assertion;
+    await closed;
   });
 
   it('closes while a producer connect is failing, and still closes the consumer', async () => {
@@ -981,6 +989,62 @@ describe('inbound decoder', () => {
     expect(onMessage).not.toHaveBeenCalled();
     expect(producer.sent[0]!.messages[0]!.headers['relaybus-invalid-reason']).toBe(
       "ce_specversion must be '1.0'",
+    );
+  });
+});
+
+describe('error name and code of invalid records', () => {
+  const invalid = { key: Buffer.from('k'), value: Buffer.from('{nope'), offset: '9' };
+
+  it('adds the error name and code to the dead letter and its log, keeping the reason', async () => {
+    const { consumer, producer, logger } = await subscribed();
+    await consumer.deliver(invalid);
+    expect(producer.sent[0]!.messages[0]!.headers).toMatchObject({
+      'relaybus-invalid-reason': expect.stringContaining('ce_specversion'),
+      'relaybus-error-name': 'InvalidKafkaMessageError',
+      'relaybus-error-code': 'RELAYBUS_KAFKA_INVALID_MESSAGE',
+    });
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /Dead-lettered malformed message \| .* errorName=InvalidKafkaMessageError code=RELAYBUS_KAFKA_INVALID_MESSAGE$/,
+      ),
+    );
+  });
+
+  it('names an event the bus rejected for good', async () => {
+    const { consumer, onMessage, producer } = await subscribed();
+    onMessage.mockRejectedValueOnce(new EventValidationError('schema mismatch', []));
+    await consumer.deliver(asIncoming(createEnvelope()));
+    expect(producer.sent[0]!.messages[0]!.headers).toMatchObject({
+      'relaybus-invalid-reason': 'schema mismatch',
+      'relaybus-error-name': 'EventValidationError',
+      'relaybus-error-code': 'RELAYBUS_EVENT_VALIDATION',
+    });
+  });
+
+  it('gives an error without a code only its name and drops a stale code header', async () => {
+    const { consumer, producer, logger } = await subscribed({
+      decode: () => {
+        throw new TypeError('cannot read properties of undefined');
+      },
+    });
+    await consumer.deliver({
+      value: Buffer.from('garbage'),
+      headers: { 'relaybus-error-code': 'STALE', 'relaybus-error-name': 'Stale' },
+    });
+    const { headers } = producer.sent[0]!.messages[0]!;
+    expect(headers['relaybus-error-name']).toBe('TypeError');
+    expect(headers).not.toHaveProperty('relaybus-error-code');
+    expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/ errorName=TypeError$/));
+  });
+
+  it('logs the error name and code of a skipped record', async () => {
+    const { consumer, logger } = await subscribed({ onInvalidMessage: 'skip' });
+    await consumer.deliver(invalid);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /Skipping malformed message \| .* errorName=InvalidKafkaMessageError code=RELAYBUS_KAFKA_INVALID_MESSAGE$/,
+      ),
     );
   });
 });

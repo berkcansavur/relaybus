@@ -11,6 +11,8 @@ import { abortableSleep } from './abortable-sleep.js';
 import type { AmqpChannel, AmqpMessage, AmqpPublishOptions } from './amqp-types.js';
 import { RabbitMqUnavailableError } from './errors.js';
 import {
+  DEAD_LETTER_ERROR_CODE_HEADER,
+  DEAD_LETTER_ERROR_NAME_HEADER,
   DEAD_LETTER_REASON_HEADER,
   FIRST_FAILURE_HEADER,
   ORIGINAL_ROUTING_KEY_HEADER,
@@ -186,9 +188,9 @@ export class QueueConsumer {
       envelope = this.#settings.decode(withOriginalRoutingKey(message));
     } catch (error) {
       this.#settings.logger.error(
-        `[QueueConsumer](process) Dead-lettering malformed message | queue=${queue} routingKey=${message.fields.routingKey} error=${toErrorInfo(error).message}`,
+        `[QueueConsumer](process) Dead-lettering malformed message | queue=${queue} routingKey=${message.fields.routingKey} ${describeError(error)}`,
       );
-      await this.#deadLetter(channel, message, 'malformed message');
+      await this.#deadLetter(channel, message, 'malformed message', error);
       return;
     }
     let redeliveries = readCounterHeader(message, REDELIVERIES_HEADER) ?? 0;
@@ -199,12 +201,12 @@ export class QueueConsumer {
         this.#settle(channel, message, 'ack');
         return;
       } catch (error) {
-        const failure = `queue=${queue} eventId=${envelope.id} attempt=${attempt} error=${toErrorInfo(error).message}`;
+        const failure = `queue=${queue} eventId=${envelope.id} attempt=${attempt} ${describeError(error)}`;
         if (!isRetryableError(handlerRetry, error)) {
           this.#settings.logger.error(
             `[QueueConsumer](process) Dead-lettering message the handler cannot process | ${failure}`,
           );
-          await this.#deadLetter(channel, message, 'non-retryable handler error');
+          await this.#deadLetter(channel, message, 'non-retryable handler error', error);
           return;
         }
         if (attempt < handlerRetry.attempts) {
@@ -226,7 +228,7 @@ export class QueueConsumer {
           this.#settings.logger.error(
             `[QueueConsumer](process) Dead-lettering message that kept failing | ${failure} redeliveries=${redeliveries - 1} failingForMs=${now - firstFailureAt} maxAgeMs=${this.#settings.redeliveryMaxAgeMs}`,
           );
-          await this.#deadLetter(channel, message, 'redelivery window exhausted');
+          await this.#deadLetter(channel, message, 'redelivery window exhausted', error);
           return;
         }
         this.#settings.logger.warn(
@@ -299,9 +301,17 @@ export class QueueConsumer {
    * message is rejected without requeue, which makes the broker dead-letter it
    * (at-least-once), so it still ends up in the dead-letter queue.
    */
-  async #deadLetter(channel: AmqpChannel, message: AmqpMessage, reason: string): Promise<void> {
+  async #deadLetter(
+    channel: AmqpChannel,
+    message: AmqpMessage,
+    reason: string,
+    error: unknown,
+  ): Promise<void> {
+    const { name, code } = toErrorInfo(error);
     const { content, options } = copyForRepublish(message, {
       [DEAD_LETTER_REASON_HEADER]: reason,
+      [DEAD_LETTER_ERROR_NAME_HEADER]: name,
+      ...(code === undefined ? {} : { [DEAD_LETTER_ERROR_CODE_HEADER]: code }),
     });
     try {
       await this.#settings.republish(
@@ -334,4 +344,10 @@ export class QueueConsumer {
       );
     }
   }
+}
+
+/** Log fields of an error: its message, class name and, for relaybus errors, its code. */
+function describeError(error: unknown): string {
+  const { message, name, code } = toErrorInfo(error);
+  return `error=${message} errorName=${name}${code === undefined ? '' : ` code=${code}`}`;
 }

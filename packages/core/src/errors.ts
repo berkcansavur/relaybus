@@ -90,6 +90,27 @@ export class DispatcherStoppedError extends RelayBusError {
   override readonly code: string = 'RELAYBUS_DISPATCHER_STOPPED';
 }
 
+/**
+ * A delivery came back after its lease expired on its last attempt, so it is
+ * dead-lettered without running its handler again.
+ */
+export class AttemptsExhaustedError extends RelayBusError {
+  override name = 'AttemptsExhaustedError';
+  override readonly code: string = 'RELAYBUS_ATTEMPTS_EXHAUSTED';
+}
+
+/** A lifecycle method was called in a state that does not allow it, such as starting a bus twice. */
+export class LifecycleError extends RelayBusError {
+  override name = 'LifecycleError';
+  override readonly code: string = 'RELAYBUS_LIFECYCLE';
+}
+
+/** `drain` still found due deliveries after its maximum number of batches. */
+export class DrainIncompleteError extends RelayBusError {
+  override name = 'DrainIncompleteError';
+  override readonly code: string = 'RELAYBUS_DRAIN_INCOMPLETE';
+}
+
 export interface ValidationIssue {
   readonly message: string;
   readonly path?: readonly PropertyKey[] | undefined;

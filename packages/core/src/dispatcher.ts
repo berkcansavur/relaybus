@@ -4,7 +4,7 @@ import {
   DispatcherStoppedError,
   HandlerTimeoutError,
   LeaseLostError,
-  RelayBusError,
+  AttemptsExhaustedError,
   toErrorInfo,
 } from './errors.js';
 import { validatePayload, type EventEnvelope } from './event.js';
@@ -544,7 +544,7 @@ export class Dispatcher {
     if (delivery.attempt > registration.retry.attempts) {
       await this.#bury(
         delivery,
-        new RelayBusError(
+        new AttemptsExhaustedError(
           `Delivery reached attempt ${delivery.attempt} of ${registration.retry.attempts} after its lease expired`,
         ),
       );

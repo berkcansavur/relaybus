@@ -4,6 +4,8 @@ import type { AmqpMessage } from '../src/amqp-types.js';
 import { QueueConsumer, type ConfirmedRepublish } from '../src/queue-consumer.js';
 import { decodeEnvelope } from '../src/wire-format.js';
 import {
+  DEAD_LETTER_ERROR_CODE_HEADER,
+  DEAD_LETTER_ERROR_NAME_HEADER,
   DEAD_LETTER_REASON_HEADER,
   FIRST_FAILURE_HEADER,
   ORIGINAL_ROUTING_KEY_HEADER,
@@ -139,6 +141,8 @@ describe('QueueConsumer', () => {
           'x-delivery-count': 4,
           'x-acquired-count': 4,
           [DEAD_LETTER_REASON_HEADER]: 'stale',
+          [DEAD_LETTER_ERROR_NAME_HEADER]: 'StaleError',
+          [DEAD_LETTER_ERROR_CODE_HEADER]: 'STALE',
         }),
       );
       await waitFor(() => republish.mock.calls.length === 1);
@@ -166,6 +170,8 @@ describe('QueueConsumer', () => {
       expect(options.headers).not.toHaveProperty('x-delivery-count');
       expect(options.headers).not.toHaveProperty('x-acquired-count');
       expect(options.headers).not.toHaveProperty(DEAD_LETTER_REASON_HEADER);
+      expect(options.headers).not.toHaveProperty(DEAD_LETTER_ERROR_NAME_HEADER);
+      expect(options.headers).not.toHaveProperty(DEAD_LETTER_ERROR_CODE_HEADER);
       expect(Number(options.headers[FIRST_FAILURE_HEADER])).toBeGreaterThanOrEqual(before);
       expect(logger.warn).toHaveBeenCalledWith(
         expect.stringContaining('Handler attempts spent, retrying later'),
@@ -268,6 +274,8 @@ describe('QueueConsumer', () => {
       expect(exchange).toBe('relaybus.dead');
       expect(routingKey).toBe('relaybus.billing');
       expect(options.headers[DEAD_LETTER_REASON_HEADER]).toBe('redelivery window exhausted');
+      expect(options.headers[DEAD_LETTER_ERROR_NAME_HEADER]).toBe('Error');
+      expect(options.headers).not.toHaveProperty(DEAD_LETTER_ERROR_CODE_HEADER);
       expect(options.headers).not.toHaveProperty(REDELIVERIES_HEADER);
       expect(options.headers).not.toHaveProperty(FIRST_FAILURE_HEADER);
       expect(options.headers['cloudEvents:id']).toBe(createEnvelope().id);
@@ -289,6 +297,15 @@ describe('QueueConsumer', () => {
       expect(republish.mock.calls[0]![3].headers[DEAD_LETTER_REASON_HEADER]).toBe(
         'non-retryable handler error',
       );
+      expect(republish.mock.calls[0]![3].headers).toMatchObject({
+        [DEAD_LETTER_ERROR_NAME_HEADER]: 'InvalidEnvelopeError',
+        [DEAD_LETTER_ERROR_CODE_HEADER]: 'RELAYBUS_INVALID_ENVELOPE',
+      });
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /error=invalid occurredAt errorName=InvalidEnvelopeError code=RELAYBUS_INVALID_ENVELOPE$/,
+        ),
+      );
       expect(logger.error).toHaveBeenCalledWith(
         expect.stringContaining('Dead-lettering message the handler cannot process'),
       );
@@ -306,8 +323,12 @@ describe('QueueConsumer', () => {
         'malformed message',
       );
       expect(logger.error).toHaveBeenCalledWith(
-        '[QueueConsumer](process) Dead-lettering malformed message | queue=relaybus.billing routingKey=order.placed.v1 error=Message body is not valid JSON',
+        '[QueueConsumer](process) Dead-lettering malformed message | queue=relaybus.billing routingKey=order.placed.v1 error=Message body is not valid JSON errorName=MalformedMessageError code=RELAYBUS_RABBITMQ_MALFORMED_MESSAGE',
       );
+      expect(republish.mock.calls[0]![3].headers).toMatchObject({
+        [DEAD_LETTER_ERROR_NAME_HEADER]: 'MalformedMessageError',
+        [DEAD_LETTER_ERROR_CODE_HEADER]: 'RELAYBUS_RABBITMQ_MALFORMED_MESSAGE',
+      });
     });
 
     it('dead-letters a message whose decoder throws any error, and keeps consuming', async () => {
@@ -328,8 +349,10 @@ describe('QueueConsumer', () => {
         'malformed message',
       );
       expect(logger.error).toHaveBeenCalledWith(
-        expect.stringContaining('error=cannot read properties of undefined'),
+        expect.stringContaining('error=cannot read properties of undefined errorName=TypeError'),
       );
+      expect(republish.mock.calls[0]![3].headers[DEAD_LETTER_ERROR_NAME_HEADER]).toBe('TypeError');
+      expect(republish.mock.calls[0]![3].headers).not.toHaveProperty(DEAD_LETTER_ERROR_CODE_HEADER);
     });
 
     it('hands the decoder a retry copy with its original routing key and keeps that key on the next copy', async () => {
@@ -369,7 +392,11 @@ describe('QueueConsumer', () => {
       expect(republish.mock.calls[0]![3]).toEqual({
         contentType: 'application/json',
         persistent: true,
-        headers: { [DEAD_LETTER_REASON_HEADER]: 'malformed message' },
+        headers: {
+          [DEAD_LETTER_REASON_HEADER]: 'malformed message',
+          [DEAD_LETTER_ERROR_NAME_HEADER]: 'MalformedMessageError',
+          [DEAD_LETTER_ERROR_CODE_HEADER]: 'RELAYBUS_RABBITMQ_MALFORMED_MESSAGE',
+        },
       });
     });
 

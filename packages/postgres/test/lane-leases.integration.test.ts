@@ -1184,6 +1184,10 @@ describe('a claim whose response was lost', () => {
     await expect(claim(store, ['h2'], 'worker-1', at(1))).rejects.toThrow('connection reset');
     // The generation moved on but the lanes were not reconciled: claiming now would treat the live lane as foreign.
     await expect(claim(store, ['h2'], 'worker-1', at(2))).rejects.toThrow('no claim is made');
+    await expect(claim(store, ['h2'], 'worker-1', at(2))).rejects.toMatchObject({
+      name: 'ReconcileFailedError',
+      code: 'RELAYBUS_POSTGRES_RECONCILE_FAILED',
+    });
     expect(await store.complete(running!, at(3))).toBe(true);
     lossy.failReconcile = undefined;
     const [next] = await claim(store, ['h2'], 'worker-1', at(4));

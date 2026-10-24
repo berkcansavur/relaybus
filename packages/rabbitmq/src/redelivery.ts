@@ -7,6 +7,10 @@ export const REDELIVERIES_HEADER = 'x-relaybus-redeliveries';
 export const FIRST_FAILURE_HEADER = 'x-relaybus-first-failure-at';
 /** Why a message was moved to the dead-letter queue by the consumer. */
 export const DEAD_LETTER_REASON_HEADER = 'x-relaybus-dead-letter-reason';
+/** Class name of the error that dead-lettered a message, such as `MalformedMessageError`. */
+export const DEAD_LETTER_ERROR_NAME_HEADER = 'x-relaybus-dead-letter-error-name';
+/** Stable code of that error, such as `RELAYBUS_RABBITMQ_MALFORMED_MESSAGE`; absent for non-relaybus errors. */
+export const DEAD_LETTER_ERROR_CODE_HEADER = 'x-relaybus-dead-letter-error-code';
 /**
  * The routing key a message was originally published with. Set on retry copies,
  * which travel through the default exchange and return with the queue name as
@@ -94,6 +98,8 @@ export function copyForRepublish(
   for (const name of [
     ...RELAYBUS_STATE_HEADERS,
     DEAD_LETTER_REASON_HEADER,
+    DEAD_LETTER_ERROR_NAME_HEADER,
+    DEAD_LETTER_ERROR_CODE_HEADER,
     ...BROKER_COUNTER_HEADERS,
   ]) {
     delete headers[name];

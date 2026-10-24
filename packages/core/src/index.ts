@@ -23,12 +23,15 @@ export {
   type SubscribeCatalogOptions,
 } from './catalog.js';
 export {
+  AttemptsExhaustedError,
   ConfigurationError,
   DispatcherStoppedError,
+  DrainIncompleteError,
   EventValidationError,
   HandlerTimeoutError,
   InvalidEnvelopeError,
   LeaseLostError,
+  LifecycleError,
   NonRetryableError,
   RelayBusError,
   TransactionRequiredError,

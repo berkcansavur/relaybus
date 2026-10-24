@@ -301,10 +301,16 @@ never renamed or reused once released, so branch on them in alerts and retry rul
 | `RELAYBUS_LEASE_LOST`                      | `LeaseLostError`               | `@relaybus/core`     |
 | `RELAYBUS_HANDLER_TIMEOUT`                 | `HandlerTimeoutError`          | `@relaybus/core`     |
 | `RELAYBUS_DISPATCHER_STOPPED`              | `DispatcherStoppedError`       | `@relaybus/core`     |
+| `RELAYBUS_ATTEMPTS_EXHAUSTED`              | `AttemptsExhaustedError`       | `@relaybus/core`     |
+| `RELAYBUS_LIFECYCLE`                       | `LifecycleError`               | `@relaybus/core`     |
+| `RELAYBUS_DRAIN_INCOMPLETE`                | `DrainIncompleteError`         | `@relaybus/core`     |
 | `RELAYBUS_KAFKA_INVALID_MESSAGE`           | `InvalidKafkaMessageError`     | `@relaybus/kafka`    |
 | `RELAYBUS_KAFKA_UNENCODABLE_EVENT`         | `UnencodableEventError`        | `@relaybus/kafka`    |
 | `RELAYBUS_KAFKA_PUBLISH_TIMEOUT`           | `PublishTimeoutError`          | `@relaybus/kafka`    |
 | `RELAYBUS_KAFKA_HANDLER_FAILED`            | `HandlerFailedError`           | `@relaybus/kafka`    |
+| `RELAYBUS_KAFKA_TRANSPORT_CLOSED`          | `TransportClosedError`         | `@relaybus/kafka`    |
+| `RELAYBUS_KAFKA_GROUP_JOIN_TIMEOUT`        | `GroupJoinTimeoutError`        | `@relaybus/kafka`    |
+| `RELAYBUS_POSTGRES_RECONCILE_FAILED`       | `ReconcileFailedError`         | `@relaybus/postgres` |
 | `RELAYBUS_RABBITMQ_UNAVAILABLE`            | `RabbitMqUnavailableError`     | `@relaybus/rabbitmq` |
 | `RELAYBUS_RABBITMQ_PUBLISH_REJECTED`       | `RabbitMqPublishRejectedError` | `@relaybus/rabbitmq` |
 | `RELAYBUS_RABBITMQ_UNROUTABLE_MESSAGE`     | `UnroutableMessageError`       | `@relaybus/rabbitmq` |

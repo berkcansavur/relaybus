@@ -222,7 +222,10 @@ payload.
   `InvalidEnvelopeError` from `bus.receive`. The consumer publishes a confirmed copy to the
   dead-letter exchange, then acknowledges the original; the copy keeps the message headers, drops
   the retry state (so replaying it starts a fresh retry window) and adds
-  `x-relaybus-dead-letter-reason`. If that publish fails the consumer rejects the message without
+  `x-relaybus-dead-letter-reason`, `x-relaybus-dead-letter-error-name` (the error class, such as
+  `MalformedMessageError`) and, for relaybus errors, `x-relaybus-dead-letter-error-code` (such as
+  `RELAYBUS_RABBITMQ_MALFORMED_MESSAGE`, see [Error codes](https://berkcansavur.github.io/relaybus/concepts/error-codes)).
+  The `error` log lines carry the same `errorName=` and `code=` fields. If that publish fails the consumer rejects the message without
   requeue and the broker dead-letters it (at-least-once strategy), so it still ends in `<queue>.dead`.
 - **Broker-level backstop.** `x-delivery-limit` (`deliveryLimit`) dead-letters a message that keeps
   coming back because the consumer or its channel dies while holding it.

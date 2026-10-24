@@ -148,6 +148,10 @@ describe('retries and dead letters', () => {
     expect(record!.lastError!.message).toBe(
       'Delivery reached attempt 2 of 1 after its lease expired',
     );
+    expect(record!.lastError).toMatchObject({
+      name: 'AttemptsExhaustedError',
+      code: 'RELAYBUS_ATTEMPTS_EXHAUSTED',
+    });
   });
 
   it('times out slow handlers, aborts their signal and retries', async () => {

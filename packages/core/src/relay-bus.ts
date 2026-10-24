@@ -20,7 +20,8 @@ import { toMilliseconds, toTimerMilliseconds, type Duration } from './duration.j
 import {
   ConfigurationError,
   InvalidEnvelopeError,
-  RelayBusError,
+  DrainIncompleteError,
+  LifecycleError,
   TransactionRequiredError,
   toErrorInfo,
 } from './errors.js';
@@ -499,7 +500,7 @@ export class RelayBus<TTransaction = unknown> {
    */
   async start(): Promise<void> {
     if (this.#state !== 'idle') {
-      throw new RelayBusError(
+      throw new LifecycleError(
         this.#state === 'stopped'
           ? 'A stopped relaybus cannot be started again; create a new instance'
           : `Cannot start a relaybus that is ${this.#state}`,
@@ -560,7 +561,7 @@ export class RelayBus<TTransaction = unknown> {
       }
       total += processed;
     }
-    throw new RelayBusError(`drain did not finish within ${maxBatches} batches`);
+    throw new DrainIncompleteError(`drain did not finish within ${maxBatches} batches`);
   }
 
   listDeliveries(query: DeliveryQuery = {}): Promise<DeliveryRecord[]> {

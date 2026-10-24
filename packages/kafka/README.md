@@ -219,8 +219,12 @@ one key can map to different partitions depending on who wrote it.
 - **Malformed or rejected record**: a record that cannot be decoded, or that the bus rejects with
   any `NonRetryableError` (such as `InvalidEnvelopeError` or `EventValidationError`), is handled by
   `onInvalidMessage`. The default copies the untouched record to `<topic>.dead` with its original
-  headers plus `relaybus-invalid-reason`, `relaybus-source-topic`, `relaybus-source-partition` and
-  `relaybus-source-offset`, using the same idempotent producer, and commits only after the ack.
+  headers plus `relaybus-invalid-reason`, `relaybus-source-topic`, `relaybus-source-partition`,
+  `relaybus-source-offset`, `relaybus-error-name` (the error class, such as
+  `InvalidKafkaMessageError`) and, for relaybus errors, `relaybus-error-code` (such as
+  `RELAYBUS_KAFKA_INVALID_MESSAGE`, see [Error codes](https://berkcansavur.github.io/relaybus/concepts/error-codes)),
+  using the same idempotent producer, and commits only after the ack. The log line carries the
+  same `errorName=` and `code=` fields.
   A failing callback or dead-letter send is retried like a handler failure, so a record is dropped
   only when you chose `'skip'` or your callback returned. A subscription that consumes its own
   dead-letter topic is rejected as a loop.

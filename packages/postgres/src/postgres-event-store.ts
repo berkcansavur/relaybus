@@ -15,6 +15,7 @@ import {
   type PurgeResult,
   type RelayBusLogger,
 } from '@relaybus/core';
+import { ReconcileFailedError } from './errors.js';
 import { Client, Pool, type PoolClient, type PoolConfig } from 'pg';
 import type {
   PostgresExecutor,
@@ -563,7 +564,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       !(await this.#reconcile(request.leaseOwner))
     ) {
       // The generation moved on and the lanes were not told: claiming now would take the owner's live lanes for foreign ones.
-      throw new Error(
+      throw new ReconcileFailedError(
         `[PostgresEventStore](claim) Giving back unreturned deliveries still fails, so no claim is made | owner=${request.leaseOwner}`,
       );
     }

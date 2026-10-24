@@ -52,6 +52,10 @@ describe('lifecycle', () => {
     await transport.deliver('orders', remoteEnvelope());
     await waitFor(() => handled.mock.calls.length === 2);
     await expect(bus.start()).rejects.toThrow('Cannot start a relaybus that is running');
+    await expect(bus.start()).rejects.toMatchObject({
+      name: 'LifecycleError',
+      code: 'RELAYBUS_LIFECYCLE',
+    });
     await bus.stop();
     await bus.stop();
     expect(bus.isRunning).toBe(false);
@@ -226,6 +230,10 @@ describe('drain', () => {
     expect(await bus.drain()).toBe(0);
     await bus.publish(new OrderPlaced({ orderId: '1' }));
     await expect(bus.drain(3)).rejects.toThrow(RelayBusError);
+    await expect(bus.drain(3)).rejects.toMatchObject({
+      name: 'DrainIncompleteError',
+      code: 'RELAYBUS_DRAIN_INCOMPLETE',
+    });
   });
 });
 

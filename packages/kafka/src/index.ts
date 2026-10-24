@@ -24,9 +24,11 @@ export type {
   KafkaRunConfig,
 } from './kafka-client.js';
 export {
+  GroupJoinTimeoutError,
   HandlerFailedError,
   KafkaTransport,
   PublishTimeoutError,
+  TransportClosedError,
   type InvalidKafkaMessage,
   type InvalidMessagePolicy,
   type KafkaProcessingOptions,

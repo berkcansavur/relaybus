@@ -65,6 +65,18 @@ export class PublishTimeoutError extends RelayBusError {
   override readonly code: string = 'RELAYBUS_KAFKA_PUBLISH_TIMEOUT';
 }
 
+/** The transport was closed: it no longer publishes or subscribes. */
+export class TransportClosedError extends RelayBusError {
+  override name = 'TransportClosedError';
+  override readonly code: string = 'RELAYBUS_KAFKA_TRANSPORT_CLOSED';
+}
+
+/** The consumer did not join its group within `startupTimeout`. */
+export class GroupJoinTimeoutError extends RelayBusError {
+  override name = 'GroupJoinTimeoutError';
+  override readonly code: string = 'RELAYBUS_KAFKA_GROUP_JOIN_TIMEOUT';
+}
+
 /** A handler failure re-thrown to the Kafka client, stripped of anything that could make it fatal. */
 export class HandlerFailedError extends RelayBusError {
   override name = 'HandlerFailedError';
@@ -327,7 +339,7 @@ export class KafkaTransport implements Transport {
     for (const wake of this.#sleepers) {
       wake();
     }
-    this.#joinWaiter?.reject(new RelayBusError(`Transport '${this.name}' is closed`));
+    this.#joinWaiter?.reject(new TransportClosedError(`Transport '${this.name}' is closed`));
     await this.#restartLoop;
     const producer = await pendingProducer?.catch(() => undefined);
     const results = await Promise.allSettled([
@@ -342,7 +354,7 @@ export class KafkaTransport implements Transport {
 
   #assertCanSubscribe(destinations: readonly string[]): void {
     if (this.#state === 'closed') {
-      throw new RelayBusError(`Transport '${this.name}' is closed`);
+      throw new TransportClosedError(`Transport '${this.name}' is closed`);
     }
     if (this.#state === 'subscribed') {
       throw new ConfigurationError(
@@ -401,7 +413,7 @@ export class KafkaTransport implements Transport {
 
   #connectedProducer(): Promise<KafkaProducerLike> {
     if (this.#state === 'closed') {
-      return Promise.reject(new RelayBusError(`Transport '${this.name}' is closed`));
+      return Promise.reject(new TransportClosedError(`Transport '${this.name}' is closed`));
     }
     this.#producer ??= this.#openProducer();
     return this.#producer;
@@ -435,8 +447,7 @@ export class KafkaTransport implements Transport {
       if (this.#decode === undefined && !(error instanceof InvalidKafkaMessageError)) {
         throw toHandlerFailure(error);
       }
-      const reason = toErrorInfo(error).message;
-      await this.#withRetries(payload, 'handleInvalid', () => this.#handleInvalid(payload, reason));
+      await this.#withRetries(payload, 'handleInvalid', () => this.#handleInvalid(payload, error));
       return;
     }
     await this.#withRetries(payload, 'deliver', async () => {
@@ -447,7 +458,7 @@ export class KafkaTransport implements Transport {
         if (!(error instanceof NonRetryableError)) {
           throw error;
         }
-        await this.#handleInvalid(payload, error.message);
+        await this.#handleInvalid(payload, error);
       }
     });
   }
@@ -468,14 +479,16 @@ export class KafkaTransport implements Transport {
     return completeDecodedEvent(this.#decode(record), record);
   }
 
-  async #handleInvalid(payload: KafkaEachMessagePayload, reason: string): Promise<void> {
+  async #handleInvalid(payload: KafkaEachMessagePayload, error: unknown): Promise<void> {
     const { topic, partition, message } = payload;
+    const { message: reason, name, code } = toErrorInfo(error);
     const location = `topic=${topic} partition=${partition} offset=${message.offset}`;
+    const errorFields = `errorName=${name}${code === undefined ? '' : ` code=${code}`}`;
     const policy = this.#invalidPolicy;
     const deadLetterTopic = this.#deadLetterTopicFor(topic);
     if (policy === 'skip') {
       this.#logger.error(
-        `[KafkaTransport](handleInvalid) Skipping malformed message | ${location} reason=${reason}`,
+        `[KafkaTransport](handleInvalid) Skipping malformed message | ${location} reason=${reason} ${errorFields}`,
       );
     } else if (typeof policy === 'function') {
       await policy({
@@ -487,6 +500,19 @@ export class KafkaTransport implements Transport {
         value: message.value,
       });
     } else {
+      const headers: Record<string, Buffer | string | (Buffer | string)[]> = {
+        ...toOutgoingHeaders(message.headers),
+        'relaybus-invalid-reason': reason,
+        'relaybus-source-topic': topic,
+        'relaybus-source-partition': String(partition),
+        'relaybus-source-offset': message.offset,
+        'relaybus-error-name': name,
+      };
+      if (code === undefined) {
+        delete headers['relaybus-error-code'];
+      } else {
+        headers['relaybus-error-code'] = code;
+      }
       const producer = await this.#connectedProducer();
       await this.#send(producer, {
         topic: deadLetterTopic!,
@@ -495,18 +521,12 @@ export class KafkaTransport implements Transport {
           {
             key: message.key === null ? null : Buffer.from(message.key),
             value: message.value === null ? null : Buffer.from(message.value),
-            headers: {
-              ...toOutgoingHeaders(message.headers),
-              'relaybus-invalid-reason': reason,
-              'relaybus-source-topic': topic,
-              'relaybus-source-partition': String(partition),
-              'relaybus-source-offset': message.offset,
-            },
+            headers,
           },
         ],
       });
       this.#logger.error(
-        `[KafkaTransport](handleInvalid) Dead-lettered malformed message | ${location} deadLetterTopic=${deadLetterTopic} reason=${reason}`,
+        `[KafkaTransport](handleInvalid) Dead-lettered malformed message | ${location} deadLetterTopic=${deadLetterTopic} reason=${reason} ${errorFields}`,
       );
     }
   }
@@ -666,7 +686,7 @@ export class KafkaTransport implements Transport {
       this.#joinWaiter = { resolve, reject };
       timer = setTimeout(() => {
         reject(
-          new RelayBusError(
+          new GroupJoinTimeoutError(
             `Consumer of transport '${this.name}' did not join group '${this.#groupId}' within ${this.#settings.startupTimeoutMs}ms`,
           ),
         );
