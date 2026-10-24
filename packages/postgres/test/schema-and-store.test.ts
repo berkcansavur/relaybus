@@ -210,7 +210,7 @@ describe('wake-up notifications', () => {
   function appendingStore(notify: () => Promise<unknown>) {
     const sent: unknown[][] = [];
     const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
-    const store = new PostgresEventStore({
+    const store = new PostgresEventStore<undefined>({
       executor: {
         transaction: (work) => work(undefined),
         query: async (sql, parameters) => {
