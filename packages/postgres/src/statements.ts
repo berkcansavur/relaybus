@@ -157,6 +157,11 @@ FROM incoming
 WHERE (SELECT count(*) FROM woken) >= 0`;
   }
 
+  /** One wake-up notification on {@link PostgresNames.notificationChannel}, outside any publishing transaction. */
+  get notify(): string {
+    return `SELECT pg_notify('${this.#names.notificationChannel}', '')`;
+  }
+
   /**
    * A CTE `woken` that sends one notification on {@link PostgresNames.notificationChannel} when a row of
    * `inserted` is due at `now`. PostgreSQL delivers it when the transaction commits, merges the same

@@ -205,3 +205,100 @@ describe('PgExecutor', () => {
     ).resolves.toEqual([{ a: 1 }]);
   });
 });
+
+describe('wake-up notifications', () => {
+  function appendingStore(notify: () => Promise<unknown>) {
+    const sent: unknown[][] = [];
+    const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
+    const store = new PostgresEventStore({
+      executor: {
+        transaction: (work) => work(undefined),
+        query: async (sql, parameters) => {
+          if (sql.startsWith('SELECT pg_notify')) {
+            sent.push(['notify']);
+            await notify();
+            return [];
+          }
+          sent.push([...parameters]);
+          return [{ id: 'e', inserted: true, sequence: null, deliveries: 1 }];
+        },
+      },
+      logger: logger as never,
+    });
+    const append = (availableAt: Date) =>
+      store.append(
+        undefined,
+        [
+          {
+            event: {
+              id: 'e',
+              type: 't',
+              source: 's',
+              key: null,
+              payload: {},
+              headers: {},
+              correlationId: null,
+              causationId: null,
+              occurredAt: availableAt,
+            },
+            deliveries: [{ id: 'd', handler: 'h', availableAt }],
+          },
+        ],
+        new Date(0),
+      );
+    return { store, sent, logger, append };
+  }
+
+  it('notifies the first due publish at once and the rest of the interval once, after it', async () => {
+    vi.useFakeTimers();
+    try {
+      const { sent, append } = appendingStore(async () => undefined);
+      await append(new Date(0));
+      await append(new Date(0));
+      await append(new Date(0));
+      expect(sent.map((parameters) => parameters[4])).toEqual([
+        '1970-01-01T00:00:00.000Z',
+        null,
+        null,
+      ]);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(sent.at(-1)).toEqual(['notify']);
+      // A publish of deliveries due later wakes nobody.
+      await vi.advanceTimersByTimeAsync(100);
+      await append(new Date(60_000));
+      expect(sent.at(-1)![4]).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('logs a failed trailing notification and sends none after close', async () => {
+    vi.useFakeTimers();
+    try {
+      const failing = appendingStore(async () => {
+        throw new Error('gone');
+      });
+      await failing.append(new Date(0));
+      await failing.append(new Date(0));
+      await vi.advanceTimersByTimeAsync(10);
+      expect(failing.logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('[PostgresEventStore](wakeAt) Waking the dispatchers failed'),
+      );
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+      const failingText = appendingStore(() => Promise.reject('text'));
+      await failingText.append(new Date(0));
+      await failingText.append(new Date(0));
+      await vi.advanceTimersByTimeAsync(10);
+      expect(failingText.logger.error).toHaveBeenCalledWith(expect.stringContaining('error=text'));
+
+      const closing = appendingStore(async () => undefined);
+      await closing.append(new Date(0));
+      await closing.append(new Date(0));
+      await closing.store.close();
+      await vi.advanceTimersByTimeAsync(50);
+      expect(closing.sent).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

@@ -82,6 +82,13 @@ const INITIAL_LANES_PER_ROUND = 4;
 /** Attempts of the held-lane claim before a stale statement is given up for this call (a later claim finds the work). */
 const MAXIMUM_STALE_CLAIM_ATTEMPTS = 3;
 
+/**
+ * Least time between two wake-up notifications of one store. A transaction that sends `NOTIFY` holds a
+ * database-wide lock from its commit until the commit is flushed, so a notification per publishing
+ * transaction made concurrent publishers commit one at a time.
+ */
+const NOTIFICATION_INTERVAL_MS = 10;
+
 interface EventRow {
   readonly id: string;
   readonly type: string;
@@ -166,6 +173,8 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   /** The `pg` pool behind the store, when it has one: listening for notifications needs a connection of its own. */
   readonly #pool: Pool | undefined;
   readonly #notificationChannel: string;
+  #lastNotificationAt = Number.NEGATIVE_INFINITY;
+  #trailingNotification: ReturnType<typeof setTimeout> | undefined;
 
   constructor(options: PostgresEventStoreOptions<TTransaction>) {
     const sources = [options.pool, options.connectionString, options.executor].filter(
@@ -273,6 +282,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       return { appendedEventIds: [], duplicateEventIds: [], appendedDeliveryCount: 0 };
     }
     const createdAt = now.toISOString();
+    const wakeAt = this.#wakeAt(plan.deliveries, now);
     const handlersByEvent = new Map<string, string[]>();
     for (const delivery of plan.deliveries) {
       handlersByEvent.set(delivery.event_id, [
@@ -298,7 +308,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
         createdAt,
         JSON.stringify(plan.deliveries),
         JSON.stringify([...keyCounts].map(([key, count]) => ({ key, count }))),
-        createdAt,
+        wakeAt,
       ],
       transaction,
     );
@@ -318,6 +328,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
         handlersByEvent,
         insertedEventIds,
         createdAt,
+        wakeAt,
       );
     }
     const appendedEventIds: string[] = [];
@@ -328,6 +339,33 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       );
     }
     return { appendedEventIds, duplicateEventIds, appendedDeliveryCount };
+  }
+
+  /**
+   * The time the publishing statements notify the dispatchers for (deliveries due by then wake them),
+   * or `null` for no notification. The first append with a delivery due now notifies at once; later
+   * ones within {@link NOTIFICATION_INTERVAL_MS} send nothing themselves, and one notification of its
+   * own follows when the interval ends, by when those short transactions have normally committed.
+   */
+  #wakeAt(deliveries: readonly DeliveryRow[], now: Date): string | null {
+    if (!deliveries.some((delivery) => Date.parse(delivery.available_at) <= now.getTime())) {
+      return null;
+    }
+    const elapsed = Date.now() - this.#lastNotificationAt;
+    if (elapsed >= NOTIFICATION_INTERVAL_MS) {
+      this.#lastNotificationAt = Date.now();
+      return now.toISOString();
+    }
+    this.#trailingNotification ??= setTimeout(() => {
+      this.#trailingNotification = undefined;
+      this.#lastNotificationAt = Date.now();
+      this.#executor.query(this.#statements.notify, []).catch((error: unknown) => {
+        this.#logger.error(
+          `[PostgresEventStore](wakeAt) Waking the dispatchers failed, they find the deliveries when they poll | error=${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }, NOTIFICATION_INTERVAL_MS - elapsed);
+    return null;
   }
 
   /**
@@ -346,6 +384,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     handlersByEvent: ReadonlyMap<string, string[]>,
     insertedEventIds: Set<string>,
     createdAt: string,
+    wakeAt: string | null,
   ): Promise<number> {
     const sequences = new Map(
       fresh.map((row) => [row['id'] as string, row['sequence'] as string | null]),
@@ -382,7 +421,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     }
     const inserted = await this.#executor.query(
       this.#statements.insertDeliveries,
-      [JSON.stringify(deliveries), createdAt, JSON.stringify(reinserted), createdAt],
+      [JSON.stringify(deliveries), createdAt, JSON.stringify(reinserted), wakeAt],
       transaction,
     );
     return inserted.length;
@@ -904,6 +943,8 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
 
   /** Ends the pool this store created from `connectionString`. Pools and executors you passed in stay open. */
   async close(): Promise<void> {
+    clearTimeout(this.#trailingNotification);
+    this.#trailingNotification = undefined;
     const pool = this.#ownedPool;
     this.#ownedPool = undefined;
     await pool?.end();

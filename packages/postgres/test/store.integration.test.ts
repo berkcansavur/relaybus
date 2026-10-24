@@ -260,11 +260,13 @@ describe('reports of new deliveries', () => {
     const peer = new PostgresEventStore({ pool: database.pool, schema });
     let reports = 0;
     const unwatch = await peer.watchNewDeliveries(() => void (reports += 1));
+    let afterBoth = 0;
     try {
       await publish(store, NOW);
       await settle();
       expect(reports).toBe(1);
-      // Two publish calls of one transaction are one notification.
+      // Two publish calls of one transaction notify at its commit; the second, sent within the
+      // notification interval, may add one wake-up of its own when the interval ends.
       await store.transaction(async (transaction) => {
         for (let index = 0; index < 2; index += 1) {
           await store.append(
@@ -280,7 +282,9 @@ describe('reports of new deliveries', () => {
         }
       });
       await settle();
-      expect(reports).toBe(2);
+      expect(reports).toBeGreaterThanOrEqual(2);
+      expect(reports).toBeLessThanOrEqual(3);
+      afterBoth = reports;
       await publish(store, new Date(NOW.getTime() + 60_000));
       await expect(
         store.transaction(async (transaction) => {
@@ -298,7 +302,7 @@ describe('reports of new deliveries', () => {
         }),
       ).rejects.toThrow('rolled back');
       await settle();
-      expect(reports).toBe(2);
+      expect(reports).toBe(afterBoth);
       // A handler added to an existing event is reported too.
       const existing = envelope();
       await store.transaction((transaction) =>
@@ -317,13 +321,34 @@ describe('reports of new deliveries', () => {
         ),
       );
       await settle();
-      expect(reports).toBe(3);
+      expect(reports).toBe(afterBoth + 1);
     } finally {
       await unwatch!();
     }
     await publish(store, NOW);
     await settle();
-    expect(reports).toBe(3);
+    expect(reports).toBe(afterBoth + 1);
+  });
+
+  it('sends about one wake-up per interval for a burst of publishing transactions', async () => {
+    const schema = uniqueSchema();
+    const store = new PostgresEventStore({ pool: database.pool, schema });
+    await store.setup();
+    const peer = new PostgresEventStore({ pool: database.pool, schema });
+    let reports = 0;
+    const unwatch = await peer.watchNewDeliveries(() => void (reports += 1));
+    // Every publish is a transaction of its own that would notify; the store sends at most one per
+    // 10 ms interval of the burst, and one trailing wake-up per interval.
+    const started = performance.now();
+    for (let index = 0; index < 40; index += 1) {
+      await publish(store, NOW);
+    }
+    const intervals = Math.ceil((performance.now() - started) / 10);
+    await settle();
+    await unwatch!();
+    expect(reports).toBeGreaterThanOrEqual(1);
+    expect(reports).toBeLessThanOrEqual(Math.min(40, 2 * intervals + 1));
+    await store.close();
   });
 
   it('cannot listen through an executor, which has no connection of its own', async () => {

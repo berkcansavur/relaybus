@@ -387,13 +387,19 @@ describe('round trips per claim', () => {
 describe('round trips per publish and completion', () => {
   it('publishes fresh events with one statement per call, whatever the batch size', async () => {
     const fixture = await createFixture();
+    // A publish within 10 ms of the one before leaves the wake-up to one trailing notification per
+    // interval, a round trip of its own; waiting the interval out keeps it out of the next count.
+    const count = async (operation: () => Promise<unknown>): Promise<number> => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return fixture.executor.count(operation);
+    };
     expectWithinBudget(
       'postgres.publish.unkeyedSingle.statements',
-      await fixture.executor.count(() => publish(fixture.store, events(1))),
+      await count(() => publish(fixture.store, events(1))),
     );
     expectWithinBudget(
       'postgres.publish.keyedSingle.statements',
-      await fixture.executor.count(() =>
+      await count(() =>
         publish(
           fixture.store,
           events(1, () => 'k'),
@@ -402,7 +408,7 @@ describe('round trips per publish and completion', () => {
     );
     expectWithinBudget(
       'postgres.publish.keyedBatch100.statements',
-      await fixture.executor.count(() =>
+      await count(() =>
         publish(
           fixture.store,
           events(100, (index) => `k${index % 7}`),
@@ -413,7 +419,7 @@ describe('round trips per publish and completion', () => {
     await publish(fixture.store, [event!], ['h']);
     expectWithinBudget(
       'postgres.publish.repeatedEventNewHandler.statements',
-      await fixture.executor.count(() => publish(fixture.store, [event!], ['h', 'other'])),
+      await count(() => publish(fixture.store, [event!], ['h', 'other'])),
     );
   });
 

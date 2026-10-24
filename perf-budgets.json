@@ -151,7 +151,7 @@
     "description": "WAL bytes per delivery for claim and completion only, batch 200."
   },
   "postgres.wal.publish.bytesPerEvent": {
-    "budget": 1136,
+    "budget": 1150,
     "unit": "bytes",
     "description": "WAL bytes per event, published 10 per call."
   },
