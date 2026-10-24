@@ -1,7 +1,7 @@
 {
   "name": "@relaybus/nestjs",
   "version": "0.0.0",
-  "description": "NestJS event bus module for relaybus: @RelayBusHandler handlers on a transactional outbox, with retries, dead letters and graceful shutdown, so events are never lost between your database and your handlers.",
+  "description": "NestJS event bus module for relaybus: @RelayBusConsumer handlers on a transactional outbox, with retries, dead letters and graceful shutdown, so events are never lost between your database and your handlers.",
   "license": "MIT",
   "author": "Berkcan \u015eavur <berkcansavur@gmail.com>",
   "homepage": "https://berkcansavur.github.io/relaybus/packages/nestjs",

@@ -13,7 +13,7 @@ export const packages = [
   { name: 'core', blurb: 'The bus, dispatcher, retry policies and the in-memory store.' },
   {
     name: 'nestjs',
-    blurb: 'RelayBusModule, the @RelayBusHandler decorator, lifecycle and health.',
+    blurb: 'RelayBusModule, the @RelayBusConsumer decorator, lifecycle and health.',
   },
   {
     name: 'postgres',

@@ -1,130 +1,93 @@
 /**
- * Compile-time contract of `@RelayBusConsumer` with selected events. Enforced by
- * `tsc -p tsconfig.json`: every `@ts-expect-error` line must produce a compile
- * error, otherwise tsc reports an unused directive. The classes are declared
- * inside a function that never runs, so no decorator executes here.
+ * Compile-time contract of `@RelayBusConsumer`. Enforced by `tsc -p tsconfig.json`: every
+ * `@ts-expect-error` line must produce a compile error, otherwise tsc reports an unused directive.
+ * The classes are declared inside a function that never runs, so no decorator executes here.
  */
-import { Injectable } from '@nestjs/common';
+import { defineEvent, type EventEnvelope, type HandlerContext } from '@relaybus/core';
+import { describe, it } from 'vitest';
+import { defineCatalog } from '@relaybus/core';
 import {
-  consume,
-  defineCatalog,
-  defineEvent,
-  produce,
-  type EventOf,
-  type HandlerContext,
-  type InMemoryTransaction,
-} from '@relaybus/core';
-import { describe, expectTypeOf, it } from 'vitest';
-import { RelayBusConsumer, RelayBusModule, type RelayBusConsumerOptions } from '../src/index.js';
+  EventConsumer,
+  RelayBusCatalogConsumer,
+  RelayBusConsumer,
+  Subscribe,
+} from '../src/index.js';
 import { OrderPlaced } from './helpers.js';
 
-class OrderShipped extends defineEvent<{ orderId: string; carrier: string }>('order.shipped.v1') {}
-
-const OrderEvents = defineCatalog({ OrderPlaced, OrderShipped }, { name: 'OrderEvents' });
+class UserRegistered extends defineEvent<{ userId: number }>('user.registered.v1') {}
 
 describe('@RelayBusConsumer types', () => {
-  it('requires the handler methods of the selected events', () => {
+  it('checks the event parameter against the event payload', () => {
     const compileOnly = (): void => {
-      @Injectable()
-      @RelayBusConsumer(OrderEvents, { events: ['OrderPlaced'] })
-      class BillingHandlers {
-        onOrderPlaced(event: EventOf<typeof OrderPlaced>): void {
+      class Handlers {
+        // Free method names, events of any catalog in one class.
+        @RelayBusConsumer(OrderPlaced)
+        async shipOrder(event: EventEnvelope<{ orderId: string }>): Promise<void> {
           void event.payload.orderId;
         }
-      }
 
-      @Injectable()
-      // @ts-expect-error: consumer missing handler, onOrderShipped is required by events
-      @RelayBusConsumer(OrderEvents, { events: ['OrderPlaced', 'OrderShipped'] })
-      class MissingShipped {
-        onOrderPlaced(): void {}
-      }
-
-      @Injectable()
-      // @ts-expect-error: unknown event name, 'OrderRefunded' is not an event of OrderEvents
-      @RelayBusConsumer(OrderEvents, { events: ['OrderRefunded'] })
-      class UnknownEvent {
-        onOrderRefunded(): void {}
-      }
-
-      @Injectable()
-      @RelayBusConsumer(OrderEvents, { events: ['OrderPlaced'] })
-      class TransactionalHandlers {
-        onOrderPlaced(
-          event: EventOf<typeof OrderPlaced>,
-          context: HandlerContext<InMemoryTransaction>,
-        ): void {
-          void [event, context.transaction];
+        @RelayBusConsumer(UserRegistered, { id: 'welcome-mail' })
+        sendWelcome(event: EventEnvelope<{ userId: number }>, context: HandlerContext): void {
+          void [event.payload.userId, context.attempt];
         }
-      }
 
-      @Injectable()
-      // @ts-expect-error: onOrderShipped receives the OrderShipped envelope, not a number
-      @RelayBusConsumer(OrderEvents, { events: ['OrderShipped'] })
-      class WrongPayload {
-        onOrderShipped(event: number): void {
+        @RelayBusConsumer(OrderPlaced, { id: 'audit' })
+        audit(): void {}
+
+        // @ts-expect-error: OrderPlaced carries { orderId: string }, not { userId: number }
+        @RelayBusConsumer(OrderPlaced, { id: 'wrong' })
+        wrongPayload(event: EventEnvelope<{ userId: number }>): void {
+          void event;
+        }
+
+        // @ts-expect-error: the first parameter is the envelope, not the payload
+        @RelayBusConsumer(OrderPlaced, { id: 'payload' })
+        payloadOnly(payload: { orderId: string }): void {
+          void payload;
+        }
+
+        // @ts-expect-error: the deprecated alias checks the parameter the same way
+        @Subscribe(UserRegistered, { id: 'alias' })
+        aliasWrongPayload(event: EventEnvelope<{ orderId: string }>): void {
           void event;
         }
       }
-
-      @Injectable()
-      // @ts-expect-error: a narrower payload is rejected, the OrderShipped envelope has no 'note'
-      @RelayBusConsumer(OrderEvents, { events: ['OrderShipped'] })
-      class NarrowerPayload {
-        onOrderShipped(event: EventOf<typeof OrderShipped> & { payload: { note: string } }): void {
-          void event.payload.note;
-        }
-      }
-
-      const selection = { events: ['OrderPlaced'] as const, transactional: true };
-      @Injectable()
-      // @ts-expect-error: options from a variable are checked too, onOrderPlaced is missing
-      @RelayBusConsumer(OrderEvents, selection)
-      class SelectionFromVariable {
-        onOrderShipped(): void {}
-      }
-
-      // A variable typed RelayBusConsumerOptions is checked when the module initialises.
-      const typedOptions: RelayBusConsumerOptions<typeof OrderEvents> = { transactional: true };
-      @Injectable()
-      @RelayBusConsumer(OrderEvents, typedOptions)
-      class TypedOptions {
-        onOrderPlaced(): void {}
-      }
-
-      // Without events any subset of methods compiles, as before.
-      @Injectable()
-      @RelayBusConsumer(OrderEvents)
-      class AnySubset {
-        onOrderShipped(): void {}
-      }
-
-      void [
-        BillingHandlers,
-        MissingShipped,
-        UnknownEvent,
-        TransactionalHandlers,
-        WrongPayload,
-        NarrowerPayload,
-        SelectionFromVariable,
-        TypedOptions,
-        AnySubset,
-      ];
+      void Handlers;
     };
-    expectTypeOf(compileOnly).toBeFunction();
+    void compileOnly;
   });
 
-  it('accepts consume and produce declarations as module catalogs', () => {
+  it('rejects a decorator in the wrong place or with the wrong argument', () => {
+    const OrderEvents = defineCatalog({ OrderPlaced }, { name: 'OrderEvents' });
     const compileOnly = (): void => {
-      RelayBusModule.forRoot({
-        store: undefined as never,
-        catalogs: [
-          consume(OrderEvents, { events: ['OrderPlaced'] }),
-          produce(OrderEvents, { events: ['OrderShipped'] }),
-          OrderEvents,
-        ],
-      });
+      // @ts-expect-error: @RelayBusConsumer decorates methods, not classes
+      @RelayBusConsumer(OrderPlaced)
+      class ConsumerOnClass {}
+
+      // @ts-expect-error: the deprecated @Subscribe decorates methods only too
+      @Subscribe(OrderPlaced)
+      class SubscribeOnClass {}
+
+      class CatalogOnMethod {
+        // @ts-expect-error: @RelayBusCatalogConsumer decorates classes, not methods
+        @RelayBusCatalogConsumer(OrderEvents)
+        onOrderPlaced(): void {}
+
+        // @ts-expect-error: the deprecated @EventConsumer decorates classes only too
+        @EventConsumer(OrderEvents)
+        onOrderShipped(): void {}
+
+        // @ts-expect-error: @RelayBusConsumer takes an event class or type, not a catalog
+        @RelayBusConsumer(OrderEvents)
+        onCatalog(): void {}
+      }
+
+      // @ts-expect-error: @RelayBusCatalogConsumer takes a catalog, not an event class
+      @RelayBusCatalogConsumer(OrderPlaced)
+      class EventOnCatalogConsumer {}
+
+      void [ConsumerOnClass, SubscribeOnClass, CatalogOnMethod, EventOnCatalogConsumer];
     };
-    expectTypeOf(compileOnly).toBeFunction();
+    void compileOnly;
   });
 });

@@ -10,7 +10,7 @@ relaybus is published as seven npm packages under the `@relaybus` scope, release
 | Package                                    | Purpose                                                                                    |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------ |
 | [`@relaybus/core`](/packages/core)         | The bus, dispatcher, retry policies and the in-memory store.                               |
-| [`@relaybus/nestjs`](/packages/nestjs)     | `RelayBusModule`, the `@RelayBusHandler` decorator, lifecycle and health.                  |
+| [`@relaybus/nestjs`](/packages/nestjs)     | `RelayBusModule`, the `@RelayBusConsumer` decorator, lifecycle and health.                 |
 | [`@relaybus/postgres`](/packages/postgres) | PostgreSQL 13+ store for `pg`, Kysely, Knex, TypeORM, Drizzle and Prisma transactions.     |
 | [`@relaybus/mongodb`](/packages/mongodb)   | MongoDB 6+ store on multi-document transactions; works with Mongoose sessions.             |
 | [`@relaybus/kafka`](/packages/kafka)       | Kafka transport for kafkajs and `@confluentinc/kafka-javascript`, CloudEvents binary mode. |

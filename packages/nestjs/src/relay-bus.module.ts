@@ -12,7 +12,7 @@ import { RelayBusLifecycle } from './relay-bus-lifecycle.js';
 import { RelayBusTransactionHost } from './relay-bus-transaction-host.js';
 
 /**
- * Registers one {@link RelayBus} for the application, discovers `@RelayBusHandler` and `@RelayBusConsumer`
+ * Registers one {@link RelayBus} for the application, discovers `@RelayBusConsumer` and `@RelayBusCatalogConsumer`
  * handlers in every module, runs `@RelayBusTransaction()` methods on the bus, starts the bus after bootstrap and stops it on
  * shutdown. Global unless `isGlobal: false`.
  *

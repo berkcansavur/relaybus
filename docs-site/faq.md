@@ -7,7 +7,7 @@ description: Answers to common questions about publishing events reliably in Nes
 
 ## How do I publish events reliably in NestJS?
 
-Write the event to your database in the same transaction as your data, then deliver it after commit. With relaybus, register `RelayBusModule.forRoot({ store: new PostgresEventStore({ pool }) })`, call `bus.publish(event)` inside `bus.transaction(...)`, and declare handlers with `@RelayBusHandler(EventClass)`. If the transaction commits, every handler is called at least once, retried with backoff until it succeeds or is dead-lettered. If it rolls back, the event never existed. See [Getting started](/getting-started).
+Write the event to your database in the same transaction as your data, then deliver it after commit. With relaybus, register `RelayBusModule.forRoot({ store: new PostgresEventStore({ pool }) })`, call `bus.publish(event)` inside `bus.transaction(...)`, and declare handlers with `@RelayBusConsumer(EventClass)`. If the transaction commits, every handler is called at least once, retried with backoff until it succeeds or is dead-lettered. If it rolls back, the event never existed. See [Getting started](/getting-started).
 
 ## How to implement the transactional outbox pattern in NestJS?
 
@@ -31,7 +31,7 @@ Deduplicate on `event.id`, or use `transactional: true` and write through `conte
 
 ## How do I retry failed event handlers in NestJS?
 
-Set `retry` on `@RelayBusHandler`: `@RelayBusHandler(OrderPlaced, { retry: { attempts: 5, initialDelay: '2s', maxDelay: '5m' } })`. The defaults are 10 attempts with capped exponential backoff and full jitter. Throw `NonRetryableError` to skip the remaining attempts. See [Retries and backoff](/concepts/retries).
+Set `retry` on `@RelayBusConsumer`: `@RelayBusConsumer(OrderPlaced, { retry: { attempts: 5, initialDelay: '2s', maxDelay: '5m' } })`. The defaults are 10 attempts with capped exponential backoff and full jitter. Throw `NonRetryableError` to skip the remaining attempts. See [Retries and backoff](/concepts/retries).
 
 ## How do I inspect and requeue failed events?
 

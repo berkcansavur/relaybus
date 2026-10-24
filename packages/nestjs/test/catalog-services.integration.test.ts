@@ -18,7 +18,7 @@ import {
 import { RabbitMqTransport } from '@relaybus/rabbitmq';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { eventually, startBroker, unique } from '../../rabbitmq/test/support/broker.js';
-import { RelayBusConsumer, RelayBusModule } from '../src/index.js';
+import { RelayBusCatalogConsumer, RelayBusModule } from '../src/index.js';
 
 class InvoiceIssued extends defineEvent<{ invoiceId: string; amount: number }>(
   'invoice.issued.v1',
@@ -91,7 +91,7 @@ function billingModule(exchange: string, catalogs: readonly CatalogDeclaration[]
 
 /** Records the invoices it is told about; consumes InvoiceIssued only. */
 @Injectable()
-@RelayBusConsumer(InvoiceEvents, { events: ['InvoiceIssued'] })
+@RelayBusCatalogConsumer(InvoiceEvents, { events: ['InvoiceIssued'] })
 class LedgerHandlers {
   readonly booked: string[] = [];
 

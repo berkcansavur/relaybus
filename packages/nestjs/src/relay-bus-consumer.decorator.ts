@@ -1,130 +1,85 @@
 import 'reflect-metadata';
-import {
-  ConfigurationError,
-  consume,
-  describeCatalog,
-  type Catalog,
-  type CatalogEntry,
-  type CatalogEventSelection,
-  type EventOf,
-  type HandlerContext,
-  type SubscribeOptions,
-} from '@relaybus/core';
+import type { EventClass, EventEnvelope, HandlerContext, SubscribeOptions } from '@relaybus/core';
 
 /**
- * Options of {@link RelayBusConsumer}: the core {@link SubscribeOptions} applied to
- * every handler of the class, except `id`, which is always
- * `${ClassName}.on${EventName}`, and optionally the events the class consumes.
+ * Options of {@link RelayBusConsumer}: the core {@link SubscribeOptions}, except that
+ * `id` is optional and defaults to `ClassName.methodName`.
  */
-export type RelayBusConsumerOptions<
-  TCatalog extends Catalog = Catalog,
-  TName extends keyof TCatalog = keyof TCatalog,
-> = Omit<SubscribeOptions, 'id'> & CatalogEventSelection<TName>;
-
-/** What one `@RelayBusConsumer` decorator recorded on a class. */
-export interface RelayBusConsumerMetadata {
-  readonly catalog: Catalog;
-  /** Subscribe options applied to every handler of the class. */
-  readonly options: Omit<SubscribeOptions, 'id'>;
+export type RelayBusConsumerOptions = Omit<SubscribeOptions, 'id'> & {
   /**
-   * Entries named by `options.events`, whose methods are all required;
-   * undefined when the class consumes whichever handler methods it defines.
+   * Stable id of the handler. Deliveries are recorded under it, so renaming it
+   * (or the class or method it is derived from) orphans pending deliveries.
+   * Default: `${ClassName}.${methodName}`. Required when one method carries
+   * several `@RelayBusConsumer` decorators.
    */
-  readonly selectedEntries: readonly CatalogEntry[] | undefined;
-}
-
-/**
- * A class whose instances have a handler method for each of the named catalog
- * events. The event parameter is checked strictly; the context is typed
- * `HandlerContext<never>` so a method may declare any transaction type.
- */
-export type RelayBusConsumerClass<
-  TCatalog extends Catalog,
-  TName extends keyof TCatalog,
-> = abstract new (...args: never[]) => {
-  readonly [TKey in TName & string as `on${TKey}`]: (
-    event: EventOf<TCatalog[TKey]>,
-    context: HandlerContext<never>,
-  ) => unknown;
+  readonly id?: string;
 };
 
-const EVENT_CONSUMER_METADATA_KEY = Symbol.for('relaybus.nestjs.event-consumer');
+/** What one `@RelayBusConsumer` decorator recorded on a method. */
+export interface RelayBusConsumerMetadata {
+  readonly event: EventClass<unknown> | string;
+  readonly options: RelayBusConsumerOptions;
+}
+
+/** @deprecated Renamed to {@link RelayBusConsumerOptions}; this alias is removed in 1.0.0. */
+export type SubscribeDecoratorOptions = RelayBusConsumerOptions;
+
+/** @deprecated Renamed to {@link RelayBusConsumerMetadata}; this alias is removed in 1.0.0. */
+export type SubscribeMetadata = RelayBusConsumerMetadata;
+
+const SUBSCRIBE_METADATA_KEY = Symbol.for('relaybus.nestjs.subscribe');
+
+type HandlerMethod<TPayload> = (
+  event: EventEnvelope<TPayload>,
+  context: HandlerContext<never>,
+) => unknown;
+
+type HandlerDecorator<TPayload> = <TMethod extends HandlerMethod<TPayload>>(
+  target: object,
+  propertyKey: string | symbol,
+  descriptor: TypedPropertyDescriptor<TMethod>,
+) => void;
 
 /**
- * Subscribes a provider class to the events of a catalog: its
- * `on${EventName}` methods are registered when the module initialises, under
- * the stable id `${ClassName}.on${EventName}`, with `this` bound to the
- * provider instance.
+ * Subscribes a provider method to an event class or type. The method is
+ * registered with `bus.subscribe` when the module initialises, with `this`
+ * bound to the provider instance, and receives `(envelope, context)`.
  *
- * - Without `events`, every handler method the class defines is registered; a
- *   class that defines none fails the boot, which catches misspelled names.
- *   `implements HandlersOf<typeof Catalog>` makes the compiler require all of them.
- * - With `events`, exactly the methods of those events are registered (methods
- *   of other events are ignored), and a class missing one of them fails to
- *   compile and fails the boot. This is how a service consumes its part of a
- *   catalog shared between services.
- *
- * `catalogs: [consume(Catalog, { events })]` in the module options makes the
- * application fail to boot if no provider handles a consumed event. Works next
- * to `@RelayBusHandler` in the same class (give a method that carries both a
- * distinct `@RelayBusHandler` id). The provider must be a singleton. Declarations
- * are inherited; a subclass that declares the same catalog again replaces the
- * inherited declaration of that catalog, and declaring one catalog twice on
- * the same class throws a {@link ConfigurationError}.
+ * The provider must be a singleton (default scope) and belong to any module of
+ * the application. The decorator name differs from `@nestjs/event-emitter`'s
+ * `@OnEvent` so both can be used in one application.
  *
  * ```ts
  * @Injectable()
- * @RelayBusConsumer(OrderEvents, { events: ['OrderPlaced'], transactional: true })
- * export class BillingHandlers {
- *   onOrderPlaced(event: EventOf<typeof OrderPlaced>) {}
+ * export class ShippingHandlers {
+ *   @RelayBusConsumer(OrderPlaced, { transactional: true })
+ *   async onOrderPlaced(event: EventEnvelope<{ orderId: string }>, context: HandlerContext) {}
  * }
  * ```
  */
-export function RelayBusConsumer<TCatalog extends Catalog>(
-  catalog: TCatalog,
-  options?: Omit<SubscribeOptions, 'id'> & { readonly events?: undefined },
-): ClassDecorator;
-export function RelayBusConsumer<TCatalog extends Catalog, const TName extends keyof TCatalog>(
-  catalog: TCatalog,
-  options: Omit<SubscribeOptions, 'id'> & { readonly events: readonly TName[] },
-): (target: RelayBusConsumerClass<TCatalog, TName>) => void;
-/**
- * With options whose `events` are not statically known (a variable typed
- * {@link RelayBusConsumerOptions}), the selection is checked when the module
- * initialises instead of at compile time.
- */
-export function RelayBusConsumer<TCatalog extends Catalog>(
-  catalog: TCatalog,
-  options: RelayBusConsumerOptions<TCatalog>,
-): ClassDecorator;
+export function RelayBusConsumer<TPayload>(
+  event: EventClass<TPayload>,
+  options?: RelayBusConsumerOptions,
+): HandlerDecorator<TPayload>;
 export function RelayBusConsumer(
-  catalog: Catalog,
-  {
-    events,
-    ...options
-  }: Omit<SubscribeOptions, 'id'> & {
-    readonly events?: readonly PropertyKey[] | undefined;
-  } = {},
-): ClassDecorator {
-  const { name } = describeCatalog(catalog);
-  const selectedEntries =
-    events === undefined
-      ? undefined
-      : consume(catalog, { events: events as readonly (keyof Catalog)[] }).entries;
-  return (target) => {
+  eventType: string,
+  options?: RelayBusConsumerOptions,
+): HandlerDecorator<never>;
+export function RelayBusConsumer(
+  event: EventClass<unknown> | string,
+  options: RelayBusConsumerOptions = {},
+): (target: object, propertyKey: string | symbol, descriptor: PropertyDescriptor) => void {
+  return (target, propertyKey) => {
+    // Keyed by (prototype, property) rather than stored on the method function, so a
+    // decorator that later replaces the method does not drop the subscription.
     const existing =
-      (Reflect.getOwnMetadata(EVENT_CONSUMER_METADATA_KEY, target) as
+      (Reflect.getOwnMetadata(SUBSCRIBE_METADATA_KEY, target, propertyKey) as
         RelayBusConsumerMetadata[] | undefined) ?? [];
-    if (existing.some((metadata) => metadata.catalog === catalog)) {
-      throw new ConfigurationError(
-        `@RelayBusConsumer(${name ?? 'catalog'}) is declared twice on ${target.name}; ` +
-          `merge the declarations into one`,
-      );
-    }
     Reflect.defineMetadata(
-      EVENT_CONSUMER_METADATA_KEY,
-      [...existing, { catalog, options, selectedEntries }],
+      SUBSCRIBE_METADATA_KEY,
+      [...existing, { event, options }],
       target,
+      propertyKey,
     );
   };
 }
@@ -133,42 +88,19 @@ export function RelayBusConsumer(
  * @deprecated Renamed to {@link RelayBusConsumer}, which behaves identically; this alias is
  * removed in 1.0.0.
  */
-export const EventConsumer: typeof RelayBusConsumer = RelayBusConsumer;
-
-/** @deprecated Renamed to {@link RelayBusConsumerOptions}; this alias is removed in 1.0.0. */
-export type EventConsumerOptions<
-  TCatalog extends Catalog = Catalog,
-  TName extends keyof TCatalog = keyof TCatalog,
-> = RelayBusConsumerOptions<TCatalog, TName>;
-
-/** @deprecated Renamed to {@link RelayBusConsumerMetadata}; this alias is removed in 1.0.0. */
-export type EventConsumerMetadata = RelayBusConsumerMetadata;
-
-/** @deprecated Renamed to {@link RelayBusConsumerClass}; this alias is removed in 1.0.0. */
-export type EventConsumerClass<
-  TCatalog extends Catalog,
-  TName extends keyof TCatalog,
-> = RelayBusConsumerClass<TCatalog, TName>;
+export const Subscribe: typeof RelayBusConsumer = RelayBusConsumer;
 
 /**
- * Reads the `@RelayBusConsumer` declarations of a class and of its ancestors,
- * ancestors first, each in declaration order. When a class and an ancestor
- * both declare a catalog, the declaration nearest to the class wins.
+ * Reads the `@RelayBusConsumer` declarations of a method, in declaration order. The
+ * prototype chain is searched, so a subclass inherits the declarations of the
+ * nearest ancestor that declares them.
  */
-export function readConsumerMetadata(target: object): readonly RelayBusConsumerMetadata[] {
-  const lineage: object[] = [];
-  for (let current = target; current !== Function.prototype;) {
-    lineage.unshift(current);
-    current = Object.getPrototypeOf(current) as object;
-  }
-  const byCatalog = new Map<Catalog, RelayBusConsumerMetadata>();
-  for (const type of lineage) {
-    const own =
-      (Reflect.getOwnMetadata(EVENT_CONSUMER_METADATA_KEY, type) as
-        RelayBusConsumerMetadata[] | undefined) ?? [];
-    for (const metadata of own) {
-      byCatalog.set(metadata.catalog, metadata);
-    }
-  }
-  return [...byCatalog.values()];
+export function readConsumerMetadata(
+  prototype: object,
+  propertyKey: string | symbol,
+): readonly RelayBusConsumerMetadata[] {
+  return (
+    (Reflect.getMetadata(SUBSCRIBE_METADATA_KEY, prototype, propertyKey) as
+      RelayBusConsumerMetadata[] | undefined) ?? []
+  );
 }
