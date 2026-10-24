@@ -30,6 +30,14 @@ export type {
   KafkaRunConfig,
 } from './kafka-client.js';
 export {
+  cloudEventsBinary,
+  cloudEventsStructured,
+  jsonEnvelope,
+  type KafkaCodec,
+  type KafkaEncodedRecord,
+  type KafkaJsonEnvelopeMapping,
+} from './codecs.js';
+export {
   KafkaTransport,
   type InvalidKafkaMessage,
   type InvalidMessagePolicy,

@@ -50,6 +50,7 @@ describe('exported error classes', () => {
       'rabbitmq.MalformedMessageError',
       'rabbitmq.RabbitMqPublishRejectedError',
       'rabbitmq.RabbitMqUnavailableError',
+      'rabbitmq.RabbitMqUnencodableEventError',
       'rabbitmq.UnroutableMessageError',
       'rabbitmq.UnserializablePayloadError',
     ]);
@@ -109,6 +110,7 @@ describe('exported error classes', () => {
       MalformedMessageError: 'RELAYBUS_RABBITMQ_MALFORMED_MESSAGE',
       RabbitMqPublishRejectedError: 'RELAYBUS_RABBITMQ_PUBLISH_REJECTED',
       RabbitMqUnavailableError: 'RELAYBUS_RABBITMQ_UNAVAILABLE',
+      RabbitMqUnencodableEventError: 'RELAYBUS_RABBITMQ_UNENCODABLE_EVENT',
       UnroutableMessageError: 'RELAYBUS_RABBITMQ_UNROUTABLE_MESSAGE',
       UnserializablePayloadError: 'RELAYBUS_RABBITMQ_UNSERIALIZABLE_PAYLOAD',
     });

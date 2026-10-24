@@ -28,6 +28,8 @@ const serialIntegrationTests = [
   // other files they missed their deadlines now and then.
   'packages/kafka/test/interoperability.integration.test.ts',
   'packages/rabbitmq/test/interoperability.integration.test.ts',
+  'packages/kafka/test/codecs.integration.test.ts',
+  'packages/rabbitmq/test/codecs.integration.test.ts',
   'packages/kafka/test/catalog-services.integration.test.ts',
   'packages/rabbitmq/test/catalog-services.integration.test.ts',
   'packages/nestjs/test/catalog-services.integration.test.ts',

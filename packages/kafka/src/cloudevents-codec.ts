@@ -1,4 +1,5 @@
 import { assertEventType, type EventEnvelope } from '@relaybus/core';
+import { writeStructuredCloudEvent } from '@relaybus/core/internal';
 import { InvalidKafkaMessageError, UnencodableEventError } from './errors.js';
 import type { KafkaBytes, KafkaIncomingHeaders, KafkaOutgoingHeaders } from './kafka-client.js';
 
@@ -22,6 +23,7 @@ const SPEC_VERSION = '1.0';
 /** Name of the Kafka header that carries the media type of the record value. */
 export const CONTENT_TYPE = 'content-type';
 const JSON_MEDIA_TYPE = 'application/json';
+const STRUCTURED_MEDIA_TYPE = 'application/cloudevents+json';
 const CLOUDEVENTS_PREFIX = 'ce_';
 const ESCAPE_PREFIX = 'x-relaybus-h-';
 const RESERVED_PREFIXES = [CLOUDEVENTS_PREFIX, 'x-relaybus-'];
@@ -80,24 +82,49 @@ export function encodeEnvelope(envelope: EventEnvelope): EncodedMessage {
   return { key: envelope.key, value, headers: Object.fromEntries(entries) };
 }
 
-function serializePayload(envelope: EventEnvelope): string {
-  let value: string | undefined;
+/**
+ * Encodes an envelope as a CloudEvents Kafka structured-mode record: the value
+ * is one JSON document with the attributes and `data` (the payload), the
+ * content type is `application/cloudevents+json`, the record key is the event
+ * key. Event headers travel as record headers, escaped as in binary mode.
+ */
+export function encodeStructuredEnvelope(envelope: EventEnvelope): EncodedMessage {
+  const value = writeStructuredCloudEvent(envelope, {
+    time: formatTime(envelope),
+    data: serializePayload(envelope),
+  });
+  const entries: [string, string][] = Object.entries(envelope.headers).map(
+    ([name, headerValue]) => [escapeUserHeaderName(name), headerValue],
+  );
+  entries.push([CONTENT_TYPE, STRUCTURED_MEDIA_TYPE]);
+  return { key: envelope.key, value, headers: Object.fromEntries(entries) };
+}
+
+/** The payload as JSON text; refuses a payload JSON cannot represent. */
+export function serializePayload(envelope: EventEnvelope): string {
+  return serializeJson(envelope, envelope.payload);
+}
+
+/** `value` (the payload or a body holding it) as JSON text, refusing what JSON cannot represent. */
+export function serializeJson(envelope: EventEnvelope, value: unknown): string {
+  let text: string | undefined;
   try {
-    value = JSON.stringify(envelope.payload);
+    text = JSON.stringify(value);
   } catch (error) {
     throw new UnencodableEventError(
       `Event ${envelope.id} has a payload that JSON cannot represent: ${(error as Error).message}`,
     );
   }
-  if (value === undefined) {
+  if (text === undefined) {
     throw new UnencodableEventError(
       `Event ${envelope.id} has a payload that JSON cannot represent (undefined, a function or a symbol)`,
     );
   }
-  return value;
+  return text;
 }
 
-function formatTime(envelope: EventEnvelope): string {
+/** The occurredAt as RFC 3339 text; refuses an invalid date or a year outside 0..9999. */
+export function formatTime(envelope: EventEnvelope): string {
   const year = envelope.occurredAt.getUTCFullYear();
   if (Number.isNaN(year) || year < 0 || year > MAXIMUM_RFC3339_YEAR) {
     throw new UnencodableEventError(

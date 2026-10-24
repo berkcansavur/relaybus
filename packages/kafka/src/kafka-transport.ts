@@ -12,6 +12,7 @@ import {
 } from '@relaybus/core';
 import { assertPositiveInteger, schedule, type CancelTimer } from '@relaybus/core/internal';
 import { decodeEnvelope, encodeEnvelope, toOutgoingHeaders } from './cloudevents-codec.js';
+import { cloudEventsBinary, type KafkaCodec } from './codecs.js';
 import {
   GroupJoinTimeoutError,
   HandlerFailedError,
@@ -109,14 +110,22 @@ export interface KafkaTransportOptions {
   /** Handling of records that cannot be processed for good. Default `'dead-letter'`. */
   readonly onInvalidMessage?: InvalidMessagePolicy;
   /**
-   * How consumed records become events. Default: strict CloudEvents binary
-   * mode ({@link decodeEnvelope}), which is what relaybus producers write; any
-   * other record is malformed and goes to `onInvalidMessage`. Set it to read
-   * topics written by services that do not use relaybus:
-   * {@link decodeCloudEvent} also accepts structured mode, {@link plainJsonDecoder}
-   * maps plain JSON records, and a function of your own can do anything else
-   * (switch on `record.topic` to decode topics differently). Whatever a custom
-   * decoder throws marks the record as malformed, never crashes the consumer.
+   * The wire format, both ways: how events become records and consumed records
+   * become events. Default {@link cloudEventsBinary}: CloudEvents binary mode,
+   * strict on read, so any other record is malformed and goes to
+   * `onInvalidMessage`. {@link cloudEventsStructured} writes structured mode
+   * and reads both, {@link jsonEnvelope} maps a JSON format of your own (an
+   * envelope with the payload inside, or the bare payload), and an object with
+   * `encode` and `decode` can do anything else. Whatever a non-default codec's
+   * `decode` throws marks the record as malformed, never crashes the consumer.
+   */
+  readonly codec?: KafkaCodec;
+  /**
+   * How consumed records become events; events are still written in
+   * CloudEvents binary mode.
+   *
+   * @deprecated Use `codec`: `decode: fn` is `codec: { encode: encodeEnvelope, decode: fn }`.
+   * Giving both `decode` and `codec` is a configuration error.
    */
   readonly decode?: KafkaMessageDecoder;
   /** Default `console`. */
@@ -152,8 +161,8 @@ interface Settings {
 /**
  * Kafka {@link Transport}. Events travel as CloudEvents binary-mode records
  * (`ce_*` headers, JSON value), so any CloudEvents-aware consumer can read them.
- * Records from producers that do not use relaybus are read through the
- * `decode` option.
+ * The `codec` option changes the wire format, for example to read and write
+ * the JSON format of services that do not use relaybus.
  *
  * Publishing: idempotent producer, `acks=-1`, resolves after the broker ack and
  * rejects with {@link PublishTimeoutError} after `publishTimeout`. A timed-out
@@ -181,7 +190,7 @@ export class KafkaTransport implements Transport {
   readonly #producerConfig: object;
   readonly #consumerConfig: object;
   readonly #invalidPolicy: InvalidMessagePolicy;
-  readonly #decode: KafkaMessageDecoder | undefined;
+  readonly #codec: KafkaCodec;
   readonly #logger: RelayBusLogger;
   readonly #settings: Settings;
   readonly #sleepers = new Set<() => void>();
@@ -207,7 +216,7 @@ export class KafkaTransport implements Transport {
     this.#producerConfig = options.producerConfig ?? {};
     this.#consumerConfig = options.consumerConfig ?? {};
     this.#invalidPolicy = options.onInvalidMessage ?? 'dead-letter';
-    this.#decode = options.decode;
+    this.#codec = resolveCodec(options);
     this.#logger = options.logger ?? console;
     this.#settings = resolveSettings(options);
   }
@@ -241,11 +250,10 @@ export class KafkaTransport implements Transport {
 
   async publish(envelope: EventEnvelope, destination: string): Promise<void> {
     const producer = await this.#connectedProducer();
-    const { key, value, headers } = encodeEnvelope(envelope);
     await this.#send(producer, {
       topic: destination,
       acks: -1,
-      messages: [{ key, value, headers }],
+      messages: [this.#codec.encode(envelope)],
     });
   }
 
@@ -421,8 +429,8 @@ export class KafkaTransport implements Transport {
     try {
       envelope = this.#decodeRecord(payload);
     } catch (error) {
-      // The default decoder throws only InvalidKafkaMessageError for bad input; anything else is a bug.
-      if (this.#decode === undefined && !(error instanceof InvalidKafkaMessageError)) {
+      // The default codec throws only InvalidKafkaMessageError for bad input; anything else is a bug.
+      if (this.#codec === cloudEventsBinary && !(error instanceof InvalidKafkaMessageError)) {
         throw toHandlerFailure(error);
       }
       await this.#withRetries(payload, {
@@ -448,7 +456,7 @@ export class KafkaTransport implements Transport {
   }
 
   #decodeRecord({ topic, partition, message }: KafkaEachMessagePayload): EventEnvelope {
-    if (this.#decode === undefined) {
+    if (this.#codec === cloudEventsBinary) {
       return decodeEnvelope(message);
     }
     const record = {
@@ -460,7 +468,7 @@ export class KafkaTransport implements Transport {
       headers: message.headers,
       timestamp: message.timestamp,
     };
-    return completeDecodedEvent(this.#decode(record), record);
+    return completeDecodedEvent(this.#codec.decode(record), record);
   }
 
   async #handleInvalid(payload: KafkaEachMessagePayload, error: unknown): Promise<void> {
@@ -688,6 +696,17 @@ export class KafkaTransport implements Transport {
       },
     };
   }
+}
+
+/** The codec of the options; the deprecated `decode` pairs with the default encoding. */
+function resolveCodec({ codec, decode }: KafkaTransportOptions): KafkaCodec {
+  if (decode === undefined) {
+    return codec ?? cloudEventsBinary;
+  }
+  if (codec !== undefined) {
+    throw new ConfigurationError("Give 'codec' or the deprecated 'decode', not both");
+  }
+  return { encode: encodeEnvelope, decode };
 }
 
 function resolveSettings(options: KafkaTransportOptions): Settings {

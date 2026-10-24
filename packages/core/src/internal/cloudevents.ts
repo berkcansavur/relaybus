@@ -1,4 +1,4 @@
-import { assertEventType } from '../event.js';
+import { assertEventType, type EventEnvelope } from '../event.js';
 
 /** The media type of a content type, without parameters and lower-cased; undefined for anything but a string. */
 export function mediaTypeOf(contentType: unknown): string | undefined {
@@ -55,4 +55,27 @@ export function createCloudEventReaders(invalid: (reason: string) => Error): Clo
       }
     },
   };
+}
+
+/**
+ * The JSON text of a CloudEvents 1.0 structured-mode event: the attributes (the key as `subject`,
+ * correlation and causation ids as extension attributes), then `data`, the already serialized
+ * payload, so the payload is serialized only once.
+ */
+export function writeStructuredCloudEvent(
+  envelope: EventEnvelope,
+  { time, data }: { readonly time: string; readonly data: string },
+): string {
+  const attributes = {
+    specversion: '1.0',
+    id: envelope.id,
+    type: envelope.type,
+    source: envelope.source,
+    time,
+    datacontenttype: 'application/json',
+    ...(envelope.key === null ? {} : { subject: envelope.key }),
+    ...(envelope.correlationId === null ? {} : { correlationid: envelope.correlationId }),
+    ...(envelope.causationId === null ? {} : { causationid: envelope.causationId }),
+  };
+  return `${JSON.stringify(attributes).slice(0, -1)},"data":${data}}`;
 }

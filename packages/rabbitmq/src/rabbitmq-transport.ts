@@ -28,7 +28,7 @@ import {
 import { QueueConsumer } from './queue-consumer.js';
 import { SerialQueue } from './serial-queue.js';
 import { assertConsumerTopology, assertExchange, type ConsumerTopology } from './topology.js';
-import { assertShortString, encodeEnvelope } from './wire-format.js';
+import { assertShortString } from './wire-format.js';
 
 /** Publisher channel plus the broker returns not yet matched with their confirm. */
 interface Publisher {
@@ -140,10 +140,11 @@ export class RabbitMqTransport implements Transport {
    * @throws {RabbitMqUnavailableError} not connected, channel lost, or confirm timed out
    * @throws {RabbitMqPublishRejectedError} the broker nacked the message
    * @throws {UnroutableMessageError} no queue is bound to `destination` (unless `allowUnroutable`)
+   * @throws whatever the `codec`'s `encode` throws, such as {@link RabbitMqUnencodableEventError}
    */
   async publish(envelope: EventEnvelope, destination: string): Promise<void> {
     assertShortString('Destination (routing key)', destination);
-    const { content, options } = encodeEnvelope(envelope);
+    const { content, options } = this.#settings.encode(envelope);
     await this.#publishConfirmed({
       exchange: this.#settings.exchange,
       routingKey: destination,

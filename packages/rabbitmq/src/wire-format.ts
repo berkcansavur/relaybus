@@ -1,6 +1,11 @@
 import type { EventEnvelope, EventHeaders } from '@relaybus/core';
+import { writeStructuredCloudEvent } from '@relaybus/core/internal';
 import type { AmqpMessage, AmqpPublishOptions } from './amqp-types.js';
-import { AmqpLimitExceededError, MalformedMessageError } from './errors.js';
+import {
+  AmqpLimitExceededError,
+  MalformedMessageError,
+  RabbitMqUnencodableEventError,
+} from './errors.js';
 import { assertJsonPayload } from './json-payload.js';
 
 /** AMQP `timestamp` properties count seconds. */
@@ -37,6 +42,9 @@ const ATTRIBUTE_PREFIX = 'cloudEvents:';
 const EVENT_HEADER_PREFIX = 'relaybus:';
 const SPEC_VERSION = '1.0';
 const JSON_CONTENT_TYPE = 'application/json';
+const STRUCTURED_CONTENT_TYPE = 'application/cloudevents+json';
+/** Header name prefixes the broker or the transport own; an event header there would be lost on read. */
+const RESERVED_HEADER_PREFIXES = ['x-death', 'x-first-death-', 'x-last-death-', 'x-relaybus-'];
 const SHORT_STRING_LIMIT_BYTES = 255;
 /** RFC 3339 date-time, the format of the CloudEvents `time` attribute. */
 export const RFC3339_PATTERN =
@@ -94,6 +102,67 @@ export function encodeEnvelope(envelope: EventEnvelope): EncodedMessage {
       headers,
     },
   };
+}
+
+/**
+ * Serializes an envelope in CloudEvents structured content mode: the body is
+ * one `application/cloudevents+json` document with the attributes and `data`.
+ * The AMQP properties are those of binary mode; event headers travel as
+ * message headers under their own names, as structured-mode readers expect.
+ *
+ * @throws {UnserializablePayloadError} the payload is not representable as JSON
+ * @throws {AmqpLimitExceededError} the id or a header name exceeds 255 bytes
+ * @throws {RabbitMqUnencodableEventError} a header name the broker or the transport reserves
+ */
+export function encodeStructuredEnvelope(envelope: EventEnvelope): EncodedMessage {
+  assertJsonPayload(envelope.payload, envelope.id);
+  assertShortString('Event id', envelope.id);
+  const document = writeStructuredCloudEvent(envelope, {
+    time: envelope.occurredAt.toISOString(),
+    data: JSON.stringify(envelope.payload),
+  });
+  return {
+    content: Buffer.from(document, 'utf8'),
+    options: {
+      ...messageProperties(envelope),
+      contentType: STRUCTURED_CONTENT_TYPE,
+      headers: plainHeaders(envelope, envelope.headers),
+    },
+  };
+}
+
+/** The AMQP properties every relaybus format writes; `contentType` and `headers` are the format's own. */
+export function messageProperties(
+  envelope: EventEnvelope,
+): Omit<AmqpPublishOptions, 'headers' | 'contentType'> {
+  return {
+    persistent: true,
+    messageId: envelope.id,
+    timestamp: Math.floor(envelope.occurredAt.getTime() / MILLISECONDS_PER_SECOND),
+    ...mirror('type', envelope.type),
+    ...mirror('appId', envelope.source),
+    ...(envelope.correlationId === null ? {} : mirror('correlationId', envelope.correlationId)),
+  };
+}
+
+/**
+ * Message headers under their own names, for formats read by other services.
+ * A name the broker or the transport reserves is refused, because the reader
+ * would drop it; a name beyond 255 bytes is refused by AMQP.
+ */
+export function plainHeaders(
+  envelope: EventEnvelope,
+  headers: EventHeaders,
+): Record<string, string> {
+  for (const name of Object.keys(headers)) {
+    if (RESERVED_HEADER_PREFIXES.some((prefix) => name.startsWith(prefix))) {
+      throw new RabbitMqUnencodableEventError(
+        `Event ${envelope.id} has a header '${name}', a name the broker or the transport reserves`,
+      );
+    }
+    assertShortString(`Header name '${name}'`, name);
+  }
+  return Object.fromEntries(Object.entries(headers));
 }
 
 /**

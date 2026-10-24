@@ -285,7 +285,7 @@ function requireRecordTimestamp(record: DecodableMessage): Date {
  * header wins, and a value that is not valid UTF-8 is left out, because
  * replacing its bytes could make two different ids or types look equal.
  */
-function readHeadersLeniently(incoming: KafkaIncomingHeaders | undefined): EventHeaders {
+export function readHeadersLeniently(incoming: KafkaIncomingHeaders | undefined): EventHeaders {
   const entries: [string, string][] = [];
   for (const [name, raw] of Object.entries(incoming ?? {})) {
     const value = Array.isArray(raw)

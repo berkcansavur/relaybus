@@ -58,7 +58,7 @@ type ConfirmCallback = (error: Error | null | undefined) => void;
 /** Channel fake: every operation succeeds unless a test overrides the mock. */
 export class FakeChannel extends EventEmitter implements AmqpConfirmChannel {
   deliver: ((message: AmqpMessage | null) => void) | undefined;
-  readonly published: { routingKey: string; options: AmqpPublishOptions }[] = [];
+  readonly published: { routingKey: string; content: Buffer; options: AmqpPublishOptions }[] = [];
 
   assertExchange = vi.fn(
     async (_exchange: string, _type: string, _options?: unknown): Promise<unknown> => ({}),
@@ -91,11 +91,11 @@ export class FakeChannel extends EventEmitter implements AmqpConfirmChannel {
   publish(
     _exchange: string,
     routingKey: string,
-    _content: Buffer,
+    content: Buffer,
     options: AmqpPublishOptions,
     callback: ConfirmCallback,
   ): boolean {
-    this.published.push({ routingKey, options });
+    this.published.push({ routingKey, content, options });
     this.publishBehaviour(callback, routingKey);
     return true;
   }

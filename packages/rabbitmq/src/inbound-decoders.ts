@@ -245,7 +245,7 @@ export function completeDecodedEvent(decoded: unknown, message: AmqpMessage): Ev
 }
 
 /** Parses the body as UTF-8 JSON, refusing invalid UTF-8 instead of replacing it. */
-function parseJsonBody(content: Buffer): unknown {
+export function parseJsonBody(content: Buffer): unknown {
   let text: string;
   try {
     text = strictUtf8.decode(content);
@@ -259,7 +259,7 @@ function parseJsonBody(content: Buffer): unknown {
   }
 }
 
-function nonEmptyText(value: unknown): string | undefined {
+export function nonEmptyText(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
@@ -292,7 +292,7 @@ function extensionAttributes(body: Record<string, unknown>): Record<string, stri
   );
 }
 
-function readForeignHeaders(properties: AmqpMessageProperties): Record<string, string> {
+export function readForeignHeaders(properties: AmqpMessageProperties): Record<string, string> {
   return Object.fromEntries(
     Object.entries(properties.headers ?? {}).filter(
       (entry): entry is [string, string] =>

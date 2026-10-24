@@ -49,3 +49,12 @@ export class AmqpLimitExceededError extends NonRetryableError {
   override name = 'AmqpLimitExceededError';
   override readonly code: string = 'RELAYBUS_RABBITMQ_AMQP_LIMIT_EXCEEDED';
 }
+
+/**
+ * An event the configured codec cannot write: a header name the format
+ * reserves, or a type a fixed-type route does not carry. Never retried.
+ */
+export class RabbitMqUnencodableEventError extends NonRetryableError {
+  override name = 'RabbitMqUnencodableEventError';
+  override readonly code: string = 'RELAYBUS_RABBITMQ_UNENCODABLE_EVENT';
+}

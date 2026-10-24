@@ -10,9 +10,10 @@ import {
 } from '@relaybus/core';
 import { assertPositiveInteger } from '@relaybus/core/internal';
 import type { AmqpConnection, AmqpMessage } from './amqp-types.js';
+import { cloudEventsBinary, type RabbitMqCodec } from './codecs.js';
 import { completeDecodedEvent, type RabbitMqMessageDecoder } from './inbound-decoders.js';
 import { buildRetryLadder } from './redelivery.js';
-import { decodeEnvelope } from './wire-format.js';
+import { decodeEnvelope, encodeEnvelope, type EncodedMessage } from './wire-format.js';
 
 /** Connection settings accepted by `amqplib.connect`, given as an object instead of a URL. */
 export interface BrokerConnectionSettings {
@@ -130,15 +131,23 @@ export interface RabbitMqTransportOptions {
   /** How long `close` waits for running handlers. Default `'30s'`. */
   readonly shutdownTimeout?: Duration;
   /**
-   * How consumed messages become events. Default: CloudEvents binary mode as
-   * relaybus producers write it (`cloudEvents:*` headers, AMQP properties as
-   * fallback); any other message is malformed and dead-lettered. Set it to
-   * consume messages from services that do not use relaybus:
-   * {@link decodeCloudEvent} also accepts structured mode, {@link plainJsonDecoder}
-   * maps plain JSON messages, and a function of your own can do anything else
-   * (switch on `message.fields.routingKey` to decode routing keys differently).
-   * Whatever a decoder throws marks the message as malformed: it is
+   * The wire format, both ways: how events become messages and consumed
+   * messages become events. Default {@link cloudEventsBinary}: CloudEvents
+   * binary mode (`cloudEvents:*` headers, AMQP properties as fallback), any
+   * other message is malformed and dead-lettered. {@link cloudEventsStructured}
+   * writes structured mode and reads both, {@link jsonEnvelope} maps a JSON
+   * format of your own (an envelope with the payload inside, or the bare
+   * payload), and an object with `encode` and `decode` can do anything else.
+   * Whatever `decode` throws marks the message as malformed: it is
    * dead-lettered, the consumer keeps running.
+   */
+  readonly codec?: RabbitMqCodec;
+  /**
+   * How consumed messages become events; events are still written in
+   * CloudEvents binary mode.
+   *
+   * @deprecated Use `codec`: `decode: fn` is `codec: { encode: encodeEnvelope, decode: fn }`.
+   * Giving both `decode` and `codec` is a configuration error.
    */
   readonly decode?: RabbitMqMessageDecoder;
   /** Default: `console`. */
@@ -169,6 +178,8 @@ export interface ResolvedTransportSettings {
   readonly allowUnroutable: boolean;
   readonly publishTimeoutMs: number;
   readonly shutdownTimeoutMs: number;
+  /** Turns an event into the message to publish. */
+  readonly encode: (envelope: EventEnvelope) => EncodedMessage;
   /** Turns a consumed message into a complete envelope; throws for a malformed one. */
   readonly decode: (message: AmqpMessage) => EventEnvelope;
   readonly logger: RelayBusLogger;
@@ -302,7 +313,7 @@ function resolveRetries(
   };
 }
 
-/** Reconnection, timeouts, decoding and the injected logger and randomness. */
+/** Reconnection, timeouts, the codec and the injected logger and randomness. */
 function resolveRuntime(
   options: RabbitMqTransportOptions,
   { failOnConnectError }: BasicSettings,
@@ -313,6 +324,7 @@ function resolveRuntime(
   | 'allowUnroutable'
   | 'publishTimeoutMs'
   | 'shutdownTimeoutMs'
+  | 'encode'
   | 'decode'
   | 'logger'
   | 'random'
@@ -323,7 +335,7 @@ function resolveRuntime(
     allowUnroutable: options.allowUnroutable ?? false,
     publishTimeoutMs: positiveDuration(options.publishTimeout ?? '30s', 'publishTimeout'),
     shutdownTimeoutMs: toMilliseconds(options.shutdownTimeout ?? '30s', 'shutdownTimeout'),
-    decode: resolveDecode(options.decode),
+    ...resolveCodec(options),
     logger: options.logger ?? console,
     random: options.random ?? Math.random,
   };
@@ -342,13 +354,23 @@ export function resolveQueueName(settings: ResolvedTransportSettings): string {
   return `${settings.queuePrefix}.${settings.consumerGroup}`;
 }
 
-function resolveDecode(
-  decode: RabbitMqMessageDecoder | undefined,
-): (message: AmqpMessage) => EventEnvelope {
-  if (decode === undefined) {
-    return decodeEnvelope;
+/** The codec of the options; the deprecated `decode` pairs with the default encoding. */
+function resolveCodec({
+  codec,
+  decode,
+}: RabbitMqTransportOptions): Pick<ResolvedTransportSettings, 'encode' | 'decode'> {
+  if (decode !== undefined && codec !== undefined) {
+    throw new ConfigurationError("Give 'codec' or the deprecated 'decode', not both");
   }
-  return (message) => completeDecodedEvent(decode(message), message);
+  const chosen =
+    decode === undefined ? (codec ?? cloudEventsBinary) : { encode: encodeEnvelope, decode };
+  if (chosen === cloudEventsBinary) {
+    return { encode: encodeEnvelope, decode: decodeEnvelope };
+  }
+  return {
+    encode: chosen.encode,
+    decode: (message) => completeDecodedEvent(chosen.decode(message), message),
+  };
 }
 
 function resolveConnect(options: RabbitMqTransportOptions): () => Promise<AmqpConnection> {
