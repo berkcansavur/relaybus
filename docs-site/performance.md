@@ -84,22 +84,22 @@ Publish latency (p99 of one publishing transaction, PostgreSQL, P=8, batch 100):
 
 Deliveries completed per second, from a preloaded backlog of unkeyed deliveries unless noted. Handlers do nothing.
 
-| Scenario                                    | 0.1.0 deliveries/s | 0.2.0 deliveries/s |  Ratio | Samples |
-| ------------------------------------------- | -----------------: | -----------------: | -----: | :-----: |
-| 1 process, `defaults` (*)                   |             ~3,100 |             ~4,000 |  1.29x |    1    |
-| 1 process, `mid`                            |              3,136 |             10,273 |  3.28x |    1    |
-| 1 process, `tuned`                          |              9,329 |             14,348 |  1.82x |    3    |
-| 4 processes, `defaults`                     |              2,334 |             10,043 |  4.30x |    1    |
-| 4 processes, `mid`                          |              2,805 |             32,306 | 11.52x |    1    |
-| 4 processes, `tuned`                        |              3,242 |             55,629 | 17.16x |    1    |
-| 8 processes, `defaults`                     |              5,478 |             17,371 |  3.17x |    1    |
-| 8 processes, `mid`                          |              8,750 |             45,632 |  5.22x |    1    |
-| 8 processes, `tuned`                        |              9,736 |             62,937 |  6.46x |    1    |
-| Fan-out to 5 handlers, 1 process, `tuned`   |              8,220 |             17,838 |  2.17x |    1    |
-| Fan-out to 5 handlers, 4 processes, `tuned` |              2,964 |             54,474 | 18.38x |    1    |
-| 1,000 distinct keys, 1 process, `tuned`     |              2,307 |              7,332 |  3.18x |    1    |
-| 1,000 distinct keys, 4 processes, `tuned`   |              7,072 |              4,660 |  0.66x |    1    |
-| 10 hot keys, 1 process, `tuned`             |              1,110 |              1,565 |  1.41x |    1    |
+| Scenario                                    | 0.1.0 deliveries/s | 0.2.0 deliveries/s |      Ratio | Samples |
+| ------------------------------------------- | -----------------: | -----------------: | ---------: | :-----: |
+| 1 process, `defaults` (*)                   |             ~3,100 |             ~4,000 |      1.29x |    1    |
+| 1 process, `mid`                            |              3,136 |             10,273 |      3.28x |    1    |
+| 1 process, `tuned`                          |              9,329 |             14,348 |      1.82x |    3    |
+| 4 processes, `defaults`                     |              2,334 |             10,043 |      4.30x |    1    |
+| 4 processes, `mid`                          |              2,805 |             32,306 |     11.52x |    1    |
+| 4 processes, `tuned`                        |              3,242 |             55,629 |     17.16x |    1    |
+| 8 processes, `defaults`                     |              5,478 |             17,371 |      3.17x |    1    |
+| 8 processes, `mid`                          |              8,750 |             45,632 |      5.22x |    1    |
+| 8 processes, `tuned`                        |              9,736 |             62,937 |      6.46x |    1    |
+| Fan-out to 5 handlers, 1 process, `tuned`   |              8,220 |             17,838 |      2.17x |    1    |
+| Fan-out to 5 handlers, 4 processes, `tuned` |              2,964 |             54,474 |     18.38x |    1    |
+| 1,000 distinct keys, 1 process, `tuned`     |              2,307 |              7,332 |      3.18x |    1    |
+| 1,000 distinct keys, 4 processes, `tuned`   |       ~2,690–3,300 |       ~5,200–5,300 | 1.61–1.93x |    2    |
+| 10 hot keys, 1 process, `tuned`             |              1,110 |              1,565 |      1.41x |    1    |
 
 (*) Re-measured after the prepared-statement fix, with fewer samples than the other cells; the main run gave 2,056 to 3,716.
 
@@ -159,7 +159,7 @@ In 0.1.0 a delivery row was updated three times (claim, lease renewals, completi
 
 ## Where it is not better
 
-- **Keyed dispatch on four processes with 1,000 distinct keys:** 7,072 to 4,660 deliveries/s (0.66x, one sample). Keyed claims still do per-key reads, and four processes contend for lanes that hold many keys. This is the only throughput cell below 1.0 for dispatch and is not yet investigated.
+- **Keyed dispatch on four processes with 1,000 distinct keys:** the first full run showed 0.66x, but that came from one unusually fast 0.1.0 sample (7,072/s against 2,690–3,300/s in the re-runs). Two re-runs with 0.1.0 measured alongside put 0.2.0 at 1.61x and 1.93x, so the table shows the re-run range; it is not a regression.
 - **MongoDB batch-100 publish:** 31,600 to 31,167 events/s (0.98x, three samples): no change, and a higher p99 for the transaction (79 ms to 126 ms, interval inconclusive).
 - **Mixed load near saturation:** p99 can be higher than 0.1.0's, see above.
 - **Single sample cells** may move by 10 % or more in either direction on a re-run. The directions are consistent with the exact counters, which is why they are listed.

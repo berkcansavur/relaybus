@@ -36,7 +36,6 @@ Verification: 2,292 tests with 100 % statement, branch, function and line covera
 - **Ordering scope.** Order is guaranteed between deliveries of the same handler and the same ordering key. Unkeyed events, and deliveries to different handlers, have no relative order.
 - **`bus.stop()` has no deadline yet.** It waits for running handlers to finish; a handler that never returns holds shutdown until the process manager kills it. Give handlers their own timeouts (`timeout` on `@Subscribe`).
 - **ORM adapters do not use prepared statements.** Prisma, TypeORM, Drizzle, Knex and Kysely send every statement unprepared, so each publish and claim is parsed again (about 0.3 ms per publish and 1.3 ms per claim of 10 deliveries). Run dispatchers on a `pg` pool; see [Tuning](/tuning).
-- **Keyed dispatch on several processes** with many distinct keys was slower than 0.1.0 in one benchmark cell ([details](/performance#where-it-is-not-better)).
 
 ## 0.1.x
 
