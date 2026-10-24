@@ -167,6 +167,12 @@ export const sections = [
           'How relaybus compares with @nestjs/event-emitter, @nestjs/cqrs, @nestjs/outbox, BullMQ, pg-boss and using Kafka directly.',
       },
       {
+        title: 'Tuning for your workload',
+        path: 'tuning',
+        description:
+          'Recommended relaybus settings for a single-connection API, a high-traffic API, a worker fleet, PgBouncer in transaction mode and a MongoDB replica set.',
+      },
+      {
         title: 'FAQ',
         path: 'faq',
         description:

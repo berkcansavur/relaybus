@@ -84,15 +84,17 @@ against a fake client only. Prisma interactive transactions default to a 5 s tim
 
 ## Options
 
-| Option                                   | Default               | Meaning                                                                                                           |
-| ---------------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `pool` / `connectionString` / `executor` | required, exactly one | How to reach the database.                                                                                        |
-| `poolConfig`                             | none                  | Extra `pg` pool settings when `connectionString` is used.                                                         |
-| `schema`                                 | `'public'`            | Schema of the tables. Created by `setup()` when it is not `public`.                                               |
-| `tablePrefix`                            | `'relaybus_'`         | Tables are `<prefix>events`, `<prefix>deliveries`, `<prefix>key_sequences`, `<prefix>lanes`.                      |
-| `completionHistory`                      | `false`               | Keep an append-only record of completed deliveries (`<prefix>completed_deliveries`). Same value in every process. |
-| `purgeBatchSize`                         | `1000`                | Deliveries deleted per transaction by `purge`.                                                                    |
-| `logger`                                 | `console`             | Receives idle-connection errors of a pool the store created itself.                                               |
+| Option                                   | Default               | Meaning                                                                                                            |
+| ---------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `pool` / `connectionString` / `executor` | required, exactly one | How to reach the database.                                                                                         |
+| `poolConfig`                             | none                  | Extra `pg` pool settings when `connectionString` is used.                                                          |
+| `schema`                                 | `'public'`            | Schema of the tables. Created by `setup()` when it is not `public`.                                                |
+| `tablePrefix`                            | `'relaybus_'`         | Tables are `<prefix>events`, `<prefix>deliveries`, `<prefix>key_sequences`, `<prefix>lanes`.                       |
+| `completionHistory`                      | `false`               | Keep an append-only record of completed deliveries (`<prefix>completed_deliveries`). Same value in every process.  |
+| `purgeBatchSize`                         | `1000`                | Deliveries deleted per transaction by `purge`.                                                                     |
+| `logger`                                 | `console`             | Receives idle-connection errors of a pool the store created itself.                                                |
+| `preparedStatements`                     | `true`                | Prepare the statements the store repeats once per connection. `false` behind PgBouncer < 1.21 in transaction mode. |
+| `wakeUp`                                 | `'notify'`            | `'notify'`: coalesced `NOTIFY` + `LISTEN` wake other processes. `'poll'`: no notifications, other processes poll.  |
 
 **Pool errors.** A pool created from `connectionString` gets an `error` listener that logs through `logger`
 (`[PostgresEventStore](constructor) Idle connection failed ...`); `pg` then replaces the dead connection, so a failover
@@ -238,17 +240,24 @@ tool, run it as one transaction with the workers stopped. Running 0.1.0 and the 
   the same statement. Only taking over a lane whose previous holder died with deliveries running (their lost attempts
   are charged first) continues in a short transaction. Publishing new events is one statement per `append`, whatever
   the batch size; adding a handler to an event that already exists costs two more.
-- **Wake-ups.** `append` sends one `pg_notify` per call when it inserted a delivery that is due now (none for delayed
-  deliveries; PostgreSQL merges repeats within a transaction and drops them on rollback). A dispatcher on a store built
-  from `pool` or `connectionString` listens on that channel (`<schema>.<prefix>deliveries`, hashed when longer than 63
-  characters) on one connection of its own, opened with the pool's settings outside the pool, so an event published by any process runs within
-  milliseconds instead of at the next poll. A lost listening connection is replaced after a second; polling remains the
-  safety net, so a missed notification only costs latency. A store built on an `executor` cannot listen and relies on
-  polling (and on the wake-up of its own process after a publish). Notifications are sent from the publishing
-  transaction whatever the store, and commits that notify are serialized by PostgreSQL's notification queue lock.
+- **Wake-ups.** With `wakeUp: 'notify'` (the default) a publish that inserted a delivery due now notifies the
+  dispatchers (none for delayed deliveries; PostgreSQL merges repeats within a transaction and drops them on
+  rollback). A store sends at most one notification per 10 ms from its publishing statements; publishes in between
+  leave one trailing notification that the store sends after their commit, so concurrent publishers do not queue
+  behind PostgreSQL's notification lock. A dispatcher on a store built from `pool` or `connectionString` listens on
+  that channel (`<schema>.<prefix>deliveries`, hashed when longer than 63 characters) on one connection of its own,
+  opened with the pool's settings outside the pool, so an event published by any process runs within milliseconds
+  instead of at the next poll. A lost listening connection is replaced after a second; polling remains the safety
+  net, so a missed notification only costs latency. A store built on an `executor` cannot listen and relies on
+  polling (and on the wake-up of its own process after a publish). `wakeUp: 'poll'` sends and listens for nothing.
+- **Prepared statements.** With `preparedStatements: true` (the default) the publish, claim, completion and renewal
+  statements are named prepared statements: each connection parses and plans them once. Only `PgExecutor` (the
+  default `pool` / `connectionString` path) prepares; the library adapters send every statement unprepared. See
+  `docs/performance/publish-path.md` for what that saves.
 - **Pooling.** Claim, complete, extend and purge need a free connection besides your transactions; size the pool for
-  `dispatcher.concurrency` plus publishers; the listening connection comes on top of the pool's `max`. Listening needs a
-  session: with PgBouncer in transaction pooling, notifications are not delivered and dispatchers fall back to polling.
+  `dispatcher.concurrency` plus publishers; the listening connection comes on top of the pool's `max`. Listening and
+  prepared statements need a session: with PgBouncer in transaction pooling use `wakeUp: 'poll'`, and
+  `preparedStatements: false` unless PgBouncer is 1.21 or newer with `max_prepared_statements` above 0.
 - **Handlers added later.** A delivery added to an old event (new handler, republish with the same id) keeps the
   event's position in its key; if later events of that handler already finished, it runs after them.
 - **Listing completed deliveries.** Without `completionHistory`, `listDeliveries({ status: 'completed' })` is empty and

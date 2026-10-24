@@ -43,6 +43,7 @@ relaybus stores every event in the same database transaction as your business da
 ## Reference
 
 - [relaybus vs alternatives](https://berkcansavur.github.io/relaybus/comparison.md): How relaybus compares with @nestjs/event-emitter, @nestjs/cqrs, @nestjs/outbox, BullMQ, pg-boss and using Kafka directly.
+- [Tuning for your workload](https://berkcansavur.github.io/relaybus/tuning.md): Recommended relaybus settings for a single-connection API, a high-traffic API, a worker fleet, PgBouncer in transaction mode and a MongoDB replica set.
 - [FAQ](https://berkcansavur.github.io/relaybus/faq.md): Answers to common questions: publishing events reliably in NestJS, the transactional outbox pattern and avoiding lost events between a database and Kafka.
 - [Releases](https://berkcansavur.github.io/relaybus/releases.md): How relaybus is versioned and released, and where to find the changelog.
 
