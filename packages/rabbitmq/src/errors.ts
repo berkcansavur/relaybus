@@ -7,11 +7,13 @@ import { NonRetryableError, RelayBusError } from '@relaybus/core';
  */
 export class RabbitMqUnavailableError extends RelayBusError {
   override name = 'RabbitMqUnavailableError';
+  override readonly code: string = 'RELAYBUS_RABBITMQ_UNAVAILABLE';
 }
 
 /** The broker negatively acknowledged a published message. Retryable. */
 export class RabbitMqPublishRejectedError extends RelayBusError {
   override name = 'RabbitMqPublishRejectedError';
+  override readonly code: string = 'RELAYBUS_RABBITMQ_PUBLISH_REJECTED';
 }
 
 /**
@@ -20,11 +22,13 @@ export class RabbitMqPublishRejectedError extends RelayBusError {
  */
 export class UnroutableMessageError extends RelayBusError {
   override name = 'UnroutableMessageError';
+  override readonly code: string = 'RELAYBUS_RABBITMQ_UNROUTABLE_MESSAGE';
 }
 
 /** A received message is not a valid relaybus CloudEvent. It is dead-lettered. */
 export class MalformedMessageError extends RelayBusError {
   override name = 'MalformedMessageError';
+  override readonly code: string = 'RELAYBUS_RABBITMQ_MALFORMED_MESSAGE';
 }
 
 /**
@@ -34,6 +38,7 @@ export class MalformedMessageError extends RelayBusError {
  */
 export class UnserializablePayloadError extends NonRetryableError {
   override name = 'UnserializablePayloadError';
+  override readonly code: string = 'RELAYBUS_RABBITMQ_UNSERIALIZABLE_PAYLOAD';
 }
 
 /**
@@ -42,4 +47,5 @@ export class UnserializablePayloadError extends NonRetryableError {
  */
 export class AmqpLimitExceededError extends NonRetryableError {
   override name = 'AmqpLimitExceededError';
+  override readonly code: string = 'RELAYBUS_RABBITMQ_AMQP_LIMIT_EXCEEDED';
 }

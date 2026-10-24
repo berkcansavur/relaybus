@@ -92,6 +92,12 @@ export const sections = [
         description:
           'What happens to events that exhaust their retries, and how to inspect and requeue them.',
       },
+      {
+        title: 'Error codes',
+        path: 'concepts/error-codes',
+        description:
+          'The stable, machine-readable code of every relaybus error, stored with dead letters and reported to observers.',
+      },
     ],
   },
   {

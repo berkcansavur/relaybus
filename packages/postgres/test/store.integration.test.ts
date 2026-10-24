@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createUuidV7, type EventEnvelope } from '@relaybus/core';
+import { LeaseLostError, createUuidV7, toErrorInfo, type EventEnvelope } from '@relaybus/core';
 import { createPostgresSchemaSql, PgExecutor, PostgresEventStore } from '../src/index.js';
 import {
   createTestPool,
@@ -527,5 +527,40 @@ describe('claims of an owner draining its held lanes', () => {
     expect(await claim(1)).toEqual([]);
     expect(state.heldClaims).toBe(before);
     await pool.end();
+  });
+});
+
+describe('dead deliveries', () => {
+  it('keeps the error code of a relaybus error', async () => {
+    const store = new PostgresEventStore({ pool: database.pool, schema: uniqueSchema() });
+    await store.setup();
+    await store.transaction((transaction) =>
+      store.append(
+        transaction,
+        [
+          {
+            event: envelope(),
+            deliveries: [{ id: createUuidV7(), handler: 'h', availableAt: NOW }],
+          },
+        ],
+        NOW,
+      ),
+    );
+    const [delivery] = await store.claim({
+      handlers: ['h'],
+      limit: 1,
+      leaseOwner: 'w',
+      leaseExpiresAt: new Date(NOW.getTime() + 60_000),
+      now: NOW,
+    });
+    const error = toErrorInfo(new LeaseLostError('gone'));
+    await store.bury(delivery!, error, NOW);
+    const [record] = await store.listDeliveries({ status: 'dead' });
+    expect(record!.lastError).toEqual({
+      name: 'LeaseLostError',
+      message: 'gone',
+      stack: error.stack,
+      code: 'RELAYBUS_LEASE_LOST',
+    });
   });
 });

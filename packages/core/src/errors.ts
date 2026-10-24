@@ -4,11 +4,18 @@
 export class RelayBusError extends Error {
   // Explicit names survive minification, unlike `new.target.name`.
   override name = 'RelayBusError';
+  /**
+   * Stable, machine-readable identifier of the error class, such as `RELAYBUS_LEASE_LOST`.
+   * Unlike `name` and `message`, a code is never renamed once released; branch on it in
+   * alerts and dashboards. Subclasses declared outside relaybus inherit `RELAYBUS_ERROR`.
+   */
+  readonly code: string = 'RELAYBUS_ERROR';
 }
 
 /** Invalid options passed to a relaybus component. */
 export class ConfigurationError extends RelayBusError {
   override name = 'ConfigurationError';
+  override readonly code: string = 'RELAYBUS_CONFIGURATION';
 }
 
 /**
@@ -18,6 +25,7 @@ export class ConfigurationError extends RelayBusError {
  */
 export class TransactionRequiredError extends RelayBusError {
   override name = 'TransactionRequiredError';
+  override readonly code: string = 'RELAYBUS_TRANSACTION_REQUIRED';
 }
 
 /**
@@ -26,11 +34,13 @@ export class TransactionRequiredError extends RelayBusError {
  */
 export class NonRetryableError extends RelayBusError {
   override name = 'NonRetryableError';
+  override readonly code: string = 'RELAYBUS_NON_RETRYABLE';
 }
 
 /** A payload failed its event schema. Never retried: the payload will not change. */
 export class EventValidationError extends NonRetryableError {
   override name = 'EventValidationError';
+  override readonly code: string = 'RELAYBUS_EVENT_VALIDATION';
 
   constructor(
     message: string,
@@ -46,11 +56,13 @@ export class EventValidationError extends NonRetryableError {
  */
 export class InvalidEnvelopeError extends NonRetryableError {
   override name = 'InvalidEnvelopeError';
+  override readonly code: string = 'RELAYBUS_INVALID_ENVELOPE';
 }
 
 /** The worker no longer owns the delivery it was processing. */
 export class LeaseLostError extends RelayBusError {
   override name = 'LeaseLostError';
+  override readonly code: string = 'RELAYBUS_LEASE_LOST';
   /**
    * Whether the store said so (a fenced write returned false). A worker that only noticed
    * locally that its lease ran out may still own the delivery in the store and has to give it back.
@@ -66,6 +78,7 @@ export class LeaseLostError extends RelayBusError {
 /** A handler did not settle within its configured timeout. Retried like any failure. */
 export class HandlerTimeoutError extends RelayBusError {
   override name = 'HandlerTimeoutError';
+  override readonly code: string = 'RELAYBUS_HANDLER_TIMEOUT';
 }
 
 /**
@@ -74,6 +87,7 @@ export class HandlerTimeoutError extends RelayBusError {
  */
 export class DispatcherStoppedError extends RelayBusError {
   override name = 'DispatcherStoppedError';
+  override readonly code: string = 'RELAYBUS_DISPATCHER_STOPPED';
 }
 
 export interface ValidationIssue {
@@ -86,9 +100,14 @@ export interface ErrorInfo {
   readonly name: string;
   readonly message: string;
   readonly stack?: string | undefined;
+  /** The {@link RelayBusError.code} of a relaybus error; absent for any other error. */
+  readonly code?: string | undefined;
 }
 
 export function toErrorInfo(error: unknown): ErrorInfo {
+  if (error instanceof RelayBusError) {
+    return { name: error.name, message: error.message, stack: error.stack, code: error.code };
+  }
   if (error instanceof Error) {
     return { name: error.name, message: error.message, stack: error.stack };
   }

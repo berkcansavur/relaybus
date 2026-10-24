@@ -3,8 +3,10 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import {
   ConfigurationError,
   EventValidationError,
+  LeaseLostError,
   RelayBus,
   defineEvent,
+  toErrorInfo,
   type ClaimedDelivery,
   type RelayBusLogger,
 } from '@relaybus/core';
@@ -295,6 +297,33 @@ describe('stored data', () => {
     await store.reschedule(delivery!, at(5), { name: 'Error', message: 'no stack' }, at(1));
     const [record] = await store.listDeliveries({});
     expect(record!.lastError).toStrictEqual({ name: 'Error', message: 'no stack' });
+  });
+
+  it('keeps the error code of a dead delivery', async () => {
+    const { store } = await createStore();
+    await store.transaction((session) =>
+      store.append(
+        session,
+        [{ event: createEnvelope(), deliveries: [createDelivery('h')] }],
+        at(0),
+      ),
+    );
+    const [delivery] = await store.claim({
+      handlers: ['h'],
+      limit: 1,
+      leaseOwner: 'w',
+      leaseExpiresAt: at(1_000),
+      now: at(0),
+    });
+    const error = toErrorInfo(new LeaseLostError('gone'));
+    await store.bury(delivery!, error, at(1));
+    const [record] = await store.listDeliveries({ status: 'dead' });
+    expect(record!.lastError).toStrictEqual({
+      name: 'LeaseLostError',
+      message: 'gone',
+      stack: error.stack,
+      code: 'RELAYBUS_LEASE_LOST',
+    });
   });
 });
 

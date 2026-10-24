@@ -283,6 +283,38 @@ on it: an event remembers every handler it ever had a delivery for, so a
 redelivered or republished event never runs a completed handler again, for as
 long as the event is kept (`retention.completed`).
 
+## Error codes
+
+Every relaybus error has a stable, machine-readable `code` next to its `name`. Codes are
+never renamed or reused once released, so branch on them in alerts and retry rules. The
+`lastError` of a dead or retried delivery and the `error` of observer events carry the
+`code` of relaybus errors; other errors keep `name`, `message` and `stack` only.
+
+| Code                                       | Error class                    | Package              |
+| ------------------------------------------ | ------------------------------ | -------------------- |
+| `RELAYBUS_ERROR`                           | `RelayBusError`                | `@relaybus/core`     |
+| `RELAYBUS_CONFIGURATION`                   | `ConfigurationError`           | `@relaybus/core`     |
+| `RELAYBUS_TRANSACTION_REQUIRED`            | `TransactionRequiredError`     | `@relaybus/core`     |
+| `RELAYBUS_NON_RETRYABLE`                   | `NonRetryableError`            | `@relaybus/core`     |
+| `RELAYBUS_EVENT_VALIDATION`                | `EventValidationError`         | `@relaybus/core`     |
+| `RELAYBUS_INVALID_ENVELOPE`                | `InvalidEnvelopeError`         | `@relaybus/core`     |
+| `RELAYBUS_LEASE_LOST`                      | `LeaseLostError`               | `@relaybus/core`     |
+| `RELAYBUS_HANDLER_TIMEOUT`                 | `HandlerTimeoutError`          | `@relaybus/core`     |
+| `RELAYBUS_DISPATCHER_STOPPED`              | `DispatcherStoppedError`       | `@relaybus/core`     |
+| `RELAYBUS_KAFKA_INVALID_MESSAGE`           | `InvalidKafkaMessageError`     | `@relaybus/kafka`    |
+| `RELAYBUS_KAFKA_UNENCODABLE_EVENT`         | `UnencodableEventError`        | `@relaybus/kafka`    |
+| `RELAYBUS_KAFKA_PUBLISH_TIMEOUT`           | `PublishTimeoutError`          | `@relaybus/kafka`    |
+| `RELAYBUS_KAFKA_HANDLER_FAILED`            | `HandlerFailedError`           | `@relaybus/kafka`    |
+| `RELAYBUS_RABBITMQ_UNAVAILABLE`            | `RabbitMqUnavailableError`     | `@relaybus/rabbitmq` |
+| `RELAYBUS_RABBITMQ_PUBLISH_REJECTED`       | `RabbitMqPublishRejectedError` | `@relaybus/rabbitmq` |
+| `RELAYBUS_RABBITMQ_UNROUTABLE_MESSAGE`     | `UnroutableMessageError`       | `@relaybus/rabbitmq` |
+| `RELAYBUS_RABBITMQ_MALFORMED_MESSAGE`      | `MalformedMessageError`        | `@relaybus/rabbitmq` |
+| `RELAYBUS_RABBITMQ_UNSERIALIZABLE_PAYLOAD` | `UnserializablePayloadError`   | `@relaybus/rabbitmq` |
+| `RELAYBUS_RABBITMQ_AMQP_LIMIT_EXCEEDED`    | `AmqpLimitExceededError`       | `@relaybus/rabbitmq` |
+
+An error class you derive from `RelayBusError` inherits `RELAYBUS_ERROR` unless it sets
+its own `code`. See [Error codes](https://berkcansavur.github.io/relaybus/concepts/error-codes) for what each one means.
+
 ## Writing a store
 
 Implement `EventStore` and run `eventStoreContract` from

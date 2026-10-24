@@ -9,6 +9,7 @@ import type { KafkaBytes, KafkaIncomingHeaders, KafkaOutgoingHeaders } from './k
 /** A Kafka record that cannot be turned into an {@link EventEnvelope}. Never retried. */
 export class InvalidKafkaMessageError extends RelayBusError {
   override name = 'InvalidKafkaMessageError';
+  override readonly code: string = 'RELAYBUS_KAFKA_INVALID_MESSAGE';
 }
 
 /**
@@ -19,6 +20,7 @@ export class InvalidKafkaMessageError extends RelayBusError {
  */
 export class UnencodableEventError extends NonRetryableError {
   override name = 'UnencodableEventError';
+  override readonly code: string = 'RELAYBUS_KAFKA_UNENCODABLE_EVENT';
 }
 
 /** The wire form of one event: a Kafka record in CloudEvents binary content mode. */

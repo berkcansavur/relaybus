@@ -18,6 +18,7 @@ relaybus stores every event in the same database transaction as your business da
 - [Ordering keys](https://berkcansavur.github.io/relaybus/concepts/ordering-keys.md): Per-key ordering in commit order: how the sequence is assigned and what it does and does not promise.
 - [Compile-time safety with event catalogs](https://berkcansavur.github.io/relaybus/concepts/event-catalogs.md): Group events in a catalog so the TypeScript compiler rejects a missing handler, a wrong payload or an event published to the wrong catalog, and a boot check catches the rest.
 - [Dead letters](https://berkcansavur.github.io/relaybus/concepts/dead-letters.md): What happens to events that exhaust their retries, and how to inspect and requeue them.
+- [Error codes](https://berkcansavur.github.io/relaybus/concepts/error-codes.md): The stable, machine-readable code of every relaybus error, stored with dead letters and reported to observers.
 
 ## Packages
 

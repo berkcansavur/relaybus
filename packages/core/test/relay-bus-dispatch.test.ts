@@ -102,6 +102,29 @@ describe('retries and dead letters', () => {
     ]);
   });
 
+  it('records the class name and code of a relaybus error in the dead letter and the observer event', async () => {
+    const { bus, observer } = createTestBus({ transactionMode: 'optional' });
+    bus.subscribe(
+      OrderPlaced,
+      () => {
+        throw new NonRetryableError('invalid order');
+      },
+      { id: 'h' },
+    );
+    await bus.publish(new OrderPlaced({ orderId: '1' }));
+    await bus.runOnce();
+    const [dead] = await bus.listDeliveries({ status: 'dead' });
+    const error = {
+      name: 'NonRetryableError',
+      message: 'invalid order',
+      code: 'RELAYBUS_NON_RETRYABLE',
+    };
+    expect(dead!.lastError).toMatchObject(error);
+    expect(observer.onDeliveryDead).toHaveBeenCalledWith(
+      expect.objectContaining({ error: expect.objectContaining(error) }),
+    );
+  });
+
   it('dead-letters a delivery whose lease expired on its last attempt without running it', async () => {
     const { bus, store, clock } = createTestBus({
       transactionMode: 'optional',

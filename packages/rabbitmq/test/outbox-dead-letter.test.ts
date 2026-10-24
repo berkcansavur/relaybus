@@ -48,9 +48,17 @@ describe('outbox dead letters of RabbitMQ publish failures', () => {
     await bus.publish(new OrderPlaced({ orderId: '1' }));
     await bus.runOnce();
     const [record] = await bus.listDeliveries({ status: 'dead' });
-    expect(record!.lastError).toMatchObject({ name: UnroutableMessageError.name });
+    expect(record!.lastError).toMatchObject({
+      name: UnroutableMessageError.name,
+      code: 'RELAYBUS_RABBITMQ_UNROUTABLE_MESSAGE',
+    });
     expect(record!.lastError!.name).not.toBe('RelayBusError');
-    expect(deadErrors).toEqual([expect.objectContaining({ name: 'UnroutableMessageError' })]);
+    expect(deadErrors).toEqual([
+      expect.objectContaining({
+        name: 'UnroutableMessageError',
+        code: 'RELAYBUS_RABBITMQ_UNROUTABLE_MESSAGE',
+      }),
+    ]);
     await transport.close();
   });
 });

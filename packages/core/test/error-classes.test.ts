@@ -62,4 +62,70 @@ describe('exported error classes', () => {
     const names = errorClasses.map(({ ErrorClass }) => new ErrorClass('boom').name);
     expect(new Set(names).size).toBe(names.length);
   });
+
+  it('gives every class a distinct code', () => {
+    const codes = errorClasses.map(
+      ({ ErrorClass }) => (new ErrorClass('boom') as core.RelayBusError).code,
+    );
+    expect(new Set(codes).size).toBe(codes.length);
+  });
+
+  // The documented code table (packages/core/README.md, docs-site/errors.md). Codes are part of
+  // the public contract: change this table only on purpose, never rename or reuse a code.
+  it('keeps the code table stable', () => {
+    const table = Object.fromEntries(
+      errorClasses.map(({ exportName, ErrorClass }) => [
+        exportName,
+        (new ErrorClass('boom') as core.RelayBusError).code,
+      ]),
+    );
+    expect(table).toEqual({
+      ConfigurationError: 'RELAYBUS_CONFIGURATION',
+      DispatcherStoppedError: 'RELAYBUS_DISPATCHER_STOPPED',
+      EventValidationError: 'RELAYBUS_EVENT_VALIDATION',
+      HandlerTimeoutError: 'RELAYBUS_HANDLER_TIMEOUT',
+      InvalidEnvelopeError: 'RELAYBUS_INVALID_ENVELOPE',
+      LeaseLostError: 'RELAYBUS_LEASE_LOST',
+      NonRetryableError: 'RELAYBUS_NON_RETRYABLE',
+      RelayBusError: 'RELAYBUS_ERROR',
+      TransactionRequiredError: 'RELAYBUS_TRANSACTION_REQUIRED',
+      HandlerFailedError: 'RELAYBUS_KAFKA_HANDLER_FAILED',
+      InvalidKafkaMessageError: 'RELAYBUS_KAFKA_INVALID_MESSAGE',
+      PublishTimeoutError: 'RELAYBUS_KAFKA_PUBLISH_TIMEOUT',
+      UnencodableEventError: 'RELAYBUS_KAFKA_UNENCODABLE_EVENT',
+      AmqpLimitExceededError: 'RELAYBUS_RABBITMQ_AMQP_LIMIT_EXCEEDED',
+      MalformedMessageError: 'RELAYBUS_RABBITMQ_MALFORMED_MESSAGE',
+      RabbitMqPublishRejectedError: 'RELAYBUS_RABBITMQ_PUBLISH_REJECTED',
+      RabbitMqUnavailableError: 'RELAYBUS_RABBITMQ_UNAVAILABLE',
+      UnroutableMessageError: 'RELAYBUS_RABBITMQ_UNROUTABLE_MESSAGE',
+      UnserializablePayloadError: 'RELAYBUS_RABBITMQ_UNSERIALIZABLE_PAYLOAD',
+    });
+  });
+
+  it.each(
+    errorClasses.map((entry) => [`${entry.packageName}.${entry.exportName}`, entry] as const),
+  )('%s carries a RELAYBUS_ code into its ErrorInfo', (_, { ErrorClass }) => {
+    const error = new ErrorClass('boom') as core.RelayBusError;
+    expect(error).toBeInstanceOf(core.RelayBusError);
+    expect(error.code).toMatch(/^RELAYBUS_[A-Z0-9]+(?:_[A-Z0-9]+)*$/);
+    expect(core.toErrorInfo(error)).toEqual({
+      name: error.name,
+      message: 'boom',
+      stack: error.stack,
+      code: error.code,
+    });
+  });
+
+  it('leaves the ErrorInfo of other errors without a code', () => {
+    expect(core.toErrorInfo(new TypeError('boom'))).not.toHaveProperty('code');
+    expect(
+      core.toErrorInfo(Object.assign(new Error('boom'), { code: 'ECONNRESET' })),
+    ).not.toHaveProperty('code');
+    expect(core.toErrorInfo('boom')).toEqual({ name: 'NonError', message: 'boom' });
+  });
+
+  it('lets a subclass outside relaybus inherit the generic code', () => {
+    class CustomError extends core.RelayBusError {}
+    expect(new CustomError('boom').code).toBe('RELAYBUS_ERROR');
+  });
 });

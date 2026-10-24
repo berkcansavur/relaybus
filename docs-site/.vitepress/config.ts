@@ -128,6 +128,7 @@ export default defineConfig({
       { text: 'Concepts', link: '/concepts/outbox' },
       { text: 'Packages', link: '/packages/' },
       { text: 'Recipes', link: '/recipes/prisma' },
+      { text: 'Error codes', link: '/concepts/error-codes' },
       { text: 'FAQ', link: '/faq' },
       { text: 'Comparison', link: '/comparison' },
       { text: 'Releases', link: '/releases' },

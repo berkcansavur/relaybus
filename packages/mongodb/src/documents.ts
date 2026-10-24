@@ -328,7 +328,15 @@ export function toCompletedDeliveryDocument(
 
 /** Copies an error without `undefined` members, which BSON would store as null. */
 export function toErrorInfo(error: ErrorInfo): ErrorInfo {
-  return error.stack === undefined
-    ? { name: error.name, message: error.message }
-    : { name: error.name, message: error.message, stack: error.stack };
+  const info: { name: string; message: string; stack?: string; code?: string } = {
+    name: error.name,
+    message: error.message,
+  };
+  if (error.stack !== undefined) {
+    info.stack = error.stack;
+  }
+  if (error.code !== undefined) {
+    info.code = error.code;
+  }
+  return info;
 }
