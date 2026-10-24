@@ -8,6 +8,7 @@ import {
   PostgresEventStore,
   type PostgresExecutor,
   type PostgresParameter,
+  type PostgresQueryOptions,
   type PostgresRow,
 } from '../src/index.js';
 import {
@@ -25,6 +26,9 @@ import {
  */
 
 const LEASE_MS = 30_000;
+
+/** Statements without parameters that the server parses in no time; they never count as parsed. */
+const TRANSACTION_CONTROL = new Set(['BEGIN', 'COMMIT', 'ROLLBACK']);
 
 let database: TestDatabase;
 
@@ -49,10 +53,30 @@ afterAll(async () => {
 class CountingExecutor implements PostgresExecutor<PoolClient> {
   readonly #inner: PgExecutor;
   statements = 0;
+  /** Statements the server had to parse and plan from their text: sent unnamed, or named for the first time on the connection. */
+  parsed = 0;
   explaining: PlanNode[] | undefined;
+  /** Explain the generic plan a prepared statement switches to after five runs, instead of the plan for the parameters. */
+  explainingGeneric = false;
 
   constructor(pool: Pool) {
     this.#inner = new PgExecutor(pool);
+    pool.on('connect', (client) => {
+      const prepared = new Set<string>();
+      const query = client.query.bind(client) as (...arguments_: unknown[]) => unknown;
+      (client as { query: unknown }).query = (...arguments_: unknown[]) => {
+        const [first] = arguments_;
+        const name = typeof first === 'object' ? (first as { name?: string }).name : undefined;
+        const text = typeof first === 'string' ? first : (first as { text: string }).text;
+        if (name === undefined ? !TRANSACTION_CONTROL.has(text) : !prepared.has(name)) {
+          this.parsed += 1;
+        }
+        if (name !== undefined) {
+          prepared.add(name);
+        }
+        return query(...arguments_);
+      };
+    });
   }
 
   transaction<T>(work: (transaction: PoolClient) => Promise<T>): Promise<T> {
@@ -64,12 +88,22 @@ class CountingExecutor implements PostgresExecutor<PoolClient> {
     sql: string,
     parameters: readonly PostgresParameter[],
     transaction?: PoolClient,
+    options?: PostgresQueryOptions,
   ): Promise<readonly PostgresRow[]> {
     this.statements += 1;
     if (this.explaining !== undefined) {
-      this.explaining.push(await explainStatement(sql, parameters, transaction));
+      this.explaining.push(
+        await explainStatement(sql, parameters, transaction, this.explainingGeneric),
+      );
     }
-    return this.#inner.query(sql, parameters, transaction);
+    return this.#inner.query(sql, parameters, transaction, options);
+  }
+
+  /** Statements the server parsed and planned from their text while `operation` ran. */
+  async countParsed(operation: () => Promise<unknown>): Promise<number> {
+    const before = this.parsed;
+    await operation();
+    return this.parsed - before;
   }
 
   /** Statements sent by `operation`. */
@@ -84,22 +118,41 @@ async function explainStatement(
   sql: string,
   parameters: readonly PostgresParameter[],
   transaction: PoolClient | undefined,
+  generic = false,
 ): Promise<PlanNode> {
   const client = transaction ?? (await database.pool.connect());
   const [begin, end] =
     transaction === undefined
       ? ['BEGIN', 'ROLLBACK']
       : ['SAVEPOINT explained', 'ROLLBACK TO SAVEPOINT explained'];
+  // EXECUTE takes its arguments as SQL expressions, not as parameters of the EXPLAIN around it.
+  const literals = parameters
+    .map((value) =>
+      value === null
+        ? 'NULL'
+        : typeof value === 'number'
+          ? String(value)
+          : `'${value.replaceAll("'", "''")}'`,
+    )
+    .join(', ');
   try {
     await client.query(begin);
     try {
+      if (generic) {
+        await client.query('SET LOCAL plan_cache_mode = force_generic_plan');
+        await client.query(`PREPARE relaybus_explained AS ${sql}`);
+      }
       const { rows } = await client.query<{ 'QUERY PLAN': Array<{ Plan: PlanNode }> }>(
-        `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${sql}`,
-        [...parameters],
+        `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${generic ? `EXECUTE relaybus_explained(${literals})` : sql}`,
+        generic ? [] : [...parameters],
       );
       return rows[0]!['QUERY PLAN'][0]!.Plan;
     } finally {
       await client.query(end);
+      if (generic) {
+        // A prepared statement outlives the rollback.
+        await client.query('DEALLOCATE relaybus_explained');
+      }
     }
   } finally {
     if (transaction === undefined) {
@@ -423,6 +476,40 @@ describe('round trips per publish and completion', () => {
     );
   });
 
+  it('parses and plans the statements of a publish and of a dispatch once per connection', async () => {
+    const fixture = await createFixture();
+    // The first publishes and dispatches on the connection prepare their statements: a first claim
+    // takes free lanes, the next ones claim from the lanes the worker holds.
+    await publish(fixture.store, events(30));
+    for (let round = 0; round < 2; round += 1) {
+      await fixture.store.completeMany(await claim(fixture.store, 10), at(1));
+    }
+    expectWithinBudget(
+      'postgres.publish.unkeyedSingle.parsedStatements',
+      await fixture.executor.countParsed(() => publish(fixture.store, events(1))),
+    );
+    expectWithinBudget(
+      'postgres.publish.keyedSingle.parsedStatements',
+      await fixture.executor.countParsed(() =>
+        publish(
+          fixture.store,
+          events(1, () => 'k'),
+        ),
+      ),
+    );
+    await publish(fixture.store, events(10));
+    // The trailing wake-up of that publish is sent within 10 ms; it is not part of the dispatch.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expectWithinBudget(
+      'postgres.dispatch.parsedStatementsPerBatch',
+      await fixture.executor.countParsed(async () => {
+        const claimed = await claim(fixture.store, 10);
+        expect(claimed.length).toBeGreaterThan(0);
+        await fixture.store.completeMany(claimed, at(1));
+      }),
+    );
+  });
+
   it('completes one lease or fifty with one statement', async () => {
     const fixture = await createFixture();
     await publishMany(fixture.store, events(51));
@@ -526,6 +613,23 @@ describe('WAL bytes', () => {
     }
   });
 
+  it('writes little WAL per event published alone in its transaction', async () => {
+    const fixture = await createFixture();
+    await publish(fixture.store, events(1));
+    const total = 200;
+    const start = await walPosition();
+    for (const event of events(total)) {
+      // More than the notification interval apart: each publish notifies in its own commit, and no
+      // trailing notification (a commit record of its own, at a time that depends on the machine) lands.
+      await new Promise((resolve) => setTimeout(resolve, 11));
+      await publish(fixture.store, [event]);
+    }
+    expectWithinBudget(
+      'postgres.wal.publishSingle.bytesPerEvent',
+      Math.round((await walBytesSince(start)) / total),
+    );
+  });
+
   it('writes little WAL per published event', async () => {
     const fixture = await createFixture();
     const total = 1_000;
@@ -573,13 +677,16 @@ function planNodes(node: PlanNode): PlanNode[] {
 async function explain(
   fixture: Fixture,
   operation: () => Promise<unknown>,
+  generic = false,
 ): Promise<{ readonly buffers: number; readonly nodes: PlanNode[]; readonly maximumCost: number }> {
   const plans: PlanNode[] = [];
   fixture.executor.explaining = plans;
+  fixture.executor.explainingGeneric = generic;
   try {
     await operation();
   } finally {
     fixture.executor.explaining = undefined;
+    fixture.executor.explainingGeneric = false;
   }
   return {
     buffers: plans.reduce(
@@ -696,6 +803,55 @@ describe('plan shape and buffers', () => {
     expect(await claim(busy.store, 10)).toHaveLength(10);
     const blocked = await explain(busy, () => claim(busy.store, 10));
     expectPlanWithinBudget('claimHotKeysAllInFlight', blocked);
+  });
+});
+
+describe('generic plans of prepared statements', () => {
+  // A prepared statement switches to a generic plan (one plan for any parameters) after five runs when
+  // it is not estimated to cost more than the plans for the parameters. Even forced, those plans must
+  // keep to the indexes and stay far below the JIT threshold.
+  it('claims, completes, renews and publishes through indexes with generic plans', async () => {
+    const fixture = await createFixture();
+    await publishMany(
+      fixture.store,
+      events(50_000, (index) => (index % 2 === 0 ? `key-${index % 1_000}` : null)),
+    );
+    await analyze(fixture);
+    const held = await claim(fixture.store, 50);
+    await fixture.store.completeMany(held, at(1));
+    const plans = [
+      await explain(fixture, () => claim(fixture.store, 50), true),
+      await explain(fixture, () => claim(fixture.store, 50, ['h'], 'worker-2'), true),
+    ];
+    const claimed = await claim(fixture.store, 50);
+    expect(claimed).toHaveLength(50);
+    plans.push(await explain(fixture, () => fixture.store.completeMany(claimed, at(1)), true));
+    const [running] = await claim(fixture.store, 1);
+    plans.push(
+      await explain(fixture, () => fixture.store.extendLease(running!, at(LEASE_MS * 2)), true),
+      await explain(fixture, () => publish(fixture.store, events(1)), true),
+      await explain(
+        fixture,
+        () =>
+          publish(
+            fixture.store,
+            events(1, () => 'k'),
+          ),
+        true,
+      ),
+    );
+    const nodes = plans.flatMap((plan) => plan.nodes);
+    expectWithinBudget(
+      'postgres.explain.generic.largeTableSequentialScans',
+      nodes.filter(
+        (node) =>
+          node['Node Type'] === 'Seq Scan' && /deliveries|events/.test(node['Relation Name'] ?? ''),
+      ).length,
+    );
+    expectWithinBudget(
+      'postgres.explain.generic.maximumEstimatedCost',
+      Math.max(...plans.map((plan) => plan.maximumCost)),
+    );
   });
 });
 

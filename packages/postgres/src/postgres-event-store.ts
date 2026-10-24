@@ -16,7 +16,12 @@ import {
   type RelayBusLogger,
 } from '@relaybus/core';
 import { Client, Pool, type PoolClient, type PoolConfig } from 'pg';
-import type { PostgresExecutor, PostgresParameter, PostgresRow } from './executor.js';
+import type {
+  PostgresExecutor,
+  PostgresParameter,
+  PostgresQueryOptions,
+  PostgresRow,
+} from './executor.js';
 import { resolvePostgresNames, type PostgresSchemaOptions } from './names.js';
 import { NotificationListener } from './notification-listener.js';
 import { PgExecutor } from './pg-executor.js';
@@ -46,6 +51,16 @@ export interface PostgresEventStoreSettings extends PostgresSchemaOptions {
    * it, otherwise `pg` raises an unhandled `error` event and the process exits.
    */
   readonly logger?: RelayBusLogger;
+  /**
+   * Send the statements the store repeats (publish, claim, complete, renew) as named prepared
+   * statements, so each connection parses and plans their text once instead of on every call. Default
+   * `true`. Set `false` behind a pooler in transaction mode that does not keep prepared statements per
+   * client (PgBouncer before 1.21, or 1.21+ with `max_prepared_statements = 0`). Left on there, the
+   * first statement that lands on another server session fails once, then the store stops preparing
+   * and logs a warning. Only executors that support it prepare (`PgExecutor`, the default); the
+   * other adapters send every statement unprepared.
+   */
+  readonly preparedStatements?: boolean;
 }
 
 /** Use an existing `pg` pool. The store never closes it. */
@@ -164,6 +179,8 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   readonly #purgeBatchSize: number;
   readonly #completionHistory: boolean;
   readonly #logger: RelayBusLogger;
+  /** Passed with every statement whose text is fixed: asks the executor to prepare it (`preparedStatements`). */
+  readonly #queryOptions: PostgresQueryOptions | undefined;
   /** Every claim handed to a caller and not settled yet, by delivery id and exact lease token. */
   readonly #handedOut = new Map<string, HandedOutClaim>();
   readonly #unreconciled = new Set<string>();
@@ -195,6 +212,13 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
         `purgeBatchSize must be a positive integer, received ${String(purgeBatchSize)}`,
       );
     }
+    const preparedStatements = options.preparedStatements ?? true;
+    if (typeof preparedStatements !== 'boolean') {
+      throw new ConfigurationError(
+        `preparedStatements must be a boolean, received ${String(preparedStatements)}`,
+      );
+    }
+    this.#queryOptions = preparedStatements ? { prepare: true } : undefined;
     const names = resolvePostgresNames(options);
     this.#statements = new PostgresStatements(names);
     this.#schemaStatements = createPostgresSchemaStatements(options);
@@ -222,7 +246,9 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       }
       this.#pool = pool;
       // Without an executor the transaction type is PoolClient, as the default type argument states.
-      this.#executor = new PgExecutor(pool) as unknown as PostgresExecutor<TTransaction>;
+      this.#executor = new PgExecutor(pool, {
+        logger: this.#logger,
+      }) as unknown as PostgresExecutor<TTransaction>;
     }
   }
 
@@ -312,7 +338,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
         keyCounts.set(event.key, (keyCounts.get(event.key) ?? 0) + 1);
       }
     }
-    const fresh = await this.#executor.query(
+    const fresh = await this.#query(
       this.#statements.insertFreshEvents,
       [
         JSON.stringify(
@@ -390,7 +416,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       () => {
         this.#trailingNotification = undefined;
         this.#lastNotificationAt = Date.now();
-        this.#executor.query(this.#statements.notify, []).catch((error: unknown) => {
+        this.#query(this.#statements.notify, []).catch((error: unknown) => {
           this.#logger.error(
             `[PostgresEventStore](wakeAfterCommit) Waking the dispatchers failed, they find the deliveries when they poll | error=${error instanceof Error ? error.message : String(error)}`,
           );
@@ -430,7 +456,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     while (existing.length > 0) {
       const locked = new Set(
         (
-          await this.#executor.query(
+          await this.#query(
             this.#statements.lockExistingEvents,
             [JSON.stringify(existing.map((row) => row.id).sort())],
             transaction,
@@ -439,7 +465,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       );
       const gone = existing.filter((row) => !locked.has(row.id));
       if (gone.length > 0) {
-        const inserted = await this.#executor.query(
+        const inserted = await this.#query(
           this.#statements.insertEvents,
           [JSON.stringify(gone), createdAt],
           transaction,
@@ -451,7 +477,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       }
       existing = gone.filter((row) => !insertedEventIds.has(row.id));
     }
-    const inserted = await this.#executor.query(
+    const inserted = await this.#query(
       this.#statements.insertDeliveries,
       [JSON.stringify(deliveries), createdAt, JSON.stringify(reinserted), wakeAt],
       transaction,
@@ -610,13 +636,13 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       request.leaseExpiresAt.toISOString(),
       this.#generation(request.leaseOwner).toString(),
     ];
-    let rows = await this.#executor.query(statement, parameters);
+    let rows = await this.#query(statement, parameters);
     for (
       let attempt = 1;
       attempt < MAXIMUM_STALE_CLAIM_ATTEMPTS && rows[0]!['stale'] === true;
       attempt += 1
     ) {
-      rows = await this.#executor.query(statement, parameters);
+      rows = await this.#query(statement, parameters);
     }
     return rows;
   }
@@ -637,7 +663,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       const remaining = (): number => request.limit - alreadyClaimed - claimed.length;
       const takenLanes = new Set<number>();
       for (let laneCount = INITIAL_LANES_PER_ROUND; remaining() > 0;) {
-        const taken = await this.#executor.query(
+        const taken = await this.#query(
           this.#statements.takeFreeLanes,
           [now, handlers, laneCount, request.leaseOwner, leaseExpiresAt, generation],
           transaction,
@@ -732,7 +758,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       .filter((entry) => entry.owner === leaseOwner)
       .map(({ deliveryId, lane, epoch, claims }) => ({ id: deliveryId, lane, epoch, claims }));
     try {
-      await this.#executor.query(this.#statements.reconcileClaims, [
+      await this.#query(this.#statements.reconcileClaims, [
         leaseOwner,
         JSON.stringify(handedOut),
         generation.toString(),
@@ -754,10 +780,10 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     transaction: TTransaction,
   ): Promise<PostgresRow[]> {
     const limit = parameters[2] as number;
-    const fastRows = await this.#executor.query(this.#statements.claim, parameters, transaction);
+    const fastRows = await this.#query(this.#statements.claim, parameters, transaction);
     const picked = fastRows.filter((row) => row['delivery_id'] !== null);
     if (picked.length < limit && fastRows[0]!['window_saturated'] === true) {
-      const slowRows = await this.#executor.query(
+      const slowRows = await this.#query(
         this.#statements.claimBehindBlockedKeys,
         parameters,
         transaction,
@@ -804,7 +830,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     if (idsByLane.size === 0 && idleLanes.length === 0) {
       return;
     }
-    await this.#executor.query(
+    await this.#query(
       this.#statements.recordClaim,
       [
         JSON.stringify([...idsByLane].map(([lane, ids]) => ({ lane, ids }))),
@@ -920,7 +946,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
 
   /** Frees the lanes `leaseOwner` holds that run no delivery, so other workers need not wait for the lease to expire. */
   async relinquish(leaseOwner: string): Promise<void> {
-    await this.#executor.query(this.#statements.relinquish, [leaseOwner]);
+    await this.#query(this.#statements.relinquish, [leaseOwner]);
   }
 
   async listDeliveries(query: DeliveryQuery): Promise<DeliveryRecord[]> {
@@ -930,7 +956,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   }
 
   async requeue(deliveryIds: readonly string[], now: Date): Promise<number> {
-    const rows = await this.#executor.query(this.#statements.requeue, [
+    const rows = await this.#query(this.#statements.requeue, [
       JSON.stringify(deliveryIds),
       now.toISOString(),
     ]);
@@ -1003,17 +1029,17 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
 
   async statistics(now: Date): Promise<EventStoreStatistics> {
     const stored: Record<string, number> = { pending: 0, dead: 0, completed: 0 };
-    for (const row of await this.#executor.query(this.#statements.countByStatus, [])) {
+    for (const row of await this.#query(this.#statements.countByStatus, [])) {
       stored[row['status'] as string] = readCount(row, 'count');
     }
-    const [running] = await this.#executor.query(this.#statements.countRunning, []);
+    const [running] = await this.#query(this.#statements.countRunning, []);
     const processing = readCount(running!, 'count');
     let completed = stored['completed']!;
     if (this.#completionHistory) {
-      const [history] = await this.#executor.query(this.#statements.countCompletionHistory, []);
+      const [history] = await this.#query(this.#statements.countCompletionHistory, []);
       completed += readCount(history!, 'count');
     }
-    const oldestDue = await this.#executor.query(this.#statements.oldestDue, [now.toISOString()]);
+    const oldestDue = await this.#query(this.#statements.oldestDue, [now.toISOString()]);
     return {
       // The counts come from separate statements; a delivery that finishes in between must not make this negative.
       pending: Math.max(0, stored['pending']! - processing),
@@ -1033,8 +1059,17 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     await pool?.end();
   }
 
+  /** Runs a statement of {@link PostgresStatements} whose text never changes, prepared when `preparedStatements` is on. */
+  #query(
+    sql: string,
+    parameters: readonly PostgresParameter[],
+    transaction?: TTransaction,
+  ): Promise<readonly PostgresRow[]> {
+    return this.#executor.query(sql, parameters, transaction, this.#queryOptions);
+  }
+
   async #changed(sql: string, parameters: readonly PostgresParameter[]): Promise<boolean> {
-    const rows = await this.#executor.query(sql, parameters);
+    const rows = await this.#query(sql, parameters);
     return readCount(rows[0]!, 'count') > 0;
   }
 
@@ -1070,7 +1105,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     });
     const completed = new Set<number>();
     if (issued.length > 0) {
-      const rows = await this.#executor.query(
+      const rows = await this.#query(
         this.#statements.complete,
         [JSON.stringify(issued), now.toISOString()],
         transaction,
@@ -1098,13 +1133,13 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     let removedInBatch = this.#purgeBatchSize;
     while (removedInBatch === this.#purgeBatchSize) {
       removedInBatch = await this.#executor.transaction(async (transaction) => {
-        const locked = await this.#executor.query(
+        const locked = await this.#query(
           lockStatement,
           [cutoff.toISOString(), this.#purgeBatchSize],
           transaction,
         );
         const ids = JSON.stringify(locked.map((row: PostgresRow) => row['id'] as string));
-        const removed = await this.#executor.query(
+        const removed = await this.#query(
           deleteStatement,
           recheckCutoff ? [ids, cutoff.toISOString()] : [ids],
           transaction,
@@ -1122,7 +1157,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     deleteOrphans: string,
   ): Promise<{ deletedDeliveries: number; deletedEvents: number }> {
     return this.#executor.transaction(async (transaction) => {
-      const deleted = await this.#executor.query(
+      const deleted = await this.#query(
         sql,
         [cutoff.toISOString(), this.#purgeBatchSize],
         transaction,
@@ -1133,12 +1168,8 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       const eventIds = JSON.stringify([
         ...new Set(deleted.map((row) => row['event_id'] as string)),
       ]);
-      const locked = await this.#executor.query(
-        this.#statements.lockEvents,
-        [eventIds],
-        transaction,
-      );
-      const removed = await this.#executor.query(
+      const locked = await this.#query(this.#statements.lockEvents, [eventIds], transaction);
+      const removed = await this.#query(
         deleteOrphans,
         [JSON.stringify(locked.map((row: PostgresRow) => row['id'] as string))],
         transaction,

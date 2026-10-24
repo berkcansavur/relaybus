@@ -71,17 +71,17 @@
     "description": "Round trips of the first claim (limit 200) on 1,000 events with distinct keys."
   },
   "postgres.publish.unkeyedSingle.statements": {
-    "budget": 4,
+    "budget": 3,
     "unit": "round trips",
-    "description": "Round trips of publishing one fresh unkeyed event with one handler in its own transaction."
+    "description": "Round trips of publishing one fresh unkeyed event with one handler in its own transaction. 0.1.0 needed 4 (BEGIN, two inserts, COMMIT)."
   },
   "postgres.publish.keyedSingle.statements": {
-    "budget": 5,
+    "budget": 3,
     "unit": "round trips",
     "description": "Round trips of publishing one fresh keyed event in its own transaction."
   },
   "postgres.publish.keyedBatch100.statements": {
-    "budget": 5,
+    "budget": 3,
     "unit": "round trips",
     "description": "Round trips of publishing 100 fresh keyed events (7 keys) in one call; must not grow with the batch."
   },
@@ -334,5 +334,35 @@
     "budget": 1099,
     "unit": "buffers",
     "description": "How many more buffers that claim reads at 50,000 pending deliveries than at 5,000: a claim must not pay for the depth of the queue."
+  },
+  "postgres.publish.unkeyedSingle.parsedStatements": {
+    "budget": 0,
+    "unit": "statements",
+    "description": "Statements the server parses and plans from their text for a publish of one fresh unkeyed event in its own transaction, once the connection has run a publish before (BEGIN and COMMIT not counted). 0.1.0 sent 2 unprepared statements per publish."
+  },
+  "postgres.publish.keyedSingle.parsedStatements": {
+    "budget": 0,
+    "unit": "statements",
+    "description": "The same for one fresh keyed event."
+  },
+  "postgres.dispatch.parsedStatementsPerBatch": {
+    "budget": 0,
+    "unit": "statements",
+    "description": "Statements the server parses and plans from their text for a warm claim of 10 and the completion of what it claimed."
+  },
+  "postgres.wal.publishSingle.bytesPerEvent": {
+    "budget": 1144,
+    "unit": "bytes",
+    "description": "WAL bytes per event when each of 200 events is published alone in its own transaction (one handler, unkeyed; no full-page writes). With the benchmark's event (publish P=1 batch=1) 0.1.0 writes 1,740 bytes per event and this release 1,475 (docs/performance/publish-path.md)."
+  },
+  "postgres.explain.generic.largeTableSequentialScans": {
+    "budget": 0,
+    "unit": "scans",
+    "description": "Sequential scans of deliveries or events in the forced generic plans of a warm claim, a takeover claim, completing 50, a renewal and a keyed and an unkeyed publish over 50,000 deliveries."
+  },
+  "postgres.explain.generic.maximumEstimatedCost": {
+    "budget": 25000,
+    "unit": "cost units",
+    "description": "Highest planner cost estimate of those generic plans (measured 10,608); jit_above_cost is 100,000 by default, and claims are held to the same 25,000 as postgres.explain.claim.maximumEstimatedCost."
   }
 }

@@ -1,5 +1,10 @@
-export type { PostgresExecutor, PostgresParameter, PostgresRow } from './executor.js';
-export { PgExecutor } from './pg-executor.js';
+export type {
+  PostgresExecutor,
+  PostgresParameter,
+  PostgresQueryOptions,
+  PostgresRow,
+} from './executor.js';
+export { PgExecutor, type PgExecutorOptions } from './pg-executor.js';
 export type { PostgresNames, PostgresSchemaOptions } from './names.js';
 export { resolvePostgresNames } from './names.js';
 export { createPostgresSchemaSql, createPostgresSchemaStatements } from './schema.js';

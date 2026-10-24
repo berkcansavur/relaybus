@@ -121,6 +121,28 @@ describe('PostgresEventStore options', () => {
     );
   });
 
+  it('rejects a preparedStatements that is not a boolean', () => {
+    expect(
+      () => new PostgresEventStore({ executor: fakeExecutor(), preparedStatements: 1 as never }),
+    ).toThrow('preparedStatements must be a boolean, received 1');
+  });
+
+  it('asks the executor to prepare its statements unless preparedStatements is false', async () => {
+    const prepared = vi.fn(async () => [{ count: 0 }]);
+    await new PostgresEventStore<undefined>({
+      executor: { transaction: (work) => work(undefined), query: prepared },
+    }).relinquish('w');
+    expect(prepared).toHaveBeenCalledWith(expect.any(String), ['w'], undefined, {
+      prepare: true,
+    });
+    const unprepared = vi.fn(async () => [{ count: 0 }]);
+    await new PostgresEventStore<undefined>({
+      executor: { transaction: (work) => work(undefined), query: unprepared },
+      preparedStatements: false,
+    }).relinquish('w');
+    expect(unprepared).toHaveBeenCalledWith(expect.any(String), ['w'], undefined, undefined);
+  });
+
   it('claims nothing for an empty handler list without touching the database', async () => {
     const query = vi.fn();
     const store = new PostgresEventStore({
@@ -194,6 +216,103 @@ describe('PgExecutor', () => {
       }),
     ).rejects.toThrow('work failed');
     expect(client.release).toHaveBeenCalledWith(true);
+  });
+
+  it('sends a statement to prepare as a named statement whose name follows from its text', async () => {
+    const { pool, executor } = createPool(async () => ({ rows: [] }));
+    pool.query.mockResolvedValue({ rows: [] });
+    await executor.query('SELECT $1', ['x'], undefined, { prepare: true });
+    await executor.query('SELECT $1', ['y'], undefined, { prepare: true });
+    await executor.query('SELECT $1::int', [1], undefined, { prepare: true });
+    await executor.query('SELECT $1', ['z'], undefined, { prepare: false });
+    const [first, second, third, fourth] = pool.query.mock.calls as unknown[][];
+    expect(first![0]).toEqual({
+      name: expect.stringMatching(/^relaybus_[0-9a-f]{24}$/),
+      text: 'SELECT $1',
+      values: ['x'],
+    });
+    expect((second![0] as { name: string }).name).toBe((first![0] as { name: string }).name);
+    expect((third![0] as { name: string }).name).not.toBe((first![0] as { name: string }).name);
+    expect(fourth).toEqual(['SELECT $1', ['z']]);
+  });
+
+  it.each(['26000', '42P05'])(
+    'stops preparing for good when the server answers %s, running the statement again unprepared',
+    async (code) => {
+      const { pool, executor } = createPool(async () => ({ rows: [] }));
+      const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const logged = new PgExecutor(pool as unknown as Pool, { logger });
+      pool.query.mockImplementation(async (config: unknown) => {
+        if (typeof config === 'object') {
+          throw Object.assign(new Error('prepared statement does not exist'), { code });
+        }
+        return { rows: [{ ok: true }] };
+      });
+      await expect(logged.query('SELECT 1', [], undefined, { prepare: true })).resolves.toEqual([
+        { ok: true },
+      ]);
+      await expect(logged.query('SELECT 2', [], undefined, { prepare: true })).resolves.toEqual([
+        { ok: true },
+      ]);
+      expect(pool.query.mock.calls.map(([config]) => typeof config)).toEqual([
+        'object',
+        'string',
+        'string',
+      ]);
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `[PgExecutor](query) The server does not keep prepared statements per connection`,
+        ),
+      );
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(`code=${code}`));
+      void executor;
+    },
+  );
+
+  it('fails a statement of a transaction whose prepared statement the server lost, preparing nothing after', async () => {
+    const lost = Object.assign(new Error('prepared statement does not exist'), { code: '26000' });
+    const { client, executor } = createPool(async () => {
+      throw lost;
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(
+        executor.query('SELECT 1', [], client as unknown as PoolClient, { prepare: true }),
+      ).rejects.toBe(lost);
+      expect(warn).toHaveBeenCalledTimes(1);
+      client.query.mockResolvedValue({ rows: [] });
+      await executor.query('SELECT 1', [], client as unknown as PoolClient, { prepare: true });
+      expect(client.query).toHaveBeenLastCalledWith('SELECT 1', []);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('warns once when statements sent before the switch fail the same way', async () => {
+    const { pool } = createPool(async () => ({ rows: [] }));
+    const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const executor = new PgExecutor(pool as unknown as Pool, { logger });
+    pool.query.mockImplementation(async (config: unknown) => {
+      if (typeof config === 'object') {
+        throw Object.assign(new Error('prepared statement does not exist'), { code: '26000' });
+      }
+      return { rows: [] };
+    });
+    await Promise.all([
+      executor.query('SELECT 1', [], undefined, { prepare: true }),
+      executor.query('SELECT 2', [], undefined, { prepare: true }),
+    ]);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('rethrows any other error of a prepared statement and keeps preparing', async () => {
+    const { pool, executor } = createPool(async () => ({ rows: [] }));
+    const broken = Object.assign(new Error('syntax error'), { code: '42601' });
+    pool.query.mockRejectedValueOnce(broken).mockResolvedValue({ rows: [] });
+    await expect(executor.query('SELEC 1', [], undefined, { prepare: true })).rejects.toBe(broken);
+    await executor.query('SELECT 1', [], undefined, { prepare: true });
+    expect(typeof (pool.query.mock.calls[1] as unknown[])[0]).toBe('object');
   });
 
   it('runs queries on the pool, or on the transaction when given one', async () => {
