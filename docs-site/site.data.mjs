@@ -173,6 +173,30 @@ export const sections = [
           'Recommended relaybus settings for a single-connection API, a high-traffic API, a worker fleet, PgBouncer in transaction mode and a MongoDB replica set.',
       },
       {
+        title: 'Upgrading from 0.1 to 0.2',
+        path: 'upgrading',
+        description:
+          'Step-by-step upgrade of relaybus 0.1 to 0.2: completed deliveries are deleted, completionHistory, the in-place schema upgrade, PgBouncer settings and new optional APIs.',
+      },
+      {
+        title: 'Performance: 0.2.0 vs 0.1.0',
+        path: 'performance',
+        description:
+          'Measured throughput, latency and write amplification of relaybus 0.2.0 against 0.1.0 on PostgreSQL and MongoDB, with methodology, machine and honest sample counts.',
+      },
+      {
+        title: 'Write amplification in the delivery path',
+        path: 'performance/write-amplification',
+        description:
+          'Why relaybus 0.1.0 rewrote delivery rows, how lane leases and delete-on-complete remove it, which guarantees are preserved, and what it measured.',
+      },
+      {
+        title: 'The publish path and prepared statements',
+        path: 'performance/publish-path',
+        description:
+          'Per-event round trips, WAL bytes and plan times of the 0.2.0 publish and claim statements against 0.1.0, and the prepared-statement fix.',
+      },
+      {
         title: 'FAQ',
         path: 'faq',
         description:
@@ -181,7 +205,8 @@ export const sections = [
       {
         title: 'Releases',
         path: 'releases',
-        description: 'How relaybus is versioned and released, and where to find the changelog.',
+        description:
+          'What is new in relaybus 0.2.0, its breaking change and known issues, and how relaybus is versioned and released.',
       },
     ],
   },

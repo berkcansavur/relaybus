@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 600" width="960" height="600" role="img" aria-labelledby="t d">
+  <title id="t">Life of one delivery row: before and after</title>
+  <desc id="d">Before, a delivery row is updated twice (claim and completion): three heap tuples, two of them dead, 17 index entries, no heap-only updates. After, the row is inserted once and deleted once: one heap tuple, three index entries, and the claim only updates a lane row with a heap-only update shared by the whole batch.</desc>
+  <style>
+    svg { --bg: #ffffff; --text: #1f2328; --muted: #57606a; --box: #f6f8fa; --line: #8c959f; --bad: #cf222e; --good: #1a7f37; --info: #0969da; --live: #ddf4ff; --dead: #ffebe9; --ok: #dafbe1; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+    @media (prefers-color-scheme: dark) {
+      svg { --bg: #0d1117; --text: #e6edf3; --muted: #9198a1; --box: #161b22; --line: #6e7681; --bad: #ff7b72; --good: #3fb950; --info: #58a6ff; --live: #0c2d4d; --dead: #3d1418; --ok: #0f2d1a; }
+    }
+    .bg { fill: var(--bg); }
+    .t { fill: var(--text); font-size: 15px; }
+    .h { fill: var(--text); font-size: 18px; font-weight: 700; }
+    .m { fill: var(--muted); font-size: 12.5px; }
+    .b { fill: var(--box); stroke: var(--line); stroke-width: 1.2; }
+    .live { fill: var(--live); stroke: var(--info); stroke-width: 1.4; }
+    .dead { fill: var(--dead); stroke: var(--bad); stroke-width: 1.4; stroke-dasharray: 5 3; }
+    .ok { fill: var(--ok); stroke: var(--good); stroke-width: 1.4; }
+    .arrow { stroke: var(--line); stroke-width: 1.6; fill: none; marker-end: url(#head); }
+    .bad { fill: var(--bad); font-size: 14px; font-weight: 700; }
+    .good { fill: var(--good); font-size: 14px; font-weight: 700; }
+    .info { fill: var(--info); font-size: 14px; font-weight: 700; }
+    .sep { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
+  </style>
+  <defs>
+    <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" style="fill: var(--line)"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="960" height="600"/>
+
+  <text class="h" x="24" y="30">Before: every state change rewrites the row</text>
+  <rect class="b" x="24" y="48" width="212" height="56" rx="8"/>
+  <text class="t" x="36" y="72">publish: INSERT</text><text class="m" x="36" y="92">1 tuple, 6 index entries</text>
+  <path class="arrow" d="M238 76 H256"/>
+  <rect class="b" x="258" y="48" width="212" height="56" rx="8"/>
+  <text class="t" x="270" y="72">claim: UPDATE</text><text class="m" x="270" y="92">status, attempts, lease</text>
+  <path class="arrow" d="M472 76 H490"/>
+  <rect class="b" x="492" y="48" width="212" height="56" rx="8"/>
+  <text class="t" x="504" y="72">complete: UPDATE</text><text class="m" x="504" y="92">status, completed_at</text>
+  <path class="arrow" d="M706 76 H724"/>
+  <rect class="b" x="726" y="48" width="212" height="56" rx="8"/>
+  <text class="t" x="738" y="72">retention: DELETE</text><text class="m" x="738" y="92">days later, in batches</text>
+  <text class="m" x="24" y="132">heap page after each step (dashed = dead tuple that autovacuum must reclaim)</text>
+  <rect class="live" x="24" y="144" width="212" height="40" rx="6"/><text class="t" x="36" y="169">tuple 1 (live)</text>
+  <rect class="dead" x="258" y="144" width="212" height="40" rx="6"/><text class="t" x="270" y="169">tuple 1 (dead)</text>
+  <rect class="live" x="258" y="190" width="212" height="40" rx="6"/><text class="t" x="270" y="215">tuple 2 (live)</text>
+  <rect class="dead" x="492" y="144" width="212" height="40" rx="6"/><text class="t" x="504" y="169">tuple 1 (dead)</text>
+  <rect class="dead" x="492" y="190" width="212" height="40" rx="6"/><text class="t" x="504" y="215">tuple 2 (dead)</text>
+  <rect class="live" x="492" y="236" width="212" height="40" rx="6"/><text class="t" x="504" y="261">tuple 3 (live, completed)</text>
+  <text class="bad" x="24" y="304">+6 index entries</text>
+  <text class="bad" x="258" y="304">+6 index entries</text>
+  <text class="bad" x="492" y="304">+5 index entries</text>
+  <text class="m" x="24" y="324">Measured with pageinspect on PostgreSQL 17 for one unkeyed delivery: 3 heap tuples, 17 index entries,</text>
+  <text class="m" x="24" y="342">0 heap-only (HOT) updates, because every update changed an indexed column (status).</text>
+
+  <line class="sep" x1="24" y1="366" x2="936" y2="366"/>
+
+  <text class="h" x="24" y="398">After: the delivery is written once and deleted once</text>
+  <rect class="b" x="24" y="416" width="212" height="56" rx="8"/>
+  <text class="t" x="36" y="440">publish: INSERT</text><text class="m" x="36" y="460">1 tuple, 3 index entries</text>
+  <path class="arrow" d="M238 444 H256"/>
+  <rect class="b" x="258" y="416" width="212" height="56" rx="8"/>
+  <text class="t" x="270" y="440">claim: no delivery write</text><text class="m" x="270" y="460">one lane row per batch</text>
+  <path class="arrow" d="M472 444 H490"/>
+  <rect class="b" x="492" y="416" width="212" height="56" rx="8"/>
+  <text class="t" x="504" y="440">complete: DELETE</text><text class="m" x="504" y="460">many rows per statement</text>
+  <path class="arrow" d="M706 444 H724"/>
+  <rect class="b" x="726" y="416" width="212" height="56" rx="8"/>
+  <text class="t" x="738" y="440">retention: events</text><text class="m" x="738" y="460">orphan events, days later</text>
+  <rect class="live" x="24" y="492" width="212" height="40" rx="6"/><text class="t" x="36" y="517">tuple 1 (live)</text>
+  <rect class="live" x="258" y="492" width="212" height="40" rx="6"/><text class="t" x="270" y="517">tuple 1 (live, untouched)</text>
+  <rect class="dead" x="492" y="492" width="212" height="40" rx="6"/><text class="t" x="504" y="517">tuple 1 (deleted)</text>
+  <text class="good" x="24" y="556">+3 index entries</text>
+  <text class="good" x="258" y="556">+0 index entries</text>
+  <text class="good" x="492" y="556">+0 index entries</text>
+
+  <rect class="ok" x="726" y="492" width="212" height="86" rx="8"/>
+  <text class="info" x="738" y="514">lane row (per batch)</text>
+  <text class="t" x="738" y="536">3 versions, all heap-only</text>
+  <text class="m" x="738" y="556">epoch, owner, lease, in_flight:</text>
+  <text class="m" x="738" y="571">one update per claimed batch</text>
+</svg>
