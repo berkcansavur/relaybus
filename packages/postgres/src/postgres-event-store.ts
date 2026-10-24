@@ -210,6 +210,8 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   readonly #notificationChannel: string;
   #lastNotificationAt = Number.NEGATIVE_INFINITY;
   #trailingNotification: ReturnType<typeof setTimeout> | undefined;
+  /** Set by `close()`: a transaction that commits afterwards schedules no wake-up. */
+  #closed = false;
   /** The transactions `transaction` runs right now, and whether one of their appends left its wake-up for after the commit. */
   readonly #ownTransactions = new Map<unknown, { wake: boolean }>();
 
@@ -430,15 +432,20 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   /**
    * Wakes the dispatchers for a committed transaction whose appends sent no notification: at once when
    * none was sent within {@link NOTIFICATION_INTERVAL_MS}, otherwise once when the interval ends. A
-   * wake-up already scheduled covers this transaction too, since it is sent after this commit.
+   * wake-up already scheduled covers this transaction too, since it is sent after this commit. Nothing is
+   * sent once the store is closed or the `pg` pool behind it is ending: no dispatcher can be woken through
+   * it then, and the deliveries are found by polling.
    */
   #wakeAfterCommit(): void {
-    if (this.#trailingNotification !== undefined) {
+    if (this.#trailingNotification !== undefined || this.#closed) {
       return;
     }
     this.#trailingNotification = setTimeout(
       () => {
         this.#trailingNotification = undefined;
+        if (this.#pool?.ending === true) {
+          return;
+        }
         this.#lastNotificationAt = Date.now();
         this.#query(this.#statements.notify, []).catch((error: unknown) => {
           this.#logger.error(
@@ -1077,6 +1084,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
 
   /** Ends the pool this store created from `connectionString`. Pools and executors you passed in stay open. */
   async close(): Promise<void> {
+    this.#closed = true;
     clearTimeout(this.#trailingNotification);
     this.#trailingNotification = undefined;
     const pool = this.#ownedPool;

@@ -384,7 +384,7 @@ describe('wake-up notifications', () => {
     // Publishes in a transaction of the caller, whose commit the store does not see.
     const appendInCallerTransaction = (availableAt: Date) =>
       store.append(undefined, entries(availableAt), new Date(0));
-    return { store, sent, logger, append, appendInCallerTransaction };
+    return { store, sent, logger, entries, append, appendInCallerTransaction };
   }
 
   it('notifies the first due publish at once and the rest of the interval once, after it', async () => {
@@ -459,6 +459,84 @@ describe('wake-up notifications', () => {
       await closing.store.close();
       await vi.advanceTimersByTimeAsync(50);
       expect(closing.sent).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('sends no wake-up for a transaction that commits after close', async () => {
+    vi.useFakeTimers();
+    try {
+      const { store, sent, logger, entries, append } = appendingStore(async () => undefined);
+      await append(new Date(0));
+      let commit!: () => void;
+      const committing = new Promise<void>((resolve) => {
+        commit = resolve;
+      });
+      // Within the notification interval: this append leaves its wake-up for after the commit.
+      const open = store.transaction(async (transaction) => {
+        await store.append(transaction, entries(new Date(0)), new Date(0));
+        await committing;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await store.close();
+      commit();
+      await open;
+      await vi.advanceTimersByTimeAsync(50);
+      expect(sent.filter((parameters) => parameters[0] === 'notify')).toEqual([]);
+      expect(logger.error).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('sends no wake-up once the pool passed in is ending', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = {
+        query: vi.fn(async (statement: string | { text: string }) =>
+          typeof statement === 'string'
+            ? { rows: [] }
+            : { rows: [{ id: 'e', inserted: true, sequence: null, deliveries: 1 }] },
+        ),
+        release: vi.fn(),
+      };
+      const pool = {
+        on: vi.fn(),
+        connect: vi.fn(async () => client),
+        query: vi.fn(async () => {
+          throw new Error('Cannot use a pool after calling end on the pool');
+        }),
+        ending: false,
+      };
+      const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
+      const store = new PostgresEventStore({
+        pool: pool as unknown as Pool,
+        logger: logger as never,
+      });
+      const entry = {
+        event: {
+          id: 'e',
+          type: 't',
+          source: 's',
+          key: null,
+          payload: {},
+          headers: {},
+          correlationId: null,
+          causationId: null,
+          occurredAt: new Date(0),
+        },
+        deliveries: [{ id: 'd', handler: 'h', availableAt: new Date(0) }],
+      };
+      const append = () =>
+        store.transaction((transaction) => store.append(transaction, [entry], new Date(0)));
+      await append();
+      await append();
+      // The owner of the pool ends it without closing the store, while the wake-up is pending.
+      pool.ending = true;
+      await vi.advanceTimersByTimeAsync(50);
+      expect(pool.query).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
