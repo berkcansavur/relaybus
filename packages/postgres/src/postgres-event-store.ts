@@ -169,6 +169,8 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   readonly #unreconciled = new Set<string>();
   readonly #generations = new Map<string, bigint>();
   readonly #ownerQueues = new Map<string, Promise<void>>();
+  /** Owners whose last claim was filled from the lanes they held. */
+  readonly #drainingOwners = new Set<string>();
   #ownedPool: Pool | undefined;
   /** The `pg` pool behind the store, when it has one: listening for notifications needs a connection of its own. */
   readonly #pool: Pool | undefined;
@@ -478,16 +480,40 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
         `[PostgresEventStore](claim) Giving back unreturned deliveries still fails, so no claim is made | owner=${request.leaseOwner}`,
       );
     }
+    // An owner whose last claim was filled from the lanes it held is draining a backlog there: those
+    // lanes are asked first.
+    const heldFirst = this.#drainingOwners.has(request.leaseOwner);
     let rows: readonly PostgresRow[];
     try {
-      rows = await this.#claimInOneStatement(request);
+      rows = await this.#claimInOneStatement(
+        request,
+        heldFirst ? this.#statements.claimHeldLanes : this.#statements.claimLanes,
+      );
     } catch (error) {
       await this.#reconcile(request.leaseOwner);
       throw error;
     }
-    const claimed = rows.filter((row) => row['delivery_id'] !== null);
-    this.#forgetFinished(rows[0]!, request.leaseOwner, claimed);
-    this.#handOut(claimed, request.leaseOwner);
+    const heldLanes = new Set(JSON.parse(rows[0]!['examined_lanes'] as string) as number[]);
+    const claimed = this.#takeClaimed(rows, request.leaseOwner);
+    if (heldFirst && claimed.length < request.limit && rows[0]!['stale'] !== true) {
+      try {
+        rows = await this.#claimInOneStatement(
+          { ...request, limit: request.limit - claimed.length },
+          this.#statements.claimLanes,
+        );
+      } catch (error) {
+        await this.#reconcile(request.leaseOwner);
+        if (claimed.length === 0) {
+          this.#drainingOwners.delete(request.leaseOwner);
+          throw error;
+        }
+        this.#logger.error(
+          `[PostgresEventStore](claim) Claiming from free lanes failed, returning the deliveries already claimed | claimed=${claimed.length} | error=${error instanceof Error ? error.message : String(error)}`,
+        );
+        return this.#handOutInDueOrder(claimed, request, heldLanes);
+      }
+      claimed.push(...this.#takeClaimed(rows, request.leaseOwner));
+    }
     if (
       claimed.length < request.limit &&
       (rows[0]!['takeover_waiting'] === true ||
@@ -508,17 +534,44 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
         );
       }
     }
+    return this.#handOutInDueOrder(claimed, request, heldLanes);
+  }
+
+  /** The deliveries a claim statement picked, registered as handed out to `leaseOwner`. */
+  #takeClaimed(rows: readonly PostgresRow[], leaseOwner: string): PostgresRow[] {
+    const claimed = rows.filter((row) => row['delivery_id'] !== null);
+    this.#forgetFinished(rows[0]!, leaseOwner, claimed);
+    this.#handOut(claimed, leaseOwner);
+    return claimed;
+  }
+
+  #handOutInDueOrder(
+    claimed: PostgresRow[],
+    request: ClaimRequest,
+    heldLanes: ReadonlySet<number>,
+  ): ClaimedDelivery[] {
+    if (
+      claimed.length >= request.limit &&
+      claimed.every((row) => heldLanes.has(readCount(row, 'lane')))
+    ) {
+      this.#drainingOwners.add(request.leaseOwner);
+    } else {
+      this.#drainingOwners.delete(request.leaseOwner);
+    }
     // The steps pick from different lanes; hand the batch out in due order, like a single query would.
     claimed.sort(compareDue);
     return claimed.map((row) => mapClaimedDelivery(row, request.leaseExpiresAt));
   }
 
   /**
-   * Runs {@link PostgresStatements.claimLanes}, again when it reports that it waited for a lane lock and
+   * Runs `statement` ({@link PostgresStatements.claimLanes} or its held-lane form), again when it reports that it waited for a lane lock and
    * read deliveries with an older snapshot than the lane it got. A held lane is only locked by an
    * operation of its own owner (another claim, a reschedule), so a few attempts are enough.
    */
-  async #claimInOneStatement(request: ClaimRequest): Promise<readonly PostgresRow[]> {
+  async #claimInOneStatement(
+    request: ClaimRequest,
+    statement: string,
+  ): Promise<readonly PostgresRow[]> {
     const parameters = [
       request.now.toISOString(),
       JSON.stringify(request.handlers),
@@ -527,13 +580,13 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       request.leaseExpiresAt.toISOString(),
       this.#generation(request.leaseOwner).toString(),
     ];
-    let rows = await this.#executor.query(this.#statements.claimLanes, parameters);
+    let rows = await this.#executor.query(statement, parameters);
     for (
       let attempt = 1;
       attempt < MAXIMUM_STALE_CLAIM_ATTEMPTS && rows[0]!['stale'] === true;
       attempt += 1
     ) {
-      rows = await this.#executor.query(this.#statements.claimLanes, parameters);
+      rows = await this.#executor.query(statement, parameters);
     }
     return rows;
   }

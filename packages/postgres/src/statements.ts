@@ -303,39 +303,27 @@ SELECT id FROM inserted WHERE (SELECT count(*) FROM woken) >= 0`;
    * (JSON text) lists the deliveries the held lanes still run, `examined_lanes` the held lanes.
    */
   get claimLanes(): string {
+    return this.#claimLanes(true);
+  }
+
+  /**
+   * {@link claimLanes} limited to the lanes the owner holds: the same parameters, rows and writes, without
+   * looking at free lanes (`takeover_waiting` and `unexamined_free_lanes` are false). A worker draining a
+   * backlog finds its batch in the lanes it holds; this statement is about half as costly to plan, and
+   * the caller runs {@link claimLanes} after it only when it came up short.
+   */
+  get claimHeldLanes(): string {
+    return this.#claimLanes(false);
+  }
+
+  #claimLanes(includeFreeLanes: boolean): string {
     const deliveries = this.#names.deliveries;
     const lanes = this.#names.lanes;
     const freeLane = (alias: string): string =>
       `(${alias}.lease_expires_at IS NULL OR ${alias}.lease_expires_at <= $1::timestamptz
       OR (${alias}.lease_owner = $4::text AND ${alias}.claim_floor < $6::bigint))`;
-    return `WITH held AS MATERIALIZED (
-  SELECT lane.lane, lane.epoch, lane.in_flight
-  FROM ${lanes} AS lane
-  WHERE lane.lease_owner = $4::text AND lane.lease_expires_at > $1::timestamptz
-    AND lane.claim_floor = $6::bigint
-  ORDER BY lane.lane
-  FOR NO KEY UPDATE
-), stale AS (
-  -- A claim that waited for a lane lock sees the new lane row but reads deliveries with the snapshot it took
-  -- before the wait: whatever changed the lane meanwhile (a reschedule, a release) may also have changed
-  -- deliveries it cannot see. The statement then does nothing and reports it, and the caller runs it again.
-  SELECT EXISTS (
-    SELECT 1 FROM held
-    JOIN ${lanes} AS before ON before.lane = held.lane
-    WHERE before.epoch <> held.epoch OR before.in_flight IS DISTINCT FROM held.in_flight
-  ) AS value
-), held_scope AS MATERIALIZED (
-  SELECT held.lane, held.epoch, held.in_flight FROM held WHERE NOT (SELECT value FROM stale)
-), held_running AS MATERIALIZED (
-  SELECT delivery.handler, delivery.key
-  FROM held_scope
-  CROSS JOIN LATERAL unnest(held_scope.in_flight) AS flying (id)
-  JOIN ${deliveries} AS delivery ON delivery.id = flying.id
-  WHERE delivery.status = 'pending' AND delivery.key IS NOT NULL
-), ${this.#candidates('held', 'held_scope', 'held_running', '$3::int')}, wanted AS MATERIALIZED (
-  SELECT CASE WHEN (SELECT value FROM stale) THEN 0
-    ELSE $3::int - (SELECT count(*) FROM held_candidates)::int END AS count
-), free_lanes AS MATERIALIZED (
+    const free = includeFreeLanes
+      ? `), free_lanes AS MATERIALIZED (
   -- The oldest due delivery of each free lane: one index probe per free lane, bounded by the due time,
   -- so deliveries scheduled for later are never read.
   SELECT lane.lane, lane.epoch, lane.in_flight, lane.lease_owner, lane.lease_expires_at,
@@ -405,7 +393,42 @@ SELECT id FROM inserted WHERE (SELECT count(*) FROM woken) >= 0`;
   WHERE locked.epoch = seen.epoch AND locked.in_flight = seen.in_flight
     AND locked.lease_owner IS NOT DISTINCT FROM seen.lease_owner
     AND locked.lease_expires_at IS NOT DISTINCT FROM seen.lease_expires_at
-), ${this.#candidates('free', 'free_scope', null, '(SELECT count FROM wanted)')}, claim_scope AS MATERIALIZED (
+), ${this.#candidates('free', 'free_scope', null, '(SELECT count FROM wanted)')}`
+      : `), free_lanes AS (
+  SELECT NULL::smallint AS lane, NULL::bigint AS epoch, NULL::text[] AS in_flight, false AS running WHERE false
+), free_scope AS (
+  SELECT NULL::smallint AS lane, NULL::bigint AS epoch WHERE false
+), free_candidates AS (
+  SELECT NULL::text AS id, NULL::smallint AS lane, NULL::timestamptz AS available_at WHERE false
+)`;
+    return `WITH held AS MATERIALIZED (
+  SELECT lane.lane, lane.epoch, lane.in_flight
+  FROM ${lanes} AS lane
+  WHERE lane.lease_owner = $4::text AND lane.lease_expires_at > $1::timestamptz
+    AND lane.claim_floor = $6::bigint
+  ORDER BY lane.lane
+  FOR NO KEY UPDATE
+), stale AS (
+  -- A claim that waited for a lane lock sees the new lane row but reads deliveries with the snapshot it took
+  -- before the wait: whatever changed the lane meanwhile (a reschedule, a release) may also have changed
+  -- deliveries it cannot see. The statement then does nothing and reports it, and the caller runs it again.
+  SELECT EXISTS (
+    SELECT 1 FROM held
+    JOIN ${lanes} AS before ON before.lane = held.lane
+    WHERE before.epoch <> held.epoch OR before.in_flight IS DISTINCT FROM held.in_flight
+  ) AS value
+), held_scope AS MATERIALIZED (
+  SELECT held.lane, held.epoch, held.in_flight FROM held WHERE NOT (SELECT value FROM stale)
+), held_running AS MATERIALIZED (
+  SELECT delivery.handler, delivery.key
+  FROM held_scope
+  CROSS JOIN LATERAL unnest(held_scope.in_flight) AS flying (id)
+  JOIN ${deliveries} AS delivery ON delivery.id = flying.id
+  WHERE delivery.status = 'pending' AND delivery.key IS NOT NULL
+), ${this.#candidates('held', 'held_scope', 'held_running', '$3::int')}, wanted AS MATERIALIZED (
+  SELECT CASE WHEN (SELECT value FROM stale) THEN 0
+    ELSE $3::int - (SELECT count(*) FROM held_candidates)::int END AS count
+${free}, claim_scope AS MATERIALIZED (
   SELECT held_scope.lane, held_scope.epoch FROM held_scope
   UNION ALL
   SELECT free_scope.lane, free_scope.epoch FROM free_scope
