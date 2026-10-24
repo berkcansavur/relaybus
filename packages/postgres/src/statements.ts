@@ -71,6 +71,26 @@ const LANE_LIST = `ARRAY(SELECT jsonb_array_elements_text($4::jsonb)::smallint)`
  * completion deletes delivery rows and writes no lane row. `in_flight` may
  * list ids that were completed (their rows are gone): a delivery is in flight
  * only while its row exists as `pending` and its id is listed.
+ *
+ * **Lock order.** Every statement that can wait for a lock takes its locks in this order, and rows of
+ * one table in key order, so no two of them can wait for each other in a cycle:
+ *
+ * 1. the setup advisory lock and the schema DDL ({@link setupLock}); only while the schema is created or
+ *    upgraded, never on a current schema (see `PostgresEventStore.setup`);
+ * 2. `key_sequences` rows, in key order ({@link insertFreshEvents});
+ * 3. `events` rows, in id order ({@link lockExistingEvents}, the inserts of a publish, the foreign key
+ *    checks of new deliveries and completions);
+ * 4. `lanes` rows, in lane order: `FOR NO KEY UPDATE` for the owner's held lanes, `FOR KEY SHARE` for
+ *    completions, `FOR UPDATE SKIP LOCKED` (never waits) for lanes taken from others;
+ * 5. `deliveries` rows, only of lanes locked in step 4 (claims, completions, reschedules, takeovers),
+ *    or inserted new (publish), or `dead` ones in id order ({@link requeue});
+ * 6. `event_completions` rows, in event id order ({@link complete}).
+ *
+ * Publishing never touches `lanes`, and dispatching never touches `key_sequences`. Purging only takes
+ * `SKIP LOCKED` row locks and then deletes rows nobody references, so it never waits in a cycle either.
+ * A caller's own transaction (a transactional handler that completes and publishes) adds the locks of
+ * its own statements in the order it runs them; as documented on `append`, keys appended in opposite
+ * orders by two such transactions can still deadlock, and the database then rolls one back.
  */
 export class PostgresStatements {
   readonly #names: PostgresNames;
@@ -877,26 +897,41 @@ SELECT (SELECT count(*) FROM extended)::int AS extended, (SELECT count(*) FROM f
    * ever. A claim matches only with the lane epoch and the delivery generation it was
    * handed out with. Parameters: `[leaseOwner, handedOutJson, generation]`; a lane whose `claim_floor` is above
    * the generation was reconciled by a newer call, so an older (late) reconciliation leaves it alone.
+   * The lanes are locked in lane order first (see the lock order on {@link PostgresStatements}).
    */
   get reconcileClaims(): string {
     const deliveries = this.#names.deliveries;
     const handedOut = `jsonb_to_recordset($2::jsonb) AS handed (id text, lane smallint, epoch bigint, claims int)`;
     const kept = `SELECT 1 FROM ${handedOut} JOIN ${deliveries} AS delivery ON delivery.id = handed.id
       WHERE handed.id = flying.id AND handed.lane = lane.lane AND handed.epoch = lane.epoch AND delivery.claims = handed.claims`;
-    return `UPDATE ${this.#names.lanes} AS lane
+    return `WITH owned AS MATERIALIZED (
+  SELECT lane.lane FROM ${this.#names.lanes} AS lane
+  WHERE lane.lease_owner = $1::text AND lane.claim_floor <= $3::bigint
+  ORDER BY lane.lane
+  FOR NO KEY UPDATE
+)
+UPDATE ${this.#names.lanes} AS lane
 SET in_flight = ARRAY(SELECT flying.id FROM unnest(lane.in_flight) AS flying (id) WHERE EXISTS (${kept})),
     claim_floor = $3::bigint
-WHERE lane.lease_owner = $1::text AND lane.claim_floor <= $3::bigint`;
+FROM owned
+WHERE lane.lane = owned.lane AND lane.lease_owner = $1::text AND lane.claim_floor <= $3::bigint`;
   }
 
   /**
-   * Frees every lane `$1` holds that has no running delivery. Parameters:
-   * `[leaseOwner]`.
+   * Frees every lane `$1` holds that has no running delivery, locking them in lane order first.
+   * Parameters: `[leaseOwner]`.
    */
   get relinquish(): string {
-    return `UPDATE ${this.#names.lanes} AS lane
+    return `WITH owned AS MATERIALIZED (
+  SELECT lane.lane FROM ${this.#names.lanes} AS lane
+  WHERE lane.lease_owner = $1::text
+  ORDER BY lane.lane
+  FOR NO KEY UPDATE
+)
+UPDATE ${this.#names.lanes} AS lane
 SET lease_owner = NULL, lease_expires_at = NULL, in_flight = '{}'
-WHERE lane.lease_owner = $1::text AND ${this.#noRunningDelivery('lane')}`;
+FROM owned
+WHERE lane.lane = owned.lane AND lane.lease_owner = $1::text AND ${this.#noRunningDelivery('lane')}`;
   }
 
   /**
@@ -953,6 +988,8 @@ WHERE lane.lane = $2::smallint AND lane.epoch = $3::bigint AND $1::text = ANY (l
 ), stamped AS (
   INSERT INTO ${this.#names.eventCompletions} (event_id, completed_at)
   SELECT DISTINCT completed.event_id, $2::timestamptz FROM completed
+  -- Event id order: completions of other handlers of the same events lock these rows too.
+  ORDER BY completed.event_id
   ON CONFLICT (event_id) DO UPDATE SET completed_at = GREATEST(${this.#names.eventCompletions}.completed_at, EXCLUDED.completed_at)
   RETURNING event_id
 )${
@@ -1023,11 +1060,19 @@ SELECT ord FROM completed`;
 SELECT count(*)::int AS count FROM changed`;
   }
 
-  /** Parameters: `[deliveryIdsJson, now]`. */
+  /** Parameters: `[deliveryIdsJson, now]`. The dead rows are locked in id order first. */
   get requeue(): string {
-    return countChanged(`UPDATE ${this.#names.deliveries}
+    const deliveries = this.#names.deliveries;
+    return countChanged(`WITH dead AS MATERIALIZED (
+  SELECT delivery.id FROM ${deliveries} AS delivery
+  WHERE delivery.id = ANY (ARRAY(SELECT jsonb_array_elements_text($1::jsonb))) AND delivery.status = 'dead'
+  ORDER BY delivery.id
+  FOR NO KEY UPDATE
+)
+UPDATE ${deliveries} AS delivery
 SET status = 'pending', attempts = 0, available_at = $2::timestamptz, updated_at = $2::timestamptz
-WHERE id = ANY (ARRAY(SELECT jsonb_array_elements_text($1::jsonb))) AND status = 'dead'`);
+FROM dead
+WHERE delivery.id = dead.id AND delivery.status = 'dead'`);
   }
 
   /**
