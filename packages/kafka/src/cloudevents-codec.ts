@@ -7,7 +7,9 @@ import {
 import type { KafkaBytes, KafkaIncomingHeaders, KafkaOutgoingHeaders } from './kafka-client.js';
 
 /** A Kafka record that cannot be turned into an {@link EventEnvelope}. Never retried. */
-export class InvalidKafkaMessageError extends RelayBusError {}
+export class InvalidKafkaMessageError extends RelayBusError {
+  override name = 'InvalidKafkaMessageError';
+}
 
 /**
  * An event that cannot be written to Kafka: its payload is not representable as

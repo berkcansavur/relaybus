@@ -5,19 +5,27 @@ import { NonRetryableError, RelayBusError } from '@relaybus/core';
  * connected, was closed, lost its channel, or the confirm did not arrive in time.
  * Always retryable; the outbox keeps the delivery and tries again.
  */
-export class RabbitMqUnavailableError extends RelayBusError {}
+export class RabbitMqUnavailableError extends RelayBusError {
+  override name = 'RabbitMqUnavailableError';
+}
 
 /** The broker negatively acknowledged a published message. Retryable. */
-export class RabbitMqPublishRejectedError extends RelayBusError {}
+export class RabbitMqPublishRejectedError extends RelayBusError {
+  override name = 'RabbitMqPublishRejectedError';
+}
 
 /**
  * The broker accepted the message but no queue is bound to its routing key, so
  * it would have been discarded. Retryable: it succeeds once a consumer binds.
  */
-export class UnroutableMessageError extends RelayBusError {}
+export class UnroutableMessageError extends RelayBusError {
+  override name = 'UnroutableMessageError';
+}
 
 /** A received message is not a valid relaybus CloudEvent. It is dead-lettered. */
-export class MalformedMessageError extends RelayBusError {}
+export class MalformedMessageError extends RelayBusError {
+  override name = 'MalformedMessageError';
+}
 
 /**
  * The payload of an event cannot be represented as JSON without losing or
