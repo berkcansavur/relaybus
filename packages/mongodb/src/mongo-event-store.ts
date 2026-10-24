@@ -191,7 +191,7 @@ export class MongoEventStore implements EventStore<ClientSession> {
   /**
    * Verifies the deployment supports transactions, creates the collections and
    * indexes and seeds the lane documents. Upgrades a 0.1.0 database in place
-   * first (see {@link MongoEventStore.#upgradeFromVersion010}); the seeded lanes
+   * first (see `MongoSchema.#upgradeFromVersion010`); the seeded lanes
    * mark the upgrade as done, so later runs skip it. Safe to run repeatedly and
    * from several processes. Stop 0.1.0 workers before the first run.
    *
@@ -239,7 +239,7 @@ export class MongoEventStore implements EventStore<ClientSession> {
    * needs. It then records the batch with one write per lane and hands back the
    * lanes that yielded nothing and run nothing. No delivery document is
    * written, except for the attempt charged to deliveries of a lane taken over
-   * and for parking (see {@link MongoEventStore.#parkDeliveries}).
+   * and for parking (see `MongoOrdering.#parkDeliveries`).
    *
    * Taking a lane is one conditional `findOneAndUpdate` that also moves the
    * previous owner's in-flight list to the lane's `lost` list; a lane another
@@ -276,7 +276,7 @@ export class MongoEventStore implements EventStore<ClientSession> {
   /**
    * Completes many leases with a fixed number of round trips, whatever lanes
    * they belong to: three commands without a completion history, one
-   * transaction with it (see {@link MongoEventStore.#deleteFenced}).
+   * transaction with it (see `MongoCompletion.#deleteFenced`).
    * Returns one flag per lease in input order; a lease listed twice completes
    * once, and a token this store cannot have issued is refused.
    */
