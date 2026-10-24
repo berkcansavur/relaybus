@@ -17,6 +17,7 @@ import { CatalogPublisher } from './catalog-publisher.js';
 import { systemClock, type Clock } from './clock.js';
 import { Dispatcher, type DispatcherSettings } from './dispatcher.js';
 import { assertPositiveInteger } from './internal/validation.js';
+import { schedule, type CancelTimer } from './internal/timers.js';
 import { toMilliseconds, toTimerMilliseconds, type Duration } from './duration.js';
 import {
   ConfigurationError,
@@ -283,7 +284,7 @@ export class RelayBus<TTransaction = unknown> {
   readonly #catalogRequirements: CatalogRequirement[] = [];
   readonly #setupStore: boolean;
   readonly #retention: { completedMs: number | null; deadMs: number | null; intervalMs: number };
-  #retentionTimer: NodeJS.Timeout | undefined;
+  #retentionTimer: CancelTimer | undefined;
   #state: BusState = 'idle';
   #starting: Promise<void> | undefined;
   #stopping: Promise<void> | undefined;
@@ -656,10 +657,14 @@ export class RelayBus<TTransaction = unknown> {
       this.#dispatcher.start();
     }
     if (this.#retention.completedMs !== null || this.#retention.deadMs !== null) {
-      this.#retentionTimer = setInterval(() => {
-        this.purgeExpired().catch(() => undefined);
-      }, this.#retention.intervalMs);
-      this.#retentionTimer.unref();
+      this.#retentionTimer = schedule(this.#clock, {
+        run: () => {
+          this.purgeExpired().catch(() => undefined);
+        },
+        delayMs: this.#retention.intervalMs,
+        repeat: true,
+        unref: true,
+      });
     }
     this.#state = 'running';
     this.#logger.log(
@@ -669,7 +674,7 @@ export class RelayBus<TTransaction = unknown> {
 
   async #stopComponents(): Promise<void> {
     this.#state = 'stopping';
-    clearInterval(this.#retentionTimer);
+    this.#retentionTimer?.();
     try {
       await this.#dispatcher.stop();
       await this.#closeTransports();
@@ -849,7 +854,11 @@ export class RelayBus<TTransaction = unknown> {
       return;
     }
     // The publishing transaction commits after publish returns; claim shortly after.
-    setTimeout(() => this.#dispatcher.wake(), WAKE_DELAY_MS).unref();
+    schedule(this.#clock, {
+      run: () => this.#dispatcher.wake(),
+      delayMs: WAKE_DELAY_MS,
+      unref: true,
+    });
   }
 
   async #closeTransports(): Promise<void> {

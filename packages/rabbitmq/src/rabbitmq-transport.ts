@@ -1,10 +1,12 @@
 import {
   ConfigurationError,
+  systemClock,
   toErrorInfo,
   type EventEnvelope,
   type Transport,
   type TransportMessageHandler,
 } from '@relaybus/core';
+import { schedule } from '@relaybus/core/internal';
 import type {
   AmqpConfirmChannel,
   AmqpConnection,
@@ -162,15 +164,18 @@ export class RabbitMqTransport implements Transport {
     }
     const returnKey = unroutableKey(options.messageId, routingKey);
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(
-          new RabbitMqUnavailableError(
-            `[RabbitMqTransport](publish) No broker confirm within ${this.#settings.publishTimeoutMs}ms | transport=${this.name} eventId=${eventId} destination=${routingKey}`,
-          ),
-        );
-      }, this.#settings.publishTimeoutMs);
+      const cancelTimeout = schedule(systemClock, {
+        run: () => {
+          reject(
+            new RabbitMqUnavailableError(
+              `[RabbitMqTransport](publish) No broker confirm within ${this.#settings.publishTimeoutMs}ms | transport=${this.name} eventId=${eventId} destination=${routingKey}`,
+            ),
+          );
+        },
+        delayMs: this.#settings.publishTimeoutMs,
+      });
       const onConfirm = (error: Error | null | undefined): void => {
-        clearTimeout(timer);
+        cancelTimeout();
         const returned = takeUnroutable(publisher.unroutable, returnKey);
         if (error) {
           reject(this.#toPublishError(error, eventId, routingKey));
@@ -193,7 +198,7 @@ export class RabbitMqTransport implements Transport {
           onConfirm,
         );
       } catch (error) {
-        clearTimeout(timer);
+        cancelTimeout();
         reject(this.#toPublishError(error, eventId, routingKey));
       }
     });

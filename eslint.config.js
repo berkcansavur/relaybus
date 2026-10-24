@@ -16,7 +16,14 @@ const ONE_EXPORTED_CLASS_PER_FILE = {
     'R33: a file exports at most one class; move the second exported class into its own file.',
 };
 
-const SOURCE_SYNTAX_BANS = [ENUM_BAN, ONE_EXPORTED_CLASS_PER_FILE];
+/** Timers go through `schedule` of @relaybus/core/internal, so a clock can control them and unref stays explicit. */
+const RAW_TIMER_BAN = {
+  selector: 'CallExpression[callee.name=/^(setInterval|setTimeout)$/]',
+  message:
+    'Start timers with schedule()/sleep() from @relaybus/core/internal, which a Clock can control.',
+};
+
+const SOURCE_SYNTAX_BANS = [ENUM_BAN, ONE_EXPORTED_CLASS_PER_FILE, RAW_TIMER_BAN];
 
 export default tseslint.config(
   {
@@ -78,6 +85,16 @@ export default tseslint.config(
       'no-else-return': ['error', { allowElseIf: false }],
       '@typescript-eslint/no-explicit-any': 'error',
       'no-restricted-syntax': ['error', ...SOURCE_SYNTAX_BANS],
+    },
+  },
+  {
+    // The one module that starts platform timers on behalf of everything else.
+    files: ['packages/core/src/internal/timers.ts'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...SOURCE_SYNTAX_BANS.filter((ban) => ban !== RAW_TIMER_BAN),
+      ],
     },
   },
   {

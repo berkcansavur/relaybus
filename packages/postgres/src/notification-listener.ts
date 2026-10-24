@@ -1,4 +1,6 @@
 import type { RelayBusLogger } from '@relaybus/core';
+import { systemClock } from '@relaybus/core';
+import { schedule, type CancelTimer } from '@relaybus/core/internal';
 
 /** Wait before a lost listening connection is opened again. */
 const RECONNECT_DELAY_MS = 1_000;
@@ -25,7 +27,7 @@ export class NotificationListener {
   readonly #logger: RelayBusLogger;
   /** Ends the current connection, listening or still starting; undefined while there is none. */
   #drop: (() => Promise<void>) | undefined;
-  #reconnectTimer: NodeJS.Timeout | undefined;
+  #reconnectTimer: CancelTimer | undefined;
   #closed = false;
 
   constructor(
@@ -98,31 +100,34 @@ export class NotificationListener {
   }
 
   #scheduleReconnect(): void {
-    this.#reconnectTimer = setTimeout(() => {
-      this.#reconnectTimer = undefined;
-      this.start().then(
-        () => {
-          if (!this.#closed) {
-            this.#listener();
-          }
-        },
-        (error: unknown) => {
-          this.#logger.warn(
-            `[NotificationListener](scheduleReconnect) Listening again failed, retrying | channel=${this.#channel} | error=${error instanceof Error ? error.message : String(error)}`,
-          );
-          if (!this.#closed) {
-            this.#scheduleReconnect();
-          }
-        },
-      );
-    }, RECONNECT_DELAY_MS);
-    this.#reconnectTimer.unref();
+    this.#reconnectTimer = schedule(systemClock, {
+      run: () => {
+        this.#reconnectTimer = undefined;
+        this.start().then(
+          () => {
+            if (!this.#closed) {
+              this.#listener();
+            }
+          },
+          (error: unknown) => {
+            this.#logger.warn(
+              `[NotificationListener](scheduleReconnect) Listening again failed, retrying | channel=${this.#channel} | error=${error instanceof Error ? error.message : String(error)}`,
+            );
+            if (!this.#closed) {
+              this.#scheduleReconnect();
+            }
+          },
+        );
+      },
+      delayMs: RECONNECT_DELAY_MS,
+      unref: true,
+    });
   }
 
   /** Stops listening for good and ends the connection. */
   async close(): Promise<void> {
     this.#closed = true;
-    clearTimeout(this.#reconnectTimer);
+    this.#reconnectTimer?.();
     const drop = this.#drop;
     this.#drop = undefined;
     await drop?.();

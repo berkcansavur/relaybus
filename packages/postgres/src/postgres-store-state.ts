@@ -49,7 +49,8 @@ export type PostgresStoreState<TTransaction> = {
   readonly pool: Pool | undefined;
   readonly notificationChannel: string;
   lastNotificationAt: number;
-  trailingNotification: ReturnType<typeof setTimeout> | undefined;
+  /** Cancels the wake-up notification scheduled after a commit; set while one is pending. */
+  trailingNotification: (() => void) | undefined;
   /** Set by `close()`: a transaction that commits afterwards schedules no wake-up. */
   closed: boolean;
   /** The transactions `transaction` runs right now, and whether one of their appends left its wake-up for after the commit. */

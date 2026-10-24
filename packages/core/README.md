@@ -102,7 +102,7 @@ Use a database store in production: [`@relaybus/postgres`](../postgres) or
 | `setupStore`                              | `true`                                        | Create tables and indexes on `start`.                                                                                                         |
 | `observers`                               | `[]`                                          | Lifecycle hooks for logs, metrics and tracing.                                                                                                |
 | `logger`                                  | `console`                                     | `{ log, warn, error }`.                                                                                                                       |
-| `clock`, `generateIdentifier`, `random`   | system                                        | Replace in tests.                                                                                                                             |
+| `clock`, `generateIdentifier`, `random`   | system                                        | Replace in tests. A clock with `schedule` also runs the bus's timers.                                                                         |
 
 Durations are milliseconds or strings such as `'250ms'`, `'30s'`, `'5m'`, `'1h'`, `'7d'`.
 

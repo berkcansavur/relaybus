@@ -365,7 +365,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   /** Ends the pool this store created from `connectionString`. Pools and executors you passed in stay open. */
   async close(): Promise<void> {
     this.#state.closed = true;
-    clearTimeout(this.#state.trailingNotification);
+    this.#state.trailingNotification?.();
     this.#state.trailingNotification = undefined;
     const pool = this.#state.ownedPool;
     this.#state.ownedPool = undefined;

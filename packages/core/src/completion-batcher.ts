@@ -1,5 +1,6 @@
 import type { Clock } from './clock.js';
 import type { EventStore, LeaseReference } from './event-store.js';
+import { schedule, type CancelTimer } from './internal/timers.js';
 
 interface PendingCompletion {
   readonly lease: LeaseReference;
@@ -30,7 +31,7 @@ export class CompletionBatcher {
   readonly #settings: CompletionBatcherSettings;
   readonly #runningCount: () => number;
   #pending: PendingCompletion[] = [];
-  #timer: NodeJS.Timeout | undefined;
+  #timer: CancelTimer | undefined;
   #closing = false;
 
   /**
@@ -63,7 +64,10 @@ export class CompletionBatcher {
       ) {
         this.#flush();
       } else {
-        this.#timer ??= setTimeout(() => this.#flush(), this.#settings.windowMs);
+        this.#timer ??= schedule(this.#clock, {
+          run: () => this.#flush(),
+          delayMs: this.#settings.windowMs,
+        });
       }
     });
   }
@@ -80,7 +84,7 @@ export class CompletionBatcher {
   }
 
   #flush(): void {
-    clearTimeout(this.#timer);
+    this.#timer?.();
     this.#timer = undefined;
     const batch = this.#pending;
     this.#pending = [];

@@ -7,6 +7,7 @@ import {
   AttemptsExhaustedError,
   toErrorInfo,
 } from './errors.js';
+import { schedule, sleep, type CancelTimer } from './internal/timers.js';
 import { validatePayload, type EventEnvelope } from './event.js';
 import type { ClaimedDelivery, EventStore } from './event-store.js';
 import { runInIsolatedScope } from './execution-scope.js';
@@ -99,9 +100,6 @@ interface ClaimRound {
   readonly claimed: number;
 }
 
-const defaultSleep = (milliseconds: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, milliseconds));
-
 /** One run of a handler: the delivery, its validated event and the transaction it runs in, if any. */
 type InvokeInput = {
   readonly registration: HandlerRegistration;
@@ -122,7 +120,7 @@ export class Dispatcher {
   readonly #inFlight = new Set<InFlightDelivery>();
   readonly #completions: CompletionBatcher | undefined;
   readonly #pending = new Map<string, PendingSettlement>();
-  #recoveryTimer: NodeJS.Timeout | undefined;
+  #recoveryTimer: CancelTimer | undefined;
   #recovery: Promise<void> | undefined;
   #running = false;
   #loop: Promise<void> | undefined;
@@ -136,15 +134,15 @@ export class Dispatcher {
   /** Grows with every wake-up: a claim that started before one must not mark a handler exhausted. */
   #wakeGeneration = 0;
   #lastClaimStartedAt = Number.NEGATIVE_INFINITY;
-  #cooldownTimer: NodeJS.Timeout | undefined;
+  #cooldownTimer: CancelTimer | undefined;
   #refillScheduled = false;
-  #quietRefillTimer: NodeJS.Timeout | undefined;
+  #quietRefillTimer: CancelTimer | undefined;
   #unwatch: (() => Promise<void>) | undefined;
   #watching: Promise<void> | undefined;
 
   constructor(dependencies: DispatcherDependencies) {
     this.#dependencies = dependencies;
-    this.#sleep = dependencies.sleep ?? defaultSleep;
+    this.#sleep = dependencies.sleep ?? ((milliseconds) => sleep(dependencies.clock, milliseconds));
     const { store, clock, settings } = dependencies;
     this.#refillThreshold = Math.ceil(
       Math.min(settings.concurrency, settings.batchSize) * REFILL_FRACTION,
@@ -200,10 +198,13 @@ export class Dispatcher {
       this.#requestClaim();
       return;
     }
-    this.#cooldownTimer ??= setTimeout(() => {
-      this.#cooldownTimer = undefined;
-      this.#requestClaim();
-    }, wait);
+    this.#cooldownTimer ??= schedule(this.#dependencies.clock, {
+      run: () => {
+        this.#cooldownTimer = undefined;
+        this.#requestClaim();
+      },
+      delayMs: wait,
+    });
   }
 
   /** Ends the current wait of the claim loop, or the next one at once, for a claim once `minimumFree` slots are free. */
@@ -258,9 +259,9 @@ export class Dispatcher {
     }
     this.#running = false;
     this.#completions?.setClosing(true);
-    clearTimeout(this.#cooldownTimer);
+    this.#cooldownTimer?.();
     this.#cooldownTimer = undefined;
-    clearTimeout(this.#quietRefillTimer);
+    this.#quietRefillTimer?.();
     this.#quietRefillTimer = undefined;
     this.#signal(this.#refillThreshold);
     const deadline = Date.now() + this.#dependencies.settings.shutdownTimeoutMs;
@@ -283,7 +284,7 @@ export class Dispatcher {
    * further call, since it may be closed right after.
    */
   async #closeRecovery(deadline: number): Promise<void> {
-    clearInterval(this.#recoveryTimer);
+    this.#recoveryTimer?.();
     this.#recoveryTimer = undefined;
     const lastTry = (async () => {
       await this.#recovery;
@@ -326,11 +327,12 @@ export class Dispatcher {
 
   #retain(entry: PendingSettlement): void {
     this.#pending.set(pendingKey(entry.delivery), entry);
-    this.#recoveryTimer ??= setInterval(
-      () => void this.#recoverSettlements(),
-      this.#dependencies.settings.pollIntervalMs,
-    );
-    this.#recoveryTimer.unref();
+    this.#recoveryTimer ??= schedule(this.#dependencies.clock, {
+      run: () => void this.#recoverSettlements(),
+      delayMs: this.#dependencies.settings.pollIntervalMs,
+      repeat: true,
+      unref: true,
+    });
   }
 
   /** Gives lease groups the owner no longer works on back to the store, so other workers need not wait for expiry. */
@@ -351,12 +353,15 @@ export class Dispatcher {
   }
 
   async #waitUntil(work: Promise<unknown>, deadline: number): Promise<'done' | 'timeout'> {
-    let timer: NodeJS.Timeout | undefined;
+    let cancel: CancelTimer | undefined;
     const timedOut = new Promise<'timeout'>((resolve) => {
-      timer = setTimeout(() => resolve('timeout'), Math.max(0, deadline - Date.now()));
+      cancel = schedule(this.#dependencies.clock, {
+        run: () => resolve('timeout'),
+        delayMs: Math.max(0, deadline - Date.now()),
+      });
     });
     const outcome = await Promise.race([work.then(() => 'done' as const), timedOut]);
-    clearTimeout(timer);
+    cancel?.();
     return outcome;
   }
 
@@ -397,12 +402,15 @@ export class Dispatcher {
   async #waitForWakeUp(): Promise<number> {
     if (this.#signalledMinimum === undefined) {
       await new Promise<void>((resolve) => {
-        const timer = setTimeout(() => {
-          this.#signalledMinimum = 1;
-          resolve();
-        }, this.#dependencies.settings.pollIntervalMs);
+        const cancel = schedule(this.#dependencies.clock, {
+          run: () => {
+            this.#signalledMinimum = 1;
+            resolve();
+          },
+          delayMs: this.#dependencies.settings.pollIntervalMs,
+        });
         this.#wakeUp = () => {
-          clearTimeout(timer);
+          cancel();
           resolve();
         };
       });
@@ -444,13 +452,13 @@ export class Dispatcher {
         });
       }
     } else if (free > 0) {
-      this.#quietRefillTimer ??= setTimeout(
-        () => {
+      this.#quietRefillTimer ??= schedule(this.#dependencies.clock, {
+        run: () => {
           this.#quietRefillTimer = undefined;
           this.#signal(1);
         },
-        Math.max(0, this.#lastClaimStartedAt + QUIET_REFILL_MS - Date.now()),
-      );
+        delayMs: Math.max(0, this.#lastClaimStartedAt + QUIET_REFILL_MS - Date.now()),
+      });
     }
   }
 
@@ -467,7 +475,7 @@ export class Dispatcher {
       const now = clock.now();
       const wakeGeneration = this.#wakeGeneration;
       this.#lastClaimStartedAt = Date.now();
-      clearTimeout(this.#quietRefillTimer);
+      this.#quietRefillTimer?.();
       this.#quietRefillTimer = undefined;
       requested += request.limit;
       const claimed = await store.claim({
@@ -686,16 +694,19 @@ export class Dispatcher {
       runInIsolatedScope(scope, () => registration.handle(event, context)),
     );
     work.catch(() => undefined);
-    let timer: NodeJS.Timeout | undefined;
+    let cancelTimeout: CancelTimer | undefined;
     if (registration.timeoutMs !== null) {
       const timeoutMs = registration.timeoutMs;
-      timer = setTimeout(() => {
-        controller.abort(
-          new HandlerTimeoutError(
-            `Handler '${registration.id}' did not settle within ${timeoutMs}ms`,
-          ),
-        );
-      }, timeoutMs);
+      cancelTimeout = schedule(this.#dependencies.clock, {
+        run: () => {
+          controller.abort(
+            new HandlerTimeoutError(
+              `Handler '${registration.id}' did not settle within ${timeoutMs}ms`,
+            ),
+          );
+        },
+        delayMs: timeoutMs,
+      });
     }
     try {
       await Promise.race([work, rejectOnAbort(controller.signal)]);
@@ -703,7 +714,7 @@ export class Dispatcher {
       await this.#awaitAbandonedHandler(work, error, transaction !== undefined);
       throw error;
     } finally {
-      clearTimeout(timer);
+      cancelTimeout?.();
     }
   }
 
@@ -757,14 +768,13 @@ export class Dispatcher {
         });
       }
     }
-    const timer = setTimeout(
-      () => {
+    return schedule(clock, {
+      run: () => {
         controller.abort(new LeaseLostError(`Lease on delivery ${delivery.deliveryId} expired`));
       },
-      Math.max(0, expiry - clock.now().getTime()),
-    );
-    timer.unref();
-    return () => clearTimeout(timer);
+      delayMs: Math.max(0, expiry - clock.now().getTime()),
+      unref: true,
+    });
   }
 
   /**
@@ -781,8 +791,8 @@ export class Dispatcher {
         new LeaseLostError(`Lease on delivery ${delivery.deliveryId} was lost`, { storeConfirmed }),
       );
     };
-    const timer = setInterval(
-      () => {
+    return schedule(clock, {
+      run: () => {
         const now = clock.now();
         if (now.getTime() >= confirmedExpiry) {
           abortLeaseLost();
@@ -807,10 +817,10 @@ export class Dispatcher {
             renewing = false;
           });
       },
-      Math.max(1, Math.floor(settings.leaseDurationMs / RENEWALS_PER_LEASE)),
-    );
-    timer.unref();
-    return () => clearInterval(timer);
+      delayMs: Math.max(1, Math.floor(settings.leaseDurationMs / RENEWALS_PER_LEASE)),
+      repeat: true,
+      unref: true,
+    });
   }
 
   async #fail(

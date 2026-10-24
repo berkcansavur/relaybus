@@ -6,7 +6,7 @@ import {
   type EventEnvelope,
   type Transport,
 } from '@relaybus/core';
-import { InMemoryTransport } from '@relaybus/testing';
+import { FakeClock, InMemoryTransport } from '@relaybus/testing';
 import { OrderPlaced, createTestBus, deferred, waitFor } from './helpers.js';
 
 function remoteEnvelope(overrides: Partial<EventEnvelope> = {}): EventEnvelope {
@@ -359,6 +359,25 @@ describe('administration', () => {
     clock.advance(30 * 86_400_000);
     expect(await bus.purgeExpired()).toEqual({ deletedDeliveries: 1, deletedEvents: 1 });
     expect(observer.onPurged).toHaveBeenCalledTimes(2);
+  });
+
+  it('runs the retention purge on the clock, so a test clock controls it', async () => {
+    const clock = new FakeClock(0, { controlTimers: true });
+    const { bus, store } = createTestBus({
+      clock,
+      transactionMode: 'optional',
+      retention: { completed: '1h', interval: '10m' },
+      dispatcher: { enabled: false },
+    });
+    const purge = vi.spyOn(store, 'purge');
+    await bus.start();
+    expect(purge).not.toHaveBeenCalled();
+    clock.advance(10 * 60_000);
+    await waitFor(() => purge.mock.calls.length === 1);
+    clock.advance(10 * 60_000);
+    await waitFor(() => purge.mock.calls.length === 2);
+    await bus.stop();
+    expect(clock.pendingTimers).toBe(0);
   });
 
   it('keeps everything when retention is disabled', async () => {

@@ -17,3 +17,4 @@ export {
   mediaTypeOf,
   type CloudEventReaders,
 } from './cloudevents.js';
+export { schedule, sleep, type CancelTimer, type ScheduledTask } from './timers.js';

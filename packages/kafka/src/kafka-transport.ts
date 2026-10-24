@@ -1,5 +1,6 @@
 import {
   ConfigurationError,
+  systemClock,
   NonRetryableError,
   toErrorInfo,
   toMilliseconds,
@@ -9,7 +10,7 @@ import {
   type Transport,
   type TransportMessageHandler,
 } from '@relaybus/core';
-import { assertPositiveInteger } from '@relaybus/core/internal';
+import { assertPositiveInteger, schedule, type CancelTimer } from '@relaybus/core/internal';
 import { decodeEnvelope, encodeEnvelope, toOutgoingHeaders } from './cloudevents-codec.js';
 import {
   GroupJoinTimeoutError,
@@ -363,22 +364,25 @@ export class KafkaTransport implements Transport {
 
   /** Sends with the publish timeout; the late outcome of a timed-out send is ignored. */
   async #send(producer: KafkaProducerLike, record: KafkaProducerRecord): Promise<void> {
-    let timer: NodeJS.Timeout | undefined;
+    let cancel: CancelTimer | undefined;
     const timeout = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => {
-        reject(
-          new PublishTimeoutError(
-            `Transport '${this.name}' got no broker ack for topic '${record.topic}' within ${this.#settings.publishTimeoutMs}ms`,
-          ),
-        );
-      }, this.#settings.publishTimeoutMs);
+      cancel = schedule(systemClock, {
+        run: () => {
+          reject(
+            new PublishTimeoutError(
+              `Transport '${this.name}' got no broker ack for topic '${record.topic}' within ${this.#settings.publishTimeoutMs}ms`,
+            ),
+          );
+        },
+        delayMs: this.#settings.publishTimeoutMs,
+      });
     });
     const sending = producer.send(record);
     sending.catch(() => undefined);
     try {
       await Promise.race([sending, timeout]);
     } finally {
-      clearTimeout(timer);
+      cancel?.();
     }
   }
 
@@ -557,11 +561,11 @@ export class KafkaTransport implements Transport {
   #sleep(milliseconds: number): Promise<void> {
     return new Promise((resolve) => {
       const wake = (): void => {
-        clearTimeout(timer);
+        cancel();
         this.#sleepers.delete(wake);
         resolve();
       };
-      const timer = setTimeout(wake, milliseconds);
+      const cancel = schedule(systemClock, { run: wake, delayMs: milliseconds });
       this.#sleepers.add(wake);
     });
   }
@@ -652,23 +656,26 @@ export class KafkaTransport implements Transport {
     if (!this.#tracksMembership(consumer)) {
       return { promise: Promise.resolve(), dispose: () => undefined };
     }
-    let timer: NodeJS.Timeout | undefined;
+    let cancel: CancelTimer | undefined;
     const promise = new Promise<void>((resolve, reject) => {
       this.#joinWaiter = { resolve, reject };
-      timer = setTimeout(() => {
-        reject(
-          new GroupJoinTimeoutError(
-            `Consumer of transport '${this.name}' did not join group '${this.#groupId}' within ${this.#settings.startupTimeoutMs}ms`,
-          ),
-        );
-      }, this.#settings.startupTimeoutMs);
+      cancel = schedule(systemClock, {
+        run: () => {
+          reject(
+            new GroupJoinTimeoutError(
+              `Consumer of transport '${this.name}' did not join group '${this.#groupId}' within ${this.#settings.startupTimeoutMs}ms`,
+            ),
+          );
+        },
+        delayMs: this.#settings.startupTimeoutMs,
+      });
     });
     // The rejection may land while `run` is still pending; the caller awaits it afterwards.
     promise.catch(() => undefined);
     return {
       promise,
       dispose: () => {
-        clearTimeout(timer);
+        cancel?.();
         this.#joinWaiter = undefined;
       },
     };

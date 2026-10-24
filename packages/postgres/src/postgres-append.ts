@@ -1,4 +1,10 @@
-import { type AppendEntry, type AppendResult, type EventEnvelope } from '@relaybus/core';
+import {
+  systemClock,
+  type AppendEntry,
+  type AppendResult,
+  type EventEnvelope,
+} from '@relaybus/core';
+import { schedule } from '@relaybus/core/internal';
 import type { PostgresRow } from './executor.js';
 import { type PostgresStoreState } from './postgres-store-state.js';
 import { readCount } from './row-mapping.js';
@@ -139,8 +145,8 @@ export class PostgresAppend<TTransaction> {
     if (this.#state.trailingNotification !== undefined || this.#state.closed) {
       return;
     }
-    this.#state.trailingNotification = setTimeout(
-      () => {
+    this.#state.trailingNotification = schedule(systemClock, {
+      run: () => {
         this.#state.trailingNotification = undefined;
         if (this.#state.pool?.ending === true) {
           return;
@@ -152,8 +158,8 @@ export class PostgresAppend<TTransaction> {
           );
         });
       },
-      Math.max(0, this.#state.lastNotificationAt + NOTIFICATION_INTERVAL_MS - Date.now()),
-    );
+      delayMs: Math.max(0, this.#state.lastNotificationAt + NOTIFICATION_INTERVAL_MS - Date.now()),
+    });
   }
 
   /**
