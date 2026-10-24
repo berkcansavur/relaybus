@@ -150,7 +150,8 @@ describe('two NestJS applications sharing one catalog over RabbitMQ', () => {
     const handlers = ledger.get(LedgerHandlers);
     await eventually(() => handlers.booked.length === 2, 60_000, 'two booked invoices');
 
-    expect(handlers.booked).toEqual(['inv-1:120', 'inv-2:80']);
+    // The invoices are published without a key, and unkeyed events carry no order guarantee.
+    expect([...handlers.booked].sort()).toEqual(['inv-1:120', 'inv-2:80']);
     expect(
       ledger
         .get(RelayBus)
