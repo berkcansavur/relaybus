@@ -31,6 +31,8 @@ export interface PostgresNames {
   readonly keySequences: string;
   /** Lane lease rows: one per lane, see {@link LANE_COUNT}. */
   readonly lanes: string;
+  /** Unquoted, unqualified name of {@link lanes}, for catalog lookups. */
+  readonly lanesTableName: string;
   /** One row per event that had a delivery complete: when the last one did. Retention of completed work is measured from it. */
   readonly eventCompletions: string;
   /** Completion history, present only with `completionHistory`. */
@@ -99,6 +101,7 @@ export function resolvePostgresNames(options: PostgresSchemaOptions = {}): Postg
     deliveries: table('deliveries'),
     keySequences: table('key_sequences'),
     lanes: table('lanes'),
+    lanesTableName: name('lanes'),
     eventCompletions: table('event_completions'),
     completions: table('completed_deliveries'),
     completionHistory: options.completionHistory ?? false,

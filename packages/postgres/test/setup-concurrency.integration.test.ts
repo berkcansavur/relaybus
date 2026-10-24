@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createUuidV7 } from '@relaybus/core';
 import type { PoolClient } from 'pg';
-import { PostgresEventStore, resolvePostgresNames } from '../src/index.js';
+import {
+  PostgresEventStore,
+  createPostgresSchemaStatements,
+  resolvePostgresNames,
+} from '../src/index.js';
 import { startDatabase, uniqueSchema, type TestDatabase } from './support/postgres-container.js';
 
 let database: TestDatabase;
@@ -113,6 +117,40 @@ describe('setup next to running dispatchers', () => {
     expect(claimResult.status).toBe('fulfilled');
     expect(setupWaited).toBe(false);
     await Promise.all([dispatcher.close(), starting.close()]);
+  });
+
+  it('runs no DDL when the schema became current while it waited for the setup lock', async () => {
+    const schema = uniqueSchema();
+    const holder = await database.pool.connect();
+    const store = createStore(schema);
+    try {
+      await holder.query('BEGIN');
+      // The same advisory lock setup takes, held while another process creates the schema.
+      await holder.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))', [
+        `relaybus:${schema}`,
+      ]);
+      const settingUp = store.setup();
+      // setup found no schema and now waits for the lock held above.
+      await expect
+        .poll(async () => {
+          const { rows } = await database.pool.query<{ waiting: number }>(
+            "SELECT count(*)::int AS waiting FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+          );
+          return rows[0]!.waiting;
+        })
+        .toBe(1);
+      for (const statement of createPostgresSchemaStatements({ schema })) {
+        await holder.query(statement);
+      }
+      await holder.query('COMMIT');
+      // It takes the lock, finds the marker of the current statements and returns without running them.
+      await settingUp;
+      await publish(store, 3);
+      expect(await store.listDeliveries({})).toHaveLength(3);
+    } finally {
+      holder.release();
+      await store.close();
+    }
   });
 
   it('runs the schema statements once when setups race on a new schema', async () => {

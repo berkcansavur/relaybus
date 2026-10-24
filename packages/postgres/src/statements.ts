@@ -113,7 +113,16 @@ export class PostgresStatements {
    * that produce that marker already ran. Takes no table lock. Parameters: `[marker]`.
    */
   get schemaCurrent(): string {
-    return `SELECT coalesce(obj_description(to_regclass('${this.#names.lanes}'), 'pg_class') = $1::text, false) AS current`;
+    // Reads the catalogs with the statement's snapshot. `to_regclass` and `obj_description` would go
+    // through the backend's catalog caches, which keep "no such table" until the session processes
+    // invalidations; a setup that waited for the setup lock would then miss a schema created meanwhile.
+    return `SELECT EXISTS (
+  SELECT 1 FROM pg_catalog.pg_class AS c
+  JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+  JOIN pg_catalog.pg_description AS d
+    ON d.objoid = c.oid AND d.classoid = 'pg_catalog.pg_class'::regclass AND d.objsubid = 0
+  WHERE n.nspname = '${this.#names.schema}' AND c.relname = '${this.#names.lanesTableName}' AND d.description = $1::text
+) AS current`;
   }
 
   get setupLock(): string {
