@@ -20,6 +20,7 @@ Events with the same `key` are handled **one at a time per handler, in commit or
 - On append, the key's counter row is incremented inside your transaction. The row lock is held until the transaction ends, so two transactions publishing the same key are serialized and the sequence equals the commit order.
 - A keyed delivery is claimed only when no earlier delivery of the same handler and key is pending or processing.
 - A retrying or leased head blocks its successors. A dead-lettered head releases them.
+- Every route to one destination of a transport is one handler, so the events of a key sent to one topic or exchange keep their commit order across event types.
 
 ## Costs and tips
 

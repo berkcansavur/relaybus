@@ -50,6 +50,25 @@ async function completedDeliveries(bus: ServiceBus, handler: string, count: numb
   );
 }
 
+/** `transport`, except that its first send of an OrderPlaced fails, as a broker hiccup would. */
+function failingFirstPlacement(transport: Transport): Transport {
+  let failed = false;
+  return {
+    name: transport.name,
+    connect: () => transport.connect?.() ?? Promise.resolve(),
+    subscribe: (destinations, onMessage) => transport.subscribe!(destinations, onMessage),
+    isReady: () => transport.isReady?.() ?? true,
+    close: () => transport.close(),
+    publish: async (envelope, destination) => {
+      if (!failed && envelope.type === 'order.placed.v1') {
+        failed = true;
+        throw new Error('transient broker failure');
+      }
+      await transport.publish(envelope, destination);
+    },
+  };
+}
+
 export function describeSharedCatalogServices(broker: BrokerFixture): void {
   describe(`two services sharing one catalog over ${broker.name}`, () => {
     let databases: ServiceDatabases;
@@ -72,7 +91,9 @@ export function describeSharedCatalogServices(broker: BrokerFixture): void {
       await Promise.all([databases.stop(), broker.stop()]);
     });
 
-    async function startServices(): Promise<{
+    async function startServices({
+      failFirstPlacement = false,
+    }: { readonly failFirstPlacement?: boolean } = {}): Promise<{
       orders: OrdersService;
       shipping: ShippingService;
       destinations: Destinations;
@@ -82,8 +103,9 @@ export function describeSharedCatalogServices(broker: BrokerFixture): void {
         transport: broker.createTransport(`shipping-${destinations.orders}`),
         destinations,
       });
+      const ordersTransport = broker.createTransport(`orders-${destinations.orders}`);
       const orders = createOrdersService(databases, {
-        transport: broker.createTransport(`orders-${destinations.orders}`),
+        transport: failFirstPlacement ? failingFirstPlacement(ordersTransport) : ordersTransport,
         destinations,
       });
       schemas.push(orders);
@@ -145,6 +167,26 @@ export function describeSharedCatalogServices(broker: BrokerFixture): void {
           .filter((handler) => !handler.forwardsToTransport)
           .map((handler) => handler.id),
       ).toEqual(['shipping.onOrderPlaced', 'shipping.onOrderCancelled']);
+    });
+
+    it('delivers a cancellation after its placement when the placement send fails once', async () => {
+      const { orders, shipping } = await startServices({ failFirstPlacement: true });
+
+      await orders.placeOrder('o-race', 4);
+      await orders.cancelOrder('o-race');
+      await completedDeliveries(shipping.bus, 'shipping.onOrderCancelled', 1);
+      await completedDeliveries(shipping.bus, 'shipping.onOrderPlaced', 1);
+
+      // The consumer's handlers of the two types run independently; the broker order is what counts.
+      expect(shipping.record.arrivals).toEqual([
+        'order.placed.v1:o-race',
+        'order.cancelled.v1:o-race',
+      ]);
+      expect(
+        (await orders.bus.listDeliveries({ status: 'completed' })).map(
+          (delivery) => delivery.attempts,
+        ),
+      ).toEqual(expect.arrayContaining([2, 1]));
     });
 
     it('publishes nothing when the producing transaction rolls back', async () => {

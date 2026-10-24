@@ -265,8 +265,8 @@ describe('transports', () => {
       ]),
     );
     expect(bus.handlers().map((registration) => registration.id)).toEqual([
-      'relaybus.transport:broker:order.placed.v1:order.placed.v1',
-      'relaybus.transport:broker:audit:order.placed.v1',
+      'relaybus.transport:broker:order.placed.v1',
+      'relaybus.transport:broker:audit',
     ]);
   });
 

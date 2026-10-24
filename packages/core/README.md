@@ -248,9 +248,11 @@ class ShipmentHandlers implements HandlersOf<typeof OrderEvents, 'OrderPlaced'> 
 - Received events (`bus.receive`, called by Kafka and RabbitMQ consumers) are matched to the
   catalog handlers by event type, idempotently on the event id, and the payload is validated
   against the event's schema before the handler runs; a payload that fails it is dead-lettered.
-- Per-key order holds **per handler and event type**: events of one type and key reach a
-  handler in publish order (Kafka: same partition; RabbitMQ: `ordered: true`). Events of two
-  types under one key travel through separate routes and handlers and can interleave.
+- Per-key order on the wire holds **per destination**: every route to one destination of one
+  transport shares one queue per key, so `OrderPlaced` and `OrderCancelled` of one key reach the
+  broker in publish order even when a send of the first is retried (Kafka: same partition;
+  RabbitMQ: `ordered: true`). On the consuming side order holds **per handler**: two handlers of
+  two types run independently and can interleave.
 
 ## Transports
 
@@ -267,6 +269,36 @@ Routes are deliveries like any handler: retried until the broker accepts them
 (unlimited attempts by default) with a 30s publish timeout. Subscriptions call
 `bus.receive(envelope)`, which stores the event once by id for local handlers;
 transports acknowledge only after it resolves and dead-letter `InvalidEnvelopeError`.
+
+Every route to one destination of one transport is **one handler**, with the id
+`relaybus.transport:<transport>:<destination>` (`handlers()` lists it once per routed
+event type). Its deliveries of one key are sent one at a time in commit order, whatever
+their event types: while the oldest is retried, the later ones of that key wait until it
+is sent or dead-lettered (a dead-lettered head releases them, as for any handler). Other
+keys and unkeyed events are not held back. Because the routes share one queue, they must
+resolve to the same `retry` and `timeout`; `new RelayBus` throws a `ConfigurationError`
+when they differ, and when one event type is routed to the same destination twice. Each
+delivery is one transport call: a hot key is sent one event per round trip (sending a run
+of one key's deliveries in one ordered call is a possible follow-up, not implemented).
+
+### Upgrading from 0.2.0
+
+0.2.0 registered one route per event type, with the id
+`relaybus.transport:<transport>:<destination>:<eventType>`, so events of one key but two
+types could reach the broker out of order. 0.3.0 groups them under
+`relaybus.transport:<transport>:<destination>`. Nothing has to be migrated: deliveries
+stored under a 0.2.0 id, including those written by 0.2.0 processes during a rolling
+deploy, are still claimed and sent by the new route; the store rows keep their old id.
+
+- **Order during the upgrade.** A delivery under a 0.2.0 id and one under the new id are
+  two queues, so one key's backlog from 0.2.0 is not ordered against events published
+  after the upgrade. Where that matters, let the route backlog drain first
+  (`listDeliveries({ handler: '<0.2.0 id>', status: 'pending' })` returns nothing) and
+  stop 0.2.0 publishers before new ones start.
+- **Routes to one destination with different `retry` or `timeout`** now fail at
+  construction; give them the same settings.
+- Code or dashboards that match route ids (`handlers()`, `listDeliveries({ handler })`,
+  `HandlerContext.handler`, observer events) see the new id for new deliveries.
 
 ## Operations
 

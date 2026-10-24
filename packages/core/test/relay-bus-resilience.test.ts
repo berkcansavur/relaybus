@@ -366,7 +366,7 @@ describe('shutdown', () => {
     const registry = new HandlerRegistry();
     registry.register(
       {
-        eventType: 't',
+        eventTypes: ['t'],
         schema: undefined,
         handle: () => undefined,
         options: { id: 'h' },

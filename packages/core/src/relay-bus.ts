@@ -64,6 +64,7 @@ import {
   oneOf,
 } from './relay-bus-settings.js';
 import { DEFAULT_ROUTE_RETRY_POLICY, type RetryPolicyOptions } from './retry-policy.js';
+import { groupRoutes, type RouteGroup } from './route-groups.js';
 import type { StandardSchemaV1 } from './standard-schema.js';
 import type { Transport } from './transport.js';
 
@@ -121,6 +122,11 @@ export interface RetentionOptions {
   readonly interval?: Duration;
 }
 
+/**
+ * Every route to one destination of one transport is one handler,
+ * `relaybus.transport:<transport>:<destination>`: its events of one key are sent in commit
+ * order whatever their types. Such routes must resolve to the same `retry` and `timeout`.
+ */
 export interface RouteOptions {
   /** Event class or type forwarded to the transport. */
   readonly event: EventReference;
@@ -216,7 +222,6 @@ export type ReceiveStatus = 'accepted' | 'duplicate' | 'ignored';
 
 type BusState = 'idle' | 'starting' | 'running' | 'stopping' | 'stopped';
 
-const TRANSPORT_HANDLER_PREFIX = 'relaybus.transport';
 /** Batches `drain` runs at most before it gives up. */
 const DEFAULT_DRAIN_BATCHES = 1_000;
 const WAKE_DELAY_MS = 25;
@@ -323,9 +328,7 @@ export class RelayBus<TTransaction = unknown> {
       }
       this.#transports.set(transport.name, transport);
     }
-    for (const route of options.routes ?? []) {
-      this.#registerRoute(route);
-    }
+    this.#registerRoutes(options.routes ?? []);
     for (const subscription of this.#subscriptions) {
       const transport = this.#requireTransport(subscription.transport);
       if (transport.subscribe === undefined) {
@@ -382,7 +385,7 @@ export class RelayBus<TTransaction = unknown> {
     const { type, schema } = describeEvent(event);
     this.#registry.register(
       {
-        eventType: type,
+        eventTypes: [type],
         schema,
         handle: handler as EventHandler,
         options,
@@ -454,7 +457,11 @@ export class RelayBus<TTransaction = unknown> {
 
   /** Registered handlers and routes, for diagnostics. */
   handlers(): readonly HandlerDescriptor[] {
-    return this.#registry.all().map(toDescriptor);
+    return this.#registry
+      .all()
+      .flatMap((registration) =>
+        registration.eventTypes.map((eventType) => toDescriptor(registration, eventType)),
+      );
   }
 
   /**
@@ -818,17 +825,27 @@ export class RelayBus<TTransaction = unknown> {
     return { handlers: registrations.length - routes, routes };
   }
 
-  #registerRoute(route: RouteOptions): void {
-    const transport = this.#requireTransport(route.transport);
-    const { type } = describeEvent(route.event);
-    const destination = route.destination ?? type;
+  #registerRoutes(routes: readonly RouteOptions[]): void {
+    for (const route of routes) {
+      this.#requireTransport(route.transport);
+    }
+    for (const group of groupRoutes(routes)) {
+      this.#registerRoute(group);
+    }
+  }
+
+  /** Registers one handler for every route to a destination, so a key's events reach it in commit order. */
+  #registerRoute(group: RouteGroup): void {
+    const transport = this.#transports.get(group.transport)!;
+    const { route, destination } = group;
     this.#registry.register(
       {
-        eventType: type,
+        eventTypes: group.eventTypes,
+        legacyIds: group.legacyIds,
         schema: undefined,
         handle: (envelope) => transport.publish(envelope, destination),
         options: {
-          id: `${TRANSPORT_HANDLER_PREFIX}:${transport.name}:${destination}:${type}`,
+          id: group.id,
           ...(route.retry === undefined ? {} : { retry: route.retry }),
           ...(route.timeout === undefined ? {} : { timeout: route.timeout }),
         },
@@ -872,10 +889,10 @@ export class RelayBus<TTransaction = unknown> {
   }
 }
 
-function toDescriptor(registration: HandlerRegistration): HandlerDescriptor {
+function toDescriptor(registration: HandlerRegistration, eventType: string): HandlerDescriptor {
   return {
     id: registration.id,
-    eventType: registration.eventType,
+    eventType,
     retry: registration.retry,
     timeoutMs: registration.timeoutMs,
     concurrency: registration.concurrency,

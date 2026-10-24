@@ -524,7 +524,7 @@ describe('two services sharing one catalog in one process', () => {
     expect(payments.seen).toEqual(['requested:o-1']);
     expect(orders.seen).toEqual(['captured:o-1']);
     expect(payments.bus.handlers().map((handler) => handler.id)).toEqual([
-      'relaybus.transport:broker:payments:payment.captured.v1',
+      'relaybus.transport:broker:payments',
       'payments.onPaymentRequested',
     ]);
     await orders.bus.stop();

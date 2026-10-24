@@ -365,7 +365,7 @@ describe('concurrency', () => {
     const logger = createLogger();
     registry.register(
       {
-        eventType: 'order.placed.v1',
+        eventTypes: ['order.placed.v1'],
         schema: undefined,
         handle: () => gate.promise,
         options: { id: 'single', concurrency: 1 },
@@ -385,7 +385,7 @@ describe('concurrency', () => {
     );
     registry.register(
       {
-        eventType: 'order.placed.v1',
+        eventTypes: ['order.placed.v1'],
         schema: undefined,
         handle: () => gate.promise,
         options: { id: 'other' },
@@ -478,7 +478,9 @@ describe('dispatcher safety net', () => {
         shutdownTimeoutMs: 100,
       },
     });
-    vi.spyOn(registry, 'all').mockReturnValue([{ id: 'ghost', concurrency: null } as never]);
+    vi.spyOn(registry, 'all').mockReturnValue([
+      { id: 'ghost', claimIds: ['ghost'], concurrency: null } as never,
+    ]);
     await store.transaction((transaction) =>
       store.append(
         transaction,

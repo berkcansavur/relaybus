@@ -511,23 +511,26 @@ export class Dispatcher {
       if (registration.concurrency === null || free === 0) {
         continue;
       }
-      const room = registration.concurrency - this.#countInFlight(registration.id);
+      const room = registration.concurrency - this.#countInFlight(registration);
       const limit = Math.min(room, free);
       if (limit > 0) {
-        plans.push({ handlers: [registration.id], limit });
+        plans.push({ handlers: [...registration.claimIds], limit });
         free -= limit;
       }
     }
     if (unlimited.length > 0 && free > 0) {
-      plans.push({ handlers: unlimited.map((registration) => registration.id), limit: free });
+      plans.push({
+        handlers: unlimited.flatMap((registration) => registration.claimIds),
+        limit: free,
+      });
     }
     return plans;
   }
 
-  #countInFlight(handler: string): number {
+  #countInFlight(registration: HandlerRegistration): number {
     let count = 0;
     for (const delivery of this.#inFlight) {
-      if (delivery.handler === handler) {
+      if (registration.claimIds.includes(delivery.handler)) {
         count += 1;
       }
     }

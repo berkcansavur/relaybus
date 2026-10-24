@@ -199,7 +199,7 @@ ConfigurationError: Catalog events this service does not cover:
 
 On the consuming side, events arrive through the transport (`bus.receive`). They are matched to the catalog handlers by event type, stored once per event id (a broker redelivery is a no-op) and validated against the event's schema before the handler runs; a payload that fails validation is dead-lettered.
 
-Ordering holds per handler and event type: events of one type and key reach the consumer's handler in publish order when the broker keeps them in order (Kafka: same partition, which the key decides; RabbitMQ: `ordered: true`). Events of different types under one key go through separate routes and handlers, so they can interleave; put a version or timestamp in the payload when one handler depends on another's effect.
+Every route to one destination shares one queue per key, so events of one key reach the broker in publish order whatever their types, even when a send is retried; the consumer receives them in that order when the broker keeps it (Kafka: same partition, which the key decides; RabbitMQ: `ordered: true`). On the consuming side, order holds per handler: the handlers of two event types run independently and can interleave; put a version or timestamp in the payload when one handler depends on another's effect.
 
 ## Related
 
