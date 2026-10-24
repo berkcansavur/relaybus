@@ -148,6 +148,16 @@ interface IssuedLease extends LaneLease {
   readonly deliveryId: string;
 }
 
+/** One round of candidate picking over some lanes of a claim. */
+type PickCandidatesInput = {
+  readonly lanes: readonly ScopeLane[];
+  readonly request: ClaimRequest;
+  readonly scan: ClaimScan;
+  readonly running: Promise<{ readonly keys: Set<string> }>;
+  /** The claim's picks so far; this round appends to it. */
+  readonly picked: DeliveryDocument[];
+};
+
 /**
  * Event store on MongoDB 6+ multi-document transactions (replica set or sharded
  * cluster). The transaction handle is the driver's `ClientSession`, so the same
@@ -833,13 +843,13 @@ export class MongoEventStore implements EventStore<ClientSession> {
     const pickFrom = async (lanes: readonly ScopeLane[]): Promise<void> => {
       for (let offset = 0; offset < lanes.length; offset += LANES_PER_CANDIDATE_QUERY) {
         if (picked.length < request.limit) {
-          await this.#pickCandidates(
-            lanes.slice(offset, offset + LANES_PER_CANDIDATE_QUERY),
+          await this.#pickCandidates({
+            lanes: lanes.slice(offset, offset + LANES_PER_CANDIDATE_QUERY),
             request,
             scan,
             running,
             picked,
-          );
+          });
         }
       }
     };
@@ -1359,13 +1369,8 @@ export class MongoEventStore implements EventStore<ClientSession> {
    * the predecessors of the keys of a page are looked up in parallel, one
    * lookup per key.
    */
-  async #pickCandidates(
-    lanes: readonly ScopeLane[],
-    request: ClaimRequest,
-    scan: ClaimScan,
-    running: Promise<{ readonly keys: Set<string> }>,
-    picked: DeliveryDocument[],
-  ): Promise<void> {
+  async #pickCandidates(input: PickCandidatesInput): Promise<void> {
+    const { lanes, request, scan, running, picked } = input;
     const pageSize = Math.max((request.limit - picked.length) * 2, MINIMUM_CANDIDATE_BATCH_SIZE);
     const filter: Filter<DeliveryDocument> = {
       laneId: { $in: lanes.map((lane) => lane.laneId) },

@@ -151,6 +151,18 @@ interface DeliveryRow {
   readonly available_at: string;
 }
 
+/** What `#appendToExistingEvents` needs from the append that found existing events. */
+type AppendToExistingEventsInput = {
+  readonly plan: AppendPlan;
+  readonly fresh: readonly PostgresRow[];
+  readonly deliveries: readonly DeliveryRow[];
+  readonly handlersByEvent: ReadonlyMap<string, string[]>;
+  /** Grows by every event that turns out to be gone and is inserted again. */
+  readonly insertedEventIds: Set<string>;
+  readonly createdAt: string;
+  readonly wakeAt: string | null;
+};
+
 /**
  * PostgreSQL {@link EventStore} (PostgreSQL 13 or newer).
  *
@@ -385,16 +397,15 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       (delivery) => !insertedEventIds.has(delivery.event_id),
     );
     if (remaining.length > 0) {
-      appendedDeliveryCount += await this.#appendToExistingEvents(
-        transaction,
+      appendedDeliveryCount += await this.#appendToExistingEvents(transaction, {
         plan,
         fresh,
-        remaining,
+        deliveries: remaining,
         handlersByEvent,
         insertedEventIds,
         createdAt,
         wakeAt,
-      );
+      });
     }
     const appendedEventIds: string[] = [];
     const duplicateEventIds: string[] = [];
@@ -467,14 +478,9 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
    */
   async #appendToExistingEvents(
     transaction: TTransaction,
-    plan: AppendPlan,
-    fresh: readonly PostgresRow[],
-    deliveries: readonly DeliveryRow[],
-    handlersByEvent: ReadonlyMap<string, string[]>,
-    insertedEventIds: Set<string>,
-    createdAt: string,
-    wakeAt: string | null,
+    input: AppendToExistingEventsInput,
   ): Promise<number> {
+    const { plan, fresh, deliveries, handlersByEvent, insertedEventIds, createdAt, wakeAt } = input;
     const sequences = new Map(
       fresh.map((row) => [row['id'] as string, row['sequence'] as string | null]),
     );

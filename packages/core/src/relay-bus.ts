@@ -228,6 +228,16 @@ const DEFAULTS = {
 const TRANSPORT_HANDLER_PREFIX = 'relaybus.transport';
 const WAKE_DELAY_MS = 25;
 
+/** One event of a publish call with what it inherits from the call and the running handler. */
+type CreateEnvelopeInput<TTransaction> = {
+  readonly event: DomainEvent;
+  readonly options: PublishOptions<TTransaction>;
+  readonly id: string | undefined;
+  readonly scope: ExecutionScope | undefined;
+  readonly now: Date;
+  readonly correlationId: string | undefined;
+};
+
 /**
  * Reliable event bus: events are stored with business data in one transaction,
  * then dispatched to every subscribed handler and route with independent
@@ -660,7 +670,14 @@ export class RelayBus<TTransaction = unknown> {
     const entries: AppendEntry[] = [];
     let correlationId = options.correlationId ?? scope?.event?.correlationId ?? scope?.event?.id;
     for (const event of events) {
-      const envelope = await this.#createEnvelope(event, options, id, scope, now, correlationId);
+      const envelope = await this.#createEnvelope({
+        event,
+        options,
+        id,
+        scope,
+        now,
+        correlationId,
+      });
       correlationId = envelope.correlationId!;
       const registrations = this.#registry.forEventType(envelope.type);
       if (registrations.length === 0) {
@@ -724,14 +741,8 @@ export class RelayBus<TTransaction = unknown> {
     );
   }
 
-  async #createEnvelope(
-    event: DomainEvent,
-    options: PublishOptions<TTransaction>,
-    id: string | undefined,
-    scope: ExecutionScope | undefined,
-    now: Date,
-    correlationId: string | undefined,
-  ): Promise<EventEnvelope> {
+  async #createEnvelope(input: CreateEnvelopeInput<TTransaction>): Promise<EventEnvelope> {
+    const { event, options, id, scope, now, correlationId } = input;
     if (typeof event.type !== 'string') {
       throw new ConfigurationError(
         'publish expects an instance of a class created with defineEvent',

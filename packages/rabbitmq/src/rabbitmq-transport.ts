@@ -49,6 +49,16 @@ interface Subscription {
 /** amqplib reports a negative acknowledgement with this exact message. */
 const NACK_MESSAGE = 'message nacked';
 
+/** One message to publish and wait for the broker's confirm. */
+type PublishConfirmedInput = {
+  readonly exchange: string;
+  readonly routingKey: string;
+  readonly content: Buffer;
+  readonly options: AmqpPublishOptions;
+  /** Ask the broker to return the message when no queue is bound to its routing key. */
+  readonly mandatory: boolean;
+};
+
 /**
  * RabbitMQ {@link Transport} built on amqplib.
  *
@@ -132,22 +142,17 @@ export class RabbitMqTransport implements Transport {
   async publish(envelope: EventEnvelope, destination: string): Promise<void> {
     assertShortString('Destination (routing key)', destination);
     const { content, options } = encodeEnvelope(envelope);
-    await this.#publishConfirmed(
-      this.#settings.exchange,
-      destination,
+    await this.#publishConfirmed({
+      exchange: this.#settings.exchange,
+      routingKey: destination,
       content,
       options,
-      !this.#settings.allowUnroutable,
-    );
+      mandatory: !this.#settings.allowUnroutable,
+    });
   }
 
-  async #publishConfirmed(
-    exchange: string,
-    routingKey: string,
-    content: Buffer,
-    options: AmqpPublishOptions,
-    mandatory: boolean,
-  ): Promise<void> {
+  async #publishConfirmed(input: PublishConfirmedInput): Promise<void> {
+    const { exchange, routingKey, content, options, mandatory } = input;
     const publisher = this.#live?.publisher;
     const eventId = options.messageId ?? 'unknown';
     if (publisher === undefined) {
@@ -233,7 +238,7 @@ export class RabbitMqTransport implements Transport {
         ordered: this.#settings.ordered,
         deadLetterExchange: this.#settings.deadLetterExchange,
         republish: (exchange, routingKey, content, options) =>
-          this.#publishConfirmed(exchange, routingKey, content, options, true),
+          this.#publishConfirmed({ exchange, routingKey, content, options, mandatory: true }),
         shutdownTimeoutMs: this.#settings.shutdownTimeoutMs,
         onMessage,
         decode: this.#settings.decode,

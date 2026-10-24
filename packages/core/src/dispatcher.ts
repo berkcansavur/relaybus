@@ -93,6 +93,15 @@ interface ClaimRound {
 const defaultSleep = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+/** One run of a handler: the delivery, its validated event and the transaction it runs in, if any. */
+type InvokeInput = {
+  readonly registration: HandlerRegistration;
+  readonly event: EventEnvelope;
+  readonly delivery: ClaimedDelivery;
+  readonly controller: AbortController;
+  readonly transaction: unknown;
+};
+
 /**
  * Claims due deliveries and runs their handlers: bounded concurrency, lease
  * heartbeats with self-fencing, fenced completion, retries with backoff and
@@ -598,7 +607,7 @@ export class Dispatcher {
     const event: EventEnvelope = { ...delivery.event, payload };
     if (registration.transactional) {
       await store.transaction(async (transaction) => {
-        await this.#invoke(registration, event, delivery, controller, transaction);
+        await this.#invoke({ registration, event, delivery, controller, transaction });
         if (!(await store.complete(delivery, clock.now(), transaction))) {
           throw new LeaseLostError(`Lease on delivery ${delivery.deliveryId} was lost`, {
             storeConfirmed: true,
@@ -607,7 +616,7 @@ export class Dispatcher {
       });
       return 'completed';
     }
-    await this.#invoke(registration, event, delivery, controller, undefined);
+    await this.#invoke({ registration, event, delivery, controller, transaction: undefined });
     return this.#confirmCompletion(delivery);
   }
 
@@ -647,13 +656,8 @@ export class Dispatcher {
       : this.#completions.submit(delivery);
   }
 
-  async #invoke(
-    registration: HandlerRegistration,
-    event: EventEnvelope,
-    delivery: ClaimedDelivery,
-    controller: AbortController,
-    transaction: unknown,
-  ): Promise<void> {
+  async #invoke(input: InvokeInput): Promise<void> {
+    const { registration, event, delivery, controller, transaction } = input;
     const context: HandlerContext = {
       deliveryId: delivery.deliveryId,
       handler: delivery.handler,
