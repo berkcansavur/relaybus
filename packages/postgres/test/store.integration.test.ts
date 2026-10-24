@@ -253,6 +253,24 @@ describe('reports of new deliveries', () => {
     await new Promise((resolve) => setTimeout(resolve, 150));
   }
 
+  it("sends no notification for a publish of a store with wakeUp 'poll'", async () => {
+    const schema = uniqueSchema();
+    const store = new PostgresEventStore({ pool: database.pool, schema, wakeUp: 'poll' });
+    await store.setup();
+    const peer = new PostgresEventStore({ pool: database.pool, schema });
+    let reports = 0;
+    const unwatch = await peer.watchNewDeliveries(() => void (reports += 1));
+    try {
+      await publish(store, NOW);
+      await publish(store, NOW);
+      await settle();
+      expect(reports).toBe(0);
+      expect(await store.listDeliveries({ status: 'pending' })).toHaveLength(2);
+    } finally {
+      await unwatch!();
+    }
+  });
+
   it('reports a committed publish of due deliveries once, and neither delayed nor rolled back ones', async () => {
     const schema = uniqueSchema();
     const store = new PostgresEventStore({ pool: database.pool, schema });

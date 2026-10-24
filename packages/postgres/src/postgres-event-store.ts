@@ -61,7 +61,22 @@ export interface PostgresEventStoreSettings extends PostgresSchemaOptions {
    * other adapters send every statement unprepared.
    */
   readonly preparedStatements?: boolean;
+  /**
+   * How dispatchers in other processes learn about new deliveries.
+   * - `'notify'` (default): a publishing transaction sends `NOTIFY` (at most one per 10 ms per store,
+   *   the rest merged into one trailing notification after the commit) and each dispatcher listens
+   *   with `LISTEN` on a connection of its own, so a delivery is picked up within milliseconds.
+   * - `'poll'`: no `NOTIFY`, no listening connection. Other processes find new deliveries when they
+   *   poll (`dispatcher.pollInterval`, default 1 s); a dispatcher in the publishing process is still
+   *   woken at once. Use it behind a pooler in transaction mode, where `LISTEN` does not work.
+   */
+  readonly wakeUp?: PostgresWakeUp;
 }
+
+/** See {@link PostgresEventStoreSettings.wakeUp}. */
+export type PostgresWakeUp = 'notify' | 'poll';
+
+const WAKE_UPS: readonly PostgresWakeUp[] = ['notify', 'poll'];
 
 /** Use an existing `pg` pool. The store never closes it. */
 export interface PostgresPoolOptions extends PostgresEventStoreSettings {
@@ -181,6 +196,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   readonly #logger: RelayBusLogger;
   /** Passed with every statement whose text is fixed: asks the executor to prepare it (`preparedStatements`). */
   readonly #queryOptions: PostgresQueryOptions | undefined;
+  readonly #notifies: boolean;
   /** Every claim handed to a caller and not settled yet, by delivery id and exact lease token. */
   readonly #handedOut = new Map<string, HandedOutClaim>();
   readonly #unreconciled = new Set<string>();
@@ -212,12 +228,17 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
         `purgeBatchSize must be a positive integer, received ${String(purgeBatchSize)}`,
       );
     }
+    const wakeUp = options.wakeUp ?? 'notify';
+    if (!WAKE_UPS.includes(wakeUp)) {
+      throw new ConfigurationError(`wakeUp must be 'notify' or 'poll', received ${String(wakeUp)}`);
+    }
     const preparedStatements = options.preparedStatements ?? true;
     if (typeof preparedStatements !== 'boolean') {
       throw new ConfigurationError(
         `preparedStatements must be a boolean, received ${String(preparedStatements)}`,
       );
     }
+    this.#notifies = wakeUp === 'notify';
     this.#queryOptions = preparedStatements ? { prepare: true } : undefined;
     const names = resolvePostgresNames(options);
     this.#statements = new PostgresStatements(names);
@@ -391,7 +412,10 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
    * committed, so no committed delivery waits for the poll.
    */
   #wakeAt(deliveries: readonly DeliveryRow[], now: Date, transaction: TTransaction): string | null {
-    if (!deliveries.some((delivery) => Date.parse(delivery.available_at) <= now.getTime())) {
+    if (
+      !this.#notifies ||
+      !deliveries.some((delivery) => Date.parse(delivery.available_at) <= now.getTime())
+    ) {
       return null;
     }
     const own = this.#ownTransactions.get(transaction);
@@ -922,10 +946,11 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
    * deliveries), and this listens with `LISTEN` on a connection of its own, opened with the settings of
    * the store's pool (one connection more than the pool's `max`). A lost connection is replaced after a
    * second. Resolves with `undefined` for a store built on an `executor`, which has no connection of its
-   * own to listen on: polling then finds new deliveries (and the bus still wakes its own dispatcher).
+   * own to listen on, and with `wakeUp: 'poll'`: polling then finds new deliveries (and the bus still
+   * wakes its own dispatcher).
    */
   async watchNewDeliveries(listener: () => void): Promise<(() => Promise<void>) | undefined> {
-    if (this.#pool === undefined) {
+    if (this.#pool === undefined || !this.#notifies) {
       return undefined;
     }
     const options = this.#pool.options;

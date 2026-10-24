@@ -15,4 +15,5 @@ export {
   type PostgresEventStoreSettings,
   type PostgresExecutorOptions,
   type PostgresPoolOptions,
+  type PostgresWakeUp,
 } from './postgres-event-store.js';

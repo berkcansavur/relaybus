@@ -121,6 +121,18 @@ describe('PostgresEventStore options', () => {
     );
   });
 
+  it('rejects a wakeUp other than notify or poll', () => {
+    expect(
+      () => new PostgresEventStore({ executor: fakeExecutor(), wakeUp: 'listen' as never }),
+    ).toThrow("wakeUp must be 'notify' or 'poll', received listen");
+  });
+
+  it('listens for nothing with wakeUp poll, even on a pool', async () => {
+    const pool = { options: {}, on: vi.fn() } as unknown as Pool;
+    const store = new PostgresEventStore({ pool, wakeUp: 'poll' });
+    await expect(store.watchNewDeliveries(() => undefined)).resolves.toBeUndefined();
+  });
+
   it('rejects a preparedStatements that is not a boolean', () => {
     expect(
       () => new PostgresEventStore({ executor: fakeExecutor(), preparedStatements: 1 as never }),
@@ -326,7 +338,10 @@ describe('PgExecutor', () => {
 });
 
 describe('wake-up notifications', () => {
-  function appendingStore(notify: () => Promise<unknown>) {
+  function appendingStore(
+    notify: () => Promise<unknown>,
+    settings: { readonly wakeUp?: 'notify' | 'poll' } = {},
+  ) {
     const sent: unknown[][] = [];
     const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
     const store = new PostgresEventStore<undefined>({
@@ -343,6 +358,7 @@ describe('wake-up notifications', () => {
         },
       },
       logger: logger as never,
+      ...settings,
     });
     const entries = (availableAt: Date) => [
       {
@@ -396,6 +412,21 @@ describe('wake-up notifications', () => {
         '1970-01-01T00:00:00.000Z',
         '1970-01-01T00:00:00.000Z',
       ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('notifies nothing with wakeUp poll', async () => {
+    vi.useFakeTimers();
+    try {
+      const { sent, append } = appendingStore(async () => undefined, { wakeUp: 'poll' });
+      await append(new Date(0));
+      await append(new Date(0));
+      await vi.advanceTimersByTimeAsync(50);
+      // One publishing statement per append, none with a notification time, and no trailing notification.
+      expect(sent).toHaveLength(2);
+      expect(sent.every((parameters) => parameters.at(-1) === null)).toBe(true);
     } finally {
       vi.useRealTimers();
     }
