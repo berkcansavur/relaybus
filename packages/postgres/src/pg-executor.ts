@@ -49,16 +49,35 @@ export class PgExecutor implements PostgresExecutor<PoolClient> {
     this.#logger = options.logger ?? console;
   }
 
+  /** The connection listens for `error` during the transaction, so a server-ended session fails the transaction instead of the process. */
+  readonly sessionTimeouts = true;
+
   async transaction<T>(work: (transaction: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.#pool.connect();
+    // The pool only listens while a client is idle: an error event of a checked-out client (the
+    // server ending the session, for example at idle_in_transaction_session_timeout) would be unhandled.
+    const onSessionEnded = (error: Error): void => {
+      this.#logger.warn(
+        `[PgExecutor](transaction) The server ended the session of an open transaction, the transaction fails | error=${error.message}`,
+      );
+    };
+    client.on('error', onSessionEnded);
+    const release = (destroy: boolean): void => {
+      client.removeListener('error', onSessionEnded);
+      if (destroy) {
+        client.release(true);
+      } else {
+        client.release();
+      }
+    };
     try {
       await client.query('BEGIN');
       const result = await work(client);
       await client.query('COMMIT');
-      client.release();
+      release(false);
       return result;
     } catch (error) {
-      await this.#rollbackAndRelease(client);
+      await this.#rollbackAndRelease(client, release);
       throw error;
     }
   }
@@ -106,12 +125,15 @@ export class PgExecutor implements PostgresExecutor<PoolClient> {
   }
 
   /** A client whose rollback fails is in an unknown state, so it is destroyed instead of reused. */
-  async #rollbackAndRelease(client: PoolClient): Promise<void> {
+  async #rollbackAndRelease(
+    client: PoolClient,
+    release: (destroy: boolean) => void,
+  ): Promise<void> {
     try {
       await client.query('ROLLBACK');
-      client.release();
+      release(false);
     } catch {
-      client.release(true);
+      release(true);
     }
   }
 }

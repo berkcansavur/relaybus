@@ -63,9 +63,11 @@ import {
   createRetentionSettings,
   isDispatcherEnabled,
   oneOf,
+  resolveTransactionTimeout,
 } from './relay-bus-settings.js';
 import { DEFAULT_ROUTE_RETRY_POLICY, type RetryPolicyOptions } from './retry-policy.js';
 import { groupRoutes, type RouteGroup } from './route-groups.js';
+import { runBudgetedTransaction } from './transaction-budget.js';
 import type { StandardSchemaV1 } from './standard-schema.js';
 import type { Transport } from './transport.js';
 
@@ -152,6 +154,15 @@ export interface RelayBusOptions<TTransaction = unknown> {
   readonly source?: string;
   /** Default `'required'`. */
   readonly transactionMode?: TransactionMode;
+  /**
+   * Time budget of every `bus.transaction` (and `@RelayBusTransaction()` method). The store makes
+   * the database enforce it where it can (PostgreSQL: `statement_timeout`, plus
+   * `idle_in_transaction_session_timeout` and on PostgreSQL 17+ `transaction_timeout`; MongoDB:
+   * `maxCommitTimeMS` and a client-side operation timeout), and a transaction that still runs past
+   * it is rolled back with a {@link TransactionTimeoutError}. Keep calls to other services out of
+   * transactions instead of raising it. Default `'5s'`.
+   */
+  readonly transactionTimeout?: Duration;
   /**
    * Finds the caller's active transaction when none is passed to `publish`
    * and none was opened with `bus.transaction`, for example from
@@ -267,6 +278,7 @@ export class RelayBus<TTransaction = unknown> {
   readonly #store: EventStore<TTransaction>;
   readonly #source: string;
   readonly #transactionMode: TransactionMode;
+  readonly #transactionTimeoutMs: number;
   readonly #transactionResolver: (() => TTransaction | undefined) | undefined;
   readonly #unroutedEvents: UnroutedEventPolicy;
   readonly #registry = new HandlerRegistry();
@@ -299,6 +311,7 @@ export class RelayBus<TTransaction = unknown> {
       name: 'unroutedEvents',
     });
     this.#transactionResolver = options.transactionResolver;
+    this.#transactionTimeoutMs = resolveTransactionTimeout(options);
     this.#defaults = createHandlerDefaults(options);
     this.#logger = options.logger ?? console;
     this.#notifier = new Notifier(options.observers ?? [], this.#logger);
@@ -490,12 +503,15 @@ export class RelayBus<TTransaction = unknown> {
 
   /**
    * Runs `work` in a new store transaction. `publish` calls inside it join the
-   * transaction without passing it explicitly.
+   * transaction without passing it explicitly. The transaction is held to `transactionTimeout`
+   * and rolled back with a {@link TransactionTimeoutError} when it runs past it.
    */
   async transaction<T>(work: (transaction: TTransaction) => Promise<T>): Promise<T> {
-    return this.#store.transaction((transaction) =>
-      runInScope({ transaction }, () => work(transaction)),
-    );
+    return runBudgetedTransaction(this.#store, {
+      clock: this.#clock,
+      timeoutMs: this.#transactionTimeoutMs,
+      work: (transaction) => runInScope({ transaction }, () => work(transaction)),
+    });
   }
 
   /**

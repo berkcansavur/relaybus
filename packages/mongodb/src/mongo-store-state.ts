@@ -72,12 +72,44 @@ export async function runInTransaction<T>(
   state: MongoStoreState,
   work: (transaction: ClientSession) => Promise<T>,
 ): Promise<T> {
+  return runInTransactionWith(state, { work, transactionOptions: state.transactionOptions });
+}
+
+/**
+ * Runs `work` in a transaction held to `timeoutMs`: the driver's client-side operation timeout
+ * (`timeoutMS`) bounds the whole `withTransaction`, including retries and every operation sent
+ * through the session after the budget ran out, and `maxCommitTimeMS` bounds the commit on the server.
+ */
+export async function runInBudgetedTransaction<T>(
+  state: MongoStoreState,
+  {
+    work,
+    timeoutMs,
+  }: { readonly work: (transaction: ClientSession) => Promise<T>; readonly timeoutMs: number },
+): Promise<T> {
+  const budget = Math.ceil(timeoutMs);
+  return runInTransactionWith(state, {
+    work,
+    transactionOptions: { ...state.transactionOptions, maxCommitTimeMS: budget, timeoutMS: budget },
+  });
+}
+
+async function runInTransactionWith<T>(
+  state: MongoStoreState,
+  {
+    work,
+    transactionOptions,
+  }: {
+    readonly work: (transaction: ClientSession) => Promise<T>;
+    readonly transactionOptions: TransactionOptions & { readonly timeoutMS?: number };
+  },
+): Promise<T> {
   try {
     return await state.client.withSession(async (session) => {
       let result!: T;
       await session.withTransaction(async () => {
         result = await work(session);
-      }, state.transactionOptions);
+      }, transactionOptions);
       return result;
     });
   } catch (error) {

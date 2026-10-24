@@ -20,6 +20,7 @@ export const DEFAULTS = {
   completedRetention: '7d',
   retentionInterval: '1h',
   routeTimeoutMs: 30_000,
+  transactionTimeout: '5s',
 } as const;
 
 export function oneOf<T extends string>(
@@ -36,6 +37,16 @@ export function oneOf<T extends string>(
 
 export function isDispatcherEnabled<TTransaction>(options: RelayBusOptions<TTransaction>): boolean {
   return options.dispatcher?.enabled ?? true;
+}
+
+/** Milliseconds every `bus.transaction` may take. */
+export function resolveTransactionTimeout<TTransaction>(
+  options: RelayBusOptions<TTransaction>,
+): number {
+  return toTimerMilliseconds(
+    options.transactionTimeout ?? DEFAULTS.transactionTimeout,
+    'transactionTimeout',
+  );
 }
 
 export function createHandlerDefaults<TTransaction>(

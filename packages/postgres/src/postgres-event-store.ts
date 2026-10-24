@@ -9,6 +9,7 @@ import {
   type ErrorInfo,
   type EventStore,
   type EventStoreStatistics,
+  type EventStoreTransactionOptions,
   type LeaseReference,
   type PurgeRequest,
   type PurgeResult,
@@ -27,6 +28,7 @@ import { PostgresMaintenance } from './postgres-maintenance.js';
 import type { PostgresStoreState } from './postgres-store-state.js';
 import { createPostgresSchemaStatements, postgresSchemaMarker } from './schema.js';
 import { PostgresStatements } from './statements.js';
+import { applyTransactionTimeout } from './transaction-timeouts.js';
 
 /** Options shared by every way of connecting. */
 export interface PostgresEventStoreSettings extends PostgresSchemaOptions {
@@ -222,11 +224,23 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     return rows[0]!['current'] === true;
   }
 
-  async transaction<T>(work: (transaction: TTransaction) => Promise<T>): Promise<T> {
+  /**
+   * Runs `work` in a transaction of the executor. With `options.timeoutMs` (from `bus.transaction`)
+   * the server holds the transaction to the budget: `statement_timeout`, and for executors with
+   * `sessionTimeouts` (`pg`) also `idle_in_transaction_session_timeout` and, on PostgreSQL 17+,
+   * `transaction_timeout`, all scoped to the transaction.
+   */
+  async transaction<T>(
+    work: (transaction: TTransaction) => Promise<T>,
+    options?: EventStoreTransactionOptions,
+  ): Promise<T> {
     const own = { wake: false };
     const result = await this.#state.executor.transaction(async (transaction) => {
       this.#state.ownTransactions.set(transaction, own);
       try {
+        if (options !== undefined) {
+          await applyTransactionTimeout(this.#state, { transaction, timeoutMs: options.timeoutMs });
+        }
         return await work(transaction);
       } finally {
         this.#state.ownTransactions.delete(transaction);

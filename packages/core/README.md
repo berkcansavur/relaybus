@@ -84,6 +84,7 @@ Use a database store in production: [`@relaybus/postgres`](../postgres) or
 | `source`                                  | `'relaybus'`                                  | Service name recorded on every event.                                                                                                         |
 | `transactionMode`                         | `'required'`                                  | `'optional'` lets `publish` open its own transaction.                                                                                         |
 | `transactionResolver`                     | —                                             | Returns the caller's active transaction, e.g. from `@nestjs-cls/transactional`.                                                               |
+| `transactionTimeout`                      | `'5s'`                                        | Budget of every `bus.transaction`; the database enforces it where it can, an overrun rolls back with `TransactionTimeoutError`.               |
 | `unroutedEvents`                          | `'warn'`                                      | `'throw'` rejects events without any handler or route.                                                                                        |
 | `retry`                                   | 10 attempts, `1s`, ×2, max `10m`, full jitter | Default handler retry policy. `attempts: Infinity` retries forever.                                                                           |
 | `handlerTimeout`                          | `false`                                       | Default handler timeout.                                                                                                                      |
@@ -332,6 +333,7 @@ never renamed or reused once released, so branch on them in alerts and retry rul
 | `RELAYBUS_ERROR`                           | `RelayBusError`                 | `@relaybus/core`     |
 | `RELAYBUS_CONFIGURATION`                   | `ConfigurationError`            | `@relaybus/core`     |
 | `RELAYBUS_TRANSACTION_REQUIRED`            | `TransactionRequiredError`      | `@relaybus/core`     |
+| `RELAYBUS_TRANSACTION_TIMEOUT`             | `TransactionTimeoutError`       | `@relaybus/core`     |
 | `RELAYBUS_NON_RETRYABLE`                   | `NonRetryableError`             | `@relaybus/core`     |
 | `RELAYBUS_EVENT_VALIDATION`                | `EventValidationError`          | `@relaybus/core`     |
 | `RELAYBUS_INVALID_ENVELOPE`                | `InvalidEnvelopeError`          | `@relaybus/core`     |

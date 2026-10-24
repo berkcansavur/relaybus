@@ -9,6 +9,7 @@ import {
   type ErrorInfo,
   type EventStore,
   type EventStoreStatistics,
+  type EventStoreTransactionOptions,
   type IdentifierGenerator,
   type LeaseReference,
   type PurgeRequest,
@@ -25,7 +26,11 @@ import { MongoOrdering } from './mongo-ordering.js';
 import { MongoPurge } from './mongo-purge.js';
 import { MongoQueries } from './mongo-queries.js';
 import { MongoSchema } from './mongo-schema.js';
-import { runInTransaction, type MongoStoreState } from './mongo-store-state.js';
+import {
+  runInBudgetedTransaction,
+  runInTransaction,
+  type MongoStoreState,
+} from './mongo-store-state.js';
 import { assertCollectionPrefix, assertDatabaseName } from './naming.js';
 
 export interface MongoEventStoreOptions {
@@ -211,10 +216,19 @@ export class MongoEventStore implements EventStore<ClientSession> {
    * not safe for side effects outside the session (HTTP calls, other databases),
    * so keep those out of `work`; relaybus handlers are already at-least-once.
    *
+   * With `options.timeoutMs` (from `bus.transaction`) the driver's operation timeout (`timeoutMS`)
+   * bounds the whole transaction, so an operation sent after the budget ran out fails and the
+   * transaction aborts, and `maxCommitTimeMS` bounds the commit on the server.
+   *
    * @throws ConfigurationError when the deployment does not support transactions.
    */
-  transaction<T>(work: (transaction: ClientSession) => Promise<T>): Promise<T> {
-    return runInTransaction(this.#state, work);
+  transaction<T>(
+    work: (transaction: ClientSession) => Promise<T>,
+    options?: EventStoreTransactionOptions,
+  ): Promise<T> {
+    return options === undefined
+      ? runInTransaction(this.#state, work)
+      : runInBudgetedTransaction(this.#state, { work, timeoutMs: options.timeoutMs });
   }
 
   /**

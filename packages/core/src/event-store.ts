@@ -124,6 +124,17 @@ export interface EventStoreStatistics {
   readonly oldestDueAt: Date | null;
 }
 
+/** How a store runs one transaction of `bus.transaction`. */
+export interface EventStoreTransactionOptions {
+  /**
+   * Time budget of the whole transaction, in milliseconds. A store makes the database enforce it
+   * where it can (for example a statement or idle-in-transaction timeout), so a transaction that
+   * waits on something slow is ended by the server and its locks are released. The bus rolls back
+   * a transaction that still ran past the budget, so a store may also ignore it.
+   */
+  readonly timeoutMs: number;
+}
+
 /**
  * Storage port. Implementations persist events and deliveries in the same
  * database as the application's business data so that both commit atomically.
@@ -133,8 +144,14 @@ export interface EventStoreStatistics {
 export interface EventStore<TTransaction = unknown> {
   /** Creates tables, collections and indexes when they do not exist. */
   setup?(): Promise<void>;
-  /** Runs `work` inside a new database transaction and commits when it resolves. */
-  transaction<T>(work: (transaction: TTransaction) => Promise<T>): Promise<T>;
+  /**
+   * Runs `work` inside a new database transaction and commits when it resolves. `options` come
+   * from `bus.transaction`; the store's own transactions and the dispatcher's pass none.
+   */
+  transaction<T>(
+    work: (transaction: TTransaction) => Promise<T>,
+    options?: EventStoreTransactionOptions,
+  ): Promise<T>;
   /**
    * Writes events and their deliveries inside `transaction`. Idempotent on
    * event id and on (event id, handler). Assigns a per-key sequence to keyed

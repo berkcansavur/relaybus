@@ -74,6 +74,7 @@ logs through a Nest `Logger` with context `RelayBus`, so `app.useLogger(...)` co
 | `source`                                      | `'relaybus'`              | Service name recorded on every event; set it to your app name                    |
 | `transactionMode`                             | `'required'`              | `'optional'` lets `publish` open its own transaction                             |
 | `transactionResolver`                         | none                      | Finds the caller's active transaction (see below)                                |
+| `transactionTimeout`                          | `'5s'`                    | Budget of every `bus.transaction` / `@RelayBusTransaction()` (see below)         |
 | `retry`                                       | core default              | Default retry policy of every handler and route                                  |
 | `handlerTimeout`                              | `false`                   | Default handler timeout                                                          |
 | `dispatcher.enabled`                          | `true`                    | `false` on publish-only processes (API pods, scripts)                            |
@@ -253,6 +254,26 @@ async place(orderId: string): Promise<void> {
   throws a `ConfigurationError` that says so.
 - **Async methods only.** On a method that does not return a Promise it fails to compile:
   `'@RelayBusTransaction() needs a method that returns a Promise: make the method async'`.
+
+### Time budget: `transactionTimeout`
+
+Every relaybus transaction (`bus.transaction` and `@RelayBusTransaction()`) is held to
+`transactionTimeout` (default `'5s'`). The database enforces it where it can, so a transaction
+waiting on something slow is ended by the server and its row locks are released:
+
+- **PostgreSQL:** `SET LOCAL statement_timeout`, and with the `pg` executor also
+  `idle_in_transaction_session_timeout` and, on PostgreSQL 17+, `transaction_timeout` (detected
+  per transaction). Adapters other than `pg` get `statement_timeout` only, because a server-ended
+  session would leave their checked-out connection without an `error` listener.
+- **MongoDB:** the driver's operation timeout (`timeoutMS`) over the whole `withTransaction` and
+  `maxCommitTimeMS` on the commit.
+
+A transaction that still runs past the budget is rolled back before it commits. Either way the
+caller gets a `TransactionTimeoutError` (`RELAYBUS_TRANSACTION_TIMEOUT`, with the database error as
+`cause`) whose message points at the usual cause: a slow call to another service inside the
+transaction. Move HTTP calls before the transaction or after it commits (the
+`@relaybus/eslint-plugin` rule `no-external-call-in-transaction` catches them) instead of raising
+the budget.
 
 ### Repositories: `RelayBusTransactionHost<T>`
 

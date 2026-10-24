@@ -29,6 +29,16 @@ export class TransactionRequiredError extends RelayBusError {
 }
 
 /**
+ * A `bus.transaction` (or `@RelayBusTransaction()` method) ran past its `transactionTimeout` and
+ * was rolled back. Its `cause` is the error the database raised when it ended the transaction,
+ * when there was one. Usually a slow call to another service made inside the transaction.
+ */
+export class TransactionTimeoutError extends RelayBusError {
+  override name = 'TransactionTimeoutError';
+  override readonly code: string = 'RELAYBUS_TRANSACTION_TIMEOUT';
+}
+
+/**
  * Throw from a handler to dead-letter the delivery immediately, skipping the
  * remaining retry attempts.
  */

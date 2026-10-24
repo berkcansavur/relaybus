@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import { ConfigurationError } from '@relaybus/core';
 import type { Pool, PoolClient } from 'pg';
@@ -191,7 +192,10 @@ describe('PostgresEventStore options', () => {
 
 describe('PgExecutor', () => {
   function createPool(clientQuery: (sql: string) => Promise<unknown>) {
-    const client = { query: vi.fn(clientQuery), release: vi.fn() };
+    const client = Object.assign(new EventEmitter(), {
+      query: vi.fn(clientQuery),
+      release: vi.fn(),
+    });
     const pool = { connect: vi.fn(async () => client), query: vi.fn() };
     return { client, pool, executor: new PgExecutor(pool as unknown as Pool) };
   }
@@ -201,6 +205,28 @@ describe('PgExecutor', () => {
     await expect(executor.transaction(async () => 'done')).resolves.toBe('done');
     expect(client.query.mock.calls.map(([sql]) => sql)).toEqual(['BEGIN', 'COMMIT']);
     expect(client.release).toHaveBeenCalledWith();
+  });
+
+  it('survives the server ending the session of an open transaction', async () => {
+    const warn = vi.fn();
+    const client = Object.assign(new EventEmitter(), {
+      query: vi.fn(async () => ({ rows: [] })),
+      release: vi.fn(),
+    });
+    const pool = { connect: vi.fn(async () => client), query: vi.fn() };
+    const executor = new PgExecutor(pool as unknown as Pool, {
+      logger: { log: vi.fn(), warn, error: vi.fn() },
+    });
+    expect(executor.sessionTimeouts).toBe(true);
+
+    await executor.transaction(async () => {
+      client.emit('error', new Error('terminating connection due to idle-in-transaction timeout'));
+    });
+
+    expect(warn).toHaveBeenCalledWith(
+      '[PgExecutor](transaction) The server ended the session of an open transaction, the transaction fails | error=terminating connection due to idle-in-transaction timeout',
+    );
+    expect(client.listenerCount('error')).toBe(0);
   });
 
   it('rolls back and reuses the client when the work fails', async () => {
@@ -491,14 +517,14 @@ describe('wake-up notifications', () => {
   it('sends no wake-up once the pool passed in is ending', async () => {
     vi.useFakeTimers();
     try {
-      const client = {
+      const client = Object.assign(new EventEmitter(), {
         query: vi.fn(async (statement: string | { text: string }) =>
           typeof statement === 'string'
             ? { rows: [] }
             : { rows: [{ id: 'e', inserted: true, sequence: null, deliveries: 1 }] },
         ),
         release: vi.fn(),
-      };
+      });
       const pool = {
         on: vi.fn(),
         connect: vi.fn(async () => client),
