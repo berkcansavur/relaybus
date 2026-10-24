@@ -35,6 +35,7 @@ import type {
 } from './event-store.js';
 import {
   assertEventType,
+  keyFromDefinition,
   validatePayload,
   type DomainEvent,
   type EventClass,
@@ -196,7 +197,9 @@ export interface PublishOptions<TTransaction = unknown> {
   /**
    * Ordering and partition key. Events with the same key are handled one at a
    * time per handler, in commit order. A delayed or retrying event holds back
-   * later events of its key.
+   * later events of its key. Default: the `key` of the event's definition
+   * (`defineEvent(type, { key })`), else none. An explicit key wins over the definition's, and in
+   * `publishAll` applies to every event of the call.
    */
   readonly key?: string;
   /** Deliver no earlier than this delay from now. */
@@ -817,7 +820,7 @@ export class RelayBus<TTransaction = unknown> {
       id: eventId,
       type: event.type,
       source: this.#source,
-      key: options.key ?? null,
+      key: options.key ?? keyFromDefinition(event, payload),
       payload,
       headers: { ...options.headers },
       correlationId: correlationId ?? eventId,

@@ -123,6 +123,11 @@ order: `options.transaction`, the transaction of `bus.transaction()`, then
 and `id` on `publish` for idempotent publishing. Register every handler in each
 process that publishes the event: deliveries are created at publish time.
 
+Declare the ordering key on the event to apply it to every publish: `defineEvent('order.placed.v1',
+{ schema, key: (payload) => payload.orderId })` (or `defineEvent<Payload>(type, { key })`). The
+function is typed from the payload, so a wrong field fails to compile. An explicit `key` option
+overrides it; in `publishAll` an explicit key applies to every event of the call.
+
 ## Handlers
 
 `subscribe(event, handler, { id, retry, timeout, concurrency, transactional })`.

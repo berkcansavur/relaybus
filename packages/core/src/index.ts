@@ -43,11 +43,13 @@ export {
   assertEventType,
   defineEvent,
   validatePayload,
+  type DefineEventKeyOptions,
   type DefineEventOptions,
   type DomainEvent,
   type EventClass,
   type EventEnvelope,
   type EventHeaders,
+  type EventKeyFunction,
   type EventReference,
   type PayloadOf,
 } from './event.js';
