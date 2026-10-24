@@ -11,6 +11,15 @@ import {
 import { readEventConsumerMetadata } from './event-consumer.decorator.js';
 import { readSubscribeMetadata, type SubscribeMetadata } from './subscribe.decorator.js';
 
+/** What one discovery pass has registered so far. */
+type Discovery = {
+  /** Where each handler id was registered, to report duplicates. */
+  readonly registeredBy: Map<string, string>;
+  /** Methods already registered per instance: a `useExisting` alias shows an instance twice. */
+  readonly visited: Map<object, Set<string>>;
+  readonly consumers: WeakSet<object>;
+};
+
 interface SubscribedMethod {
   readonly methodName: string;
   readonly declarations: readonly SubscribeMetadata[];
@@ -33,57 +42,71 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
   ) {}
 
   onModuleInit(): void {
-    const registeredBy = new Map<string, string>();
-    const visited = new Map<object, Set<string>>();
-    const consumers = new WeakSet<object>();
+    const discovery: Discovery = {
+      registeredBy: new Map<string, string>(),
+      visited: new Map<object, Set<string>>(),
+      consumers: new WeakSet<object>(),
+    };
     for (const wrapper of this.discovery.getProviders()) {
-      if (wrapper.isTransient || !wrapper.isDependencyTreeStatic()) {
-        this.assertNoHandlers(wrapper);
-        continue;
+      this.registerProvider(wrapper, discovery);
+    }
+  }
+
+  private registerProvider(wrapper: InstanceWrapper, discovery: Discovery): void {
+    if (wrapper.isTransient || !wrapper.isDependencyTreeStatic()) {
+      this.assertNoHandlers(wrapper);
+      return;
+    }
+    const instance = wrapper.instance as unknown;
+    if (typeof instance !== 'object' || instance === null) {
+      return;
+    }
+    const prototype = Object.getPrototypeOf(instance) as object | null;
+    if (prototype === null) {
+      return;
+    }
+    const className = instance.constructor.name;
+    for (const subscribed of this.subscribedMethods(prototype)) {
+      this.registerSubscribedMethod(instance, subscribed, discovery);
+    }
+    if (!discovery.consumers.has(instance)) {
+      discovery.consumers.add(instance);
+      this.registerEventConsumers(instance, className, discovery.registeredBy);
+    }
+  }
+
+  private registerSubscribedMethod(
+    instance: object,
+    { methodName, declarations }: SubscribedMethod,
+    { registeredBy, visited }: Discovery,
+  ): void {
+    // A `useExisting` alias exposes the same instance under another token.
+    const seen = visited.get(instance) ?? new Set<string>();
+    visited.set(instance, seen);
+    if (seen.has(methodName)) {
+      return;
+    }
+    seen.add(methodName);
+    const method = (instance as Record<string, unknown>)[methodName] as (
+      ...args: Parameters<EventHandler>
+    ) => unknown;
+    const location = `${instance.constructor.name}.${methodName}`;
+    for (const { event, options } of declarations) {
+      const id = options.id ?? location;
+      const previous = registeredBy.get(id);
+      if (previous !== undefined) {
+        throw new ConfigurationError(
+          `Handler id '${id}' is used by both ${previous} and ${location}; ` +
+            `pass a unique { id } to @Subscribe`,
+        );
       }
-      const instance = wrapper.instance as unknown;
-      if (typeof instance !== 'object' || instance === null) {
-        continue;
-      }
-      const prototype = Object.getPrototypeOf(instance) as object | null;
-      if (prototype === null) {
-        continue;
-      }
-      const className = instance.constructor.name;
-      for (const { methodName, declarations } of this.subscribedMethods(prototype)) {
-        // A `useExisting` alias exposes the same instance under another token.
-        const seen = visited.get(instance) ?? new Set<string>();
-        visited.set(instance, seen);
-        if (seen.has(methodName)) {
-          continue;
-        }
-        seen.add(methodName);
-        const method = (instance as Record<string, unknown>)[methodName] as (
-          ...args: Parameters<EventHandler>
-        ) => unknown;
-        const location = `${className}.${methodName}`;
-        for (const { event, options } of declarations) {
-          const id = options.id ?? location;
-          const previous = registeredBy.get(id);
-          if (previous !== undefined) {
-            throw new ConfigurationError(
-              `Handler id '${id}' is used by both ${previous} and ${location}; ` +
-                `pass a unique { id } to @Subscribe`,
-            );
-          }
-          registeredBy.set(id, location);
-          // Core resolves both classes and type strings; the overloads cannot express the union.
-          this.bus.subscribe(
-            event as never,
-            (envelope, context) => method.call(instance, envelope, context),
-            { ...options, id },
-          );
-        }
-      }
-      if (!consumers.has(instance)) {
-        consumers.add(instance);
-        this.registerEventConsumers(instance, className, registeredBy);
-      }
+      registeredBy.set(id, location);
+      // Core resolves both classes and type strings; the overloads cannot express the union.
+      this.bus.subscribe(
+        event as never,
+        (envelope, context) => method.call(instance, envelope, context),
+        { ...options, id },
+      );
     }
   }
 
