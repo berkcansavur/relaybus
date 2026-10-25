@@ -39,6 +39,13 @@ export function createObserver(): Required<RelayBusObserver> {
     onLeaseLost: vi.fn(),
     onPurged: vi.fn(),
     onFailure: vi.fn(),
+    onPublishFinished: vi.fn(),
+    onClaimFinished: vi.fn(),
+    onHandlerStarted: vi.fn(),
+    onHandlerFinished: vi.fn(),
+    onTransportSent: vi.fn(),
+    onReceiveFinished: vi.fn(),
+    onBacklog: vi.fn(),
   };
 }
 

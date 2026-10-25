@@ -183,6 +183,7 @@ interface Settings {
  */
 export class KafkaTransport implements Transport {
   readonly name: string;
+  readonly system = 'kafka';
   readonly #kafka: KafkaClientLike;
   readonly #groupId: string | undefined;
   readonly #fromBeginning: boolean;
@@ -443,7 +444,7 @@ export class KafkaTransport implements Transport {
       method: 'deliver',
       operation: async () => {
         try {
-          await onMessage(envelope);
+          await onMessage(envelope, { destination: payload.topic });
         } catch (error) {
           // The bus rejected the event for good; redelivering it would block the partition forever.
           if (!(error instanceof NonRetryableError)) {

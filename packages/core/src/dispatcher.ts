@@ -1,6 +1,7 @@
 import type { Clock } from './clock.js';
 import { CompletionBatcher } from './completion-batcher.js';
 import { DeliveryTimers } from './delivery-timers.js';
+import type { DispatchObservation } from './dispatch-observation.js';
 import { pendingKey, rejectOnAbort } from './dispatcher-support.js';
 import {
   DispatcherStoppedError,
@@ -15,6 +16,7 @@ import type { ClaimedDelivery, EventStore } from './event-store.js';
 import { runInIsolatedScope } from './execution-scope.js';
 import { ShutdownDeadline } from './shutdown-deadline.js';
 import type { HandlerContext, HandlerRegistration, HandlerRegistry } from './handler-registry.js';
+import { startLeaseHeartbeat } from './lease-heartbeat.js';
 import type { Notifier } from './notifier.js';
 import { computeRetryDelay, isRetryableError } from './retry-policy.js';
 
@@ -38,6 +40,8 @@ export interface DispatcherDependencies {
   readonly random: () => number;
   readonly notifier: Notifier;
   readonly settings: DispatcherSettings;
+  /** Reports claims and handler runs; absent when nothing observes or traces them. */
+  readonly observation?: DispatchObservation | undefined;
   /** Waits between attempts to confirm a completion. Replaceable in tests. */
   readonly sleep?: (milliseconds: number) => Promise<void>;
 }
@@ -72,8 +76,6 @@ const COMPLETION_RETRY_DELAYS_MS = [
   SECOND_COMPLETION_RETRY_MS,
   LAST_COMPLETION_RETRY_MS,
 ] as const;
-/** Lease renewals per lease duration. */
-const RENEWALS_PER_LEASE = 3;
 
 /**
  * Shortest time between the start of a claim and a claim caused by a wake-up (a publish, a notification
@@ -516,7 +518,7 @@ export class Dispatcher {
 
   /** Claims for every handler with room and starts what was claimed. */
   async #claimAndStart(): Promise<ClaimRound & { readonly started: InFlightDelivery[] }> {
-    const { store, registry, clock, settings } = this.#dependencies;
+    const { store, registry, clock, settings, observation } = this.#dependencies;
     const started: InFlightDelivery[] = [];
     let requested = 0;
     for (const request of this.#planClaims(registry.all())) {
@@ -526,13 +528,16 @@ export class Dispatcher {
       this.#quietRefillTimer?.();
       this.#quietRefillTimer = undefined;
       requested += request.limit;
-      const claimed = await store.claim({
+      const claim = {
         handlers: request.handlers,
         limit: request.limit,
         leaseOwner: settings.owner,
         leaseExpiresAt: new Date(now.getTime() + settings.leaseDurationMs),
         now,
-      });
+      };
+      const claimed = await (observation === undefined
+        ? store.claim(claim)
+        : observation.claim(store, claim));
       for (const handler of request.handlers) {
         // A wake-up that arrived while the claim ran may have brought what this claim could not see.
         if (claimed.length < request.limit && wakeGeneration === this.#wakeGeneration) {
@@ -632,7 +637,7 @@ export class Dispatcher {
     try {
       stopHeartbeat = registration.transactional
         ? await this.#guardTransactionalLease(registration, { delivery, controller })
-        : this.#startHeartbeat(delivery, controller);
+        : startLeaseHeartbeat(this.#dependencies, { delivery, controller });
       this.#leaseKeepers.set(delivery, stopHeartbeat);
       const outcome = await this.#runHandler(registration, { delivery, controller });
       const durationMs = clock.now().getTime() - startedAt;
@@ -754,8 +759,13 @@ export class Dispatcher {
       // The lease was lost (or the bus stopped) while the payload was validated.
       throw controller.signal.reason;
     }
-    const work = Promise.resolve().then(() =>
-      runInIsolatedScope(scope, () => registration.handle(event, context)),
+    const handle = (): unknown =>
+      runInIsolatedScope(scope, () => registration.handle(event, context));
+    const { observation } = this.#dependencies;
+    const work = Promise.resolve().then(
+      observation === undefined
+        ? handle
+        : () => observation.process({ registration, delivery }, handle),
     );
     work.catch(() => undefined);
     let cancelTimeout: CancelTimer | undefined;
@@ -773,7 +783,10 @@ export class Dispatcher {
       });
     }
     try {
-      await Promise.race([work, rejectOnAbort(controller.signal)]);
+      const settled = Promise.race([work, rejectOnAbort(controller.signal)]);
+      await (observation === undefined
+        ? settled
+        : observation.observe({ registration, delivery }, settled));
     } catch (error) {
       await this.#awaitAbandonedHandler(work, {
         reason: error,
@@ -841,52 +854,6 @@ export class Dispatcher {
         controller.abort(new LeaseLostError(`Lease on delivery ${delivery.deliveryId} expired`));
       },
       delayMs: Math.max(0, expiry - clock.now().getTime()),
-      unref: true,
-    });
-  }
-
-  /**
-   * Renews the lease every third of its duration. A worker that cannot renew
-   * aborts its handler once the last confirmed expiry passes, because another
-   * worker may then claim the delivery (self-fencing).
-   */
-  #startHeartbeat(delivery: ClaimedDelivery, controller: AbortController): () => void {
-    const { store, clock, notifier, settings } = this.#dependencies;
-    let confirmedExpiry = delivery.leaseExpiresAt.getTime();
-    let renewing = false;
-    const abortLeaseLost = (storeConfirmed = false): void => {
-      controller.abort(
-        new LeaseLostError(`Lease on delivery ${delivery.deliveryId} was lost`, { storeConfirmed }),
-      );
-    };
-    return schedule(clock, {
-      run: () => {
-        const now = clock.now();
-        if (now.getTime() >= confirmedExpiry) {
-          abortLeaseLost();
-          return;
-        }
-        if (renewing) {
-          return;
-        }
-        renewing = true;
-        const expiry = now.getTime() + settings.leaseDurationMs;
-        store
-          .extendLease(delivery, new Date(expiry), now)
-          .then((extended) => {
-            if (extended) {
-              confirmedExpiry = expiry;
-            } else {
-              abortLeaseLost(true);
-            }
-          })
-          .catch((error: unknown) => notifier.failure('extend-lease', error))
-          .finally(() => {
-            renewing = false;
-          });
-      },
-      delayMs: Math.max(1, Math.floor(settings.leaseDurationMs / RENEWALS_PER_LEASE)),
-      repeat: true,
       unref: true,
     });
   }

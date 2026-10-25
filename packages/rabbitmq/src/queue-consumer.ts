@@ -218,7 +218,7 @@ export class QueueConsumer {
     };
     for (let attempt = 1; ; attempt += 1) {
       try {
-        await this.#settings.onMessage(envelope);
+        await this.#settings.onMessage(envelope, { destination: message.fields.routingKey });
         this.#settle(channel, { message, settlement: 'ack' });
         return;
       } catch (error) {

@@ -5,6 +5,7 @@ import {
   InvalidEnvelopeError,
   NonRetryableError,
   type EventEnvelope,
+  type TransportMessage,
 } from '@relaybus/core';
 import {
   HandlerFailedError,
@@ -39,7 +40,7 @@ function setup(options: Partial<KafkaTransportOptions> = {}) {
 async function subscribed(options: Partial<KafkaTransportOptions> = {}) {
   const context = setup(options);
   const received: EventEnvelope[] = [];
-  const onMessage = vi.fn(async (envelope: EventEnvelope) => {
+  const onMessage = vi.fn(async (envelope: EventEnvelope, _message?: TransportMessage) => {
     received.push(envelope);
   });
   await context.transport.subscribe(['orders'], onMessage);
@@ -369,6 +370,8 @@ describe('inbound processing', () => {
     await consumer.deliver(asIncoming(createEnvelope()));
     expect(received).toEqual([createEnvelope()]);
     expect(onMessage).toHaveBeenCalledTimes(1);
+    // The topic it was read from goes along, for observers and traces.
+    expect(onMessage).toHaveBeenCalledWith(createEnvelope(), { destination: 'orders' });
   });
 
   it('retries a failing handler with backoff and heartbeats, then succeeds', async () => {

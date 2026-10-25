@@ -40,6 +40,15 @@ export function isDispatcherEnabled<TTransaction>(options: RelayBusOptions<TTran
 }
 
 /** Milliseconds every `bus.transaction` may take. */
+/** How often the backlog is read for `onBacklog`, in milliseconds; undefined when off. */
+export function resolveBacklogInterval<TTransaction>(
+  options: RelayBusOptions<TTransaction>,
+): number | undefined {
+  return options.backlogInterval === undefined
+    ? undefined
+    : toTimerMilliseconds(options.backlogInterval, 'backlogInterval');
+}
+
 export function resolveTransactionTimeout<TTransaction>(
   options: RelayBusOptions<TTransaction>,
 ): number {

@@ -5,6 +5,7 @@ import {
   type CatalogRequirement,
   type EventTypeRegistrations,
 } from './catalog-coverage.js';
+import { BusObservation, withTraceHeaders, type ReceiveOrigin } from './bus-observation.js';
 import { CatalogPublisher } from './catalog-publisher.js';
 import {
   resolveCatalogHandlers,
@@ -14,12 +15,12 @@ import {
   type SubscribeCatalogOptions,
 } from './catalog.js';
 import { systemClock, type Clock } from './clock.js';
+import { DispatchObservation } from './dispatch-observation.js';
 import { Dispatcher, type DispatcherSettings } from './dispatcher.js';
-import { toMilliseconds, toTimerMilliseconds, type Duration } from './duration.js';
+import { toMilliseconds, toTimerMilliseconds } from './duration.js';
 import {
   ConfigurationError,
   DrainIncompleteError,
-  InvalidEnvelopeError,
   LifecycleError,
   TransactionRequiredError,
   toErrorInfo,
@@ -41,7 +42,6 @@ import {
   type DomainEvent,
   type EventClass,
   type EventEnvelope,
-  type EventHeaders,
   type EventReference,
 } from './event.js';
 import { getCurrentScope, runInScope, type ExecutionScope } from './execution-scope.js';
@@ -56,7 +56,18 @@ import {
 import { createUuidV7, type IdentifierGenerator } from './identifier.js';
 import { schedule, type CancelTimer } from './internal/timers.js';
 import { Notifier } from './notifier.js';
-import type { RelayBusLogger, RelayBusObserver } from './observer.js';
+import type { RelayBusLogger } from './observer.js';
+import { normalizeEnvelope } from './received-envelope.js';
+import type {
+  InboundSubscriptionOptions,
+  PublishOneOptions,
+  PublishOptions,
+  ReceiveStatus,
+  RelayBusOptions,
+  RouteOptions,
+  TransactionMode,
+  UnroutedEventPolicy,
+} from './relay-bus-options.js';
 import {
   DEFAULTS,
   createDispatcherSettings,
@@ -64,9 +75,10 @@ import {
   createRetentionSettings,
   isDispatcherEnabled,
   oneOf,
+  resolveBacklogInterval,
   resolveTransactionTimeout,
 } from './relay-bus-settings.js';
-import { DEFAULT_ROUTE_RETRY_POLICY, type RetryPolicyOptions } from './retry-policy.js';
+import { DEFAULT_ROUTE_RETRY_POLICY } from './retry-policy.js';
 import { groupRoutes, type RouteGroup } from './route-groups.js';
 import {
   withinDeadline,
@@ -78,172 +90,18 @@ import { runBudgetedTransaction } from './transaction-budget.js';
 import type { StandardSchemaV1 } from './standard-schema.js';
 import type { Transport } from './transport.js';
 
-/**
- * - `required`: `publish` throws {@link TransactionRequiredError} when it finds no transaction.
- * - `optional`: `publish` opens its own transaction instead. The event is still durable,
- *   but no longer atomic with business writes made outside that transaction.
- */
-export type TransactionMode = 'required' | 'optional';
-
-/**
- * What `publish` does with an event that has no handler or route in this
- * process. Deliveries are created from the publisher's registrations, so a
- * process must register every handler and route of the events it publishes.
- * - `warn`: log a warning and store nothing.
- * - `throw`: throw a {@link ConfigurationError}, rolling back the caller's transaction.
- */
-export type UnroutedEventPolicy = 'warn' | 'throw';
-
-export interface DispatcherOptions {
-  /** Run handlers in this process. Disable on publish-only processes. Default true. */
-  readonly enabled?: boolean;
-  /** Maximum handlers running at once. Default 10. */
-  readonly concurrency?: number;
-  /** Maximum deliveries claimed per query. Default equals concurrency. */
-  readonly batchSize?: number;
-  /** Wait between claims when idle. Retries are picked up on this cadence. Default `'1s'`. */
-  readonly pollInterval?: Duration;
-  /** Lease length; renewed every third of it while the handler runs. Default `'30s'`. */
-  readonly leaseDuration?: Duration;
-  /**
-   * Longest `stop` takes in all, and its default `timeout`: waiting for running handlers, handing
-   * back leases, closing transports and the store. Past it, `stop` aborts the handlers still
-   * running, force-closes what relaybus opened itself and resolves. Default `'30s'`.
-   */
-  readonly shutdownTimeout?: Duration;
-  /**
-   * Longest a finished delivery waits so that deliveries finishing around the
-   * same time are completed with one store call (when the store supports it).
-   * A delivery that finishes while nothing else runs is completed at once.
-   * `0` completes every delivery on its own. Default `'2ms'`.
-   */
-  readonly completionBatchWindow?: Duration;
-  /** Most deliveries completed in one store call. Default 200. */
-  readonly completionBatchSize?: number;
-}
-
-export interface RetentionOptions {
-  /**
-   * Delete completed deliveries older than this. Default `'7d'`; `false` keeps them.
-   * Deduplication of received events and of publishes with a caller-supplied id
-   * only lasts as long as the event is kept: keep this longer than any broker
-   * redelivery or publish retry window.
-   */
-  readonly completed?: Duration | false;
-  /** Delete dead deliveries older than this. Default `false` (keep for inspection). */
-  readonly dead?: Duration | false;
-  /** How often the cleanup runs. Default `'1h'`. */
-  readonly interval?: Duration;
-}
-
-/**
- * Every route to one destination of one transport is one handler,
- * `relaybus.transport:<transport>:<destination>`: its events of one key are sent in commit
- * order whatever their types. Such routes must resolve to the same `retry` and `timeout`.
- */
-export interface RouteOptions {
-  /** Event class or type forwarded to the transport. */
-  readonly event: EventReference;
-  /** Name of a configured transport. */
-  readonly transport: string;
-  /** Topic, exchange or queue. Default: the event type. */
-  readonly destination?: string;
-  /** Default: retry until the broker accepts the event, at most every 5 minutes. */
-  readonly retry?: RetryPolicyOptions;
-  /** Abort a publish that hangs and retry it. Default `'30s'`. */
-  readonly timeout?: Duration;
-}
-
-export interface InboundSubscriptionOptions {
-  readonly transport: string;
-  readonly destinations: readonly string[];
-}
-
-export interface RelayBusOptions<TTransaction = unknown> {
-  readonly store: EventStore<TTransaction>;
-  /** Name of this service, recorded on every event. Default `'relaybus'`. */
-  readonly source?: string;
-  /** Default `'required'`. */
-  readonly transactionMode?: TransactionMode;
-  /**
-   * Time budget of every `bus.transaction` (and `@RelayBusTransaction()` method). The store makes
-   * the database enforce it where it can (PostgreSQL: `statement_timeout`, plus
-   * `idle_in_transaction_session_timeout` and on PostgreSQL 17+ `transaction_timeout`; MongoDB:
-   * `maxCommitTimeMS`), and a transaction that still runs past
-   * it is rolled back with a {@link TransactionTimeoutError}. Keep calls to other services out of
-   * transactions instead of raising it. Default `'5s'`.
-   */
-  readonly transactionTimeout?: Duration;
-  /**
-   * Finds the caller's active transaction when none is passed to `publish`
-   * and none was opened with `bus.transaction`, for example from
-   * `@nestjs-cls/transactional`. Return undefined when there is none.
-   */
-  readonly transactionResolver?: () => TTransaction | undefined;
-  /** Default `'warn'`. */
-  readonly unroutedEvents?: UnroutedEventPolicy;
-  /** Default retry policy of every handler. Routes have their own default. */
-  readonly retry?: RetryPolicyOptions;
-  /** Default handler timeout. Default `false` (no timeout). */
-  readonly handlerTimeout?: Duration | false;
-  readonly dispatcher?: DispatcherOptions;
-  readonly retention?: RetentionOptions;
-  readonly transports?: readonly Transport[];
-  /** Events forwarded to brokers after they commit. */
-  readonly routes?: readonly RouteOptions[];
-  /** Broker destinations whose events are stored and dispatched to local handlers. */
-  readonly subscriptions?: readonly InboundSubscriptionOptions[];
-  /** Create tables and indexes on start. Default true. */
-  readonly setupStore?: boolean;
-  readonly observers?: readonly RelayBusObserver[];
-  /** Default: `console`. */
-  readonly logger?: RelayBusLogger;
-  readonly clock?: Clock;
-  readonly generateIdentifier?: IdentifierGenerator;
-  readonly random?: () => number;
-  /**
-   * Catalogs this process is checked against when it starts. `start()` throws a
-   * {@link ConfigurationError} listing every event that is not covered:
-   * - a catalog: every event needs a handler or a route;
-   * - `consume(catalog, { events })`: each declared event needs a local handler;
-   * - `produce(catalog, { events })`: each declared event needs a route to a transport.
-   *
-   * See `registerCatalog`.
-   */
-  readonly catalogs?: readonly (Catalog | CatalogDeclaration)[];
-}
-
-export interface PublishOptions<TTransaction = unknown> {
-  /** Transaction to write into. Default: the current scope, then `transactionResolver`. */
-  readonly transaction?: TTransaction;
-  /**
-   * Ordering and partition key. Events with the same key are handled one at a
-   * time per handler, in commit order. A delayed or retrying event holds back
-   * later events of its key. Default: the `key` of the event's definition
-   * (`defineEvent(type, { key })`), else none. An explicit key wins over the definition's, and in
-   * `publishAll` applies to every event of the call.
-   */
-  readonly key?: string;
-  /** Deliver no earlier than this delay from now. */
-  readonly delay?: Duration;
-  readonly headers?: EventHeaders;
-  /**
-   * Default: inherited from the event being handled, otherwise the id of the
-   * first published event (shared by every event of a `publishAll` call).
-   */
-  readonly correlationId?: string;
-}
-
-export interface PublishOneOptions<TTransaction = unknown> extends PublishOptions<TTransaction> {
-  /**
-   * Event id. Pass a deterministic id (for example derived from a business key)
-   * to make publishing idempotent: when an event with this id is already
-   * stored, nothing is written and the stored event is left unchanged.
-   */
-  readonly id?: string;
-}
-
-export type ReceiveStatus = 'accepted' | 'duplicate' | 'ignored';
+export type {
+  DispatcherOptions,
+  InboundSubscriptionOptions,
+  PublishOneOptions,
+  PublishOptions,
+  ReceiveStatus,
+  RelayBusOptions,
+  RetentionOptions,
+  RouteOptions,
+  TransactionMode,
+  UnroutedEventPolicy,
+} from './relay-bus-options.js';
 
 type BusState = 'idle' | 'starting' | 'running' | 'stopping' | 'stopped';
 
@@ -306,6 +164,9 @@ export class RelayBus<TTransaction = unknown> {
   readonly #setupStore: boolean;
   readonly #retention: { completedMs: number | null; deadMs: number | null; intervalMs: number };
   #retentionTimer: CancelTimer | undefined;
+  readonly #observation: BusObservation | undefined;
+  readonly #backlogIntervalMs: number | undefined;
+  #backlogTimer: CancelTimer | undefined;
   readonly #shutdownTimeoutMs: number;
   #state: BusState = 'idle';
   #starting: Promise<void> | undefined;
@@ -328,6 +189,12 @@ export class RelayBus<TTransaction = unknown> {
     this.#logger = options.logger ?? console;
     this.#notifier = new Notifier(options.observers ?? [], this.#logger);
     this.#clock = options.clock ?? systemClock;
+    this.#observation = BusObservation.create({
+      notifier: this.#notifier,
+      tracer: options.tracer,
+      clock: this.#clock,
+    });
+    this.#backlogIntervalMs = resolveBacklogInterval(options);
     this.#generateIdentifier = options.generateIdentifier ?? (() => createUuidV7());
     this.#setupStore = options.setupStore ?? true;
     this.#retention = createRetentionSettings(options.retention);
@@ -350,6 +217,11 @@ export class RelayBus<TTransaction = unknown> {
       random: options.random ?? Math.random,
       notifier: this.#notifier,
       settings,
+      observation: DispatchObservation.create({
+        notifier: this.#notifier,
+        tracer: options.tracer,
+        clock: this.#clock,
+      }),
     });
   }
 
@@ -506,7 +378,7 @@ export class RelayBus<TTransaction = unknown> {
     event: DomainEvent<TPayload>,
     options: PublishOneOptions<TTransaction> = {},
   ): Promise<EventEnvelope<TPayload>> {
-    const [envelope] = await this.#publish([event], { options, id: options.id });
+    const [envelope] = await this.#observedPublish([event], { options, id: options.id });
     return envelope as EventEnvelope<TPayload>;
   }
 
@@ -515,7 +387,7 @@ export class RelayBus<TTransaction = unknown> {
     events: readonly DomainEvent[],
     options: PublishOptions<TTransaction> = {},
   ): Promise<EventEnvelope[]> {
-    return this.#publish(events, { options, id: undefined });
+    return this.#observedPublish(events, { options, id: undefined });
   }
 
   /**
@@ -549,6 +421,19 @@ export class RelayBus<TTransaction = unknown> {
    * events, which transports should dead-letter instead of redelivering.
    */
   async receive(envelope: EventEnvelope): Promise<ReceiveStatus> {
+    return this.#observation === undefined
+      ? this.#receive(envelope)
+      : this.#observedReceive(envelope, undefined);
+  }
+
+  #observedReceive(
+    envelope: EventEnvelope,
+    origin: ReceiveOrigin | undefined,
+  ): Promise<ReceiveStatus> {
+    return this.#observation!.receive({ envelope, origin }, () => this.#receive(envelope));
+  }
+
+  async #receive(envelope: EventEnvelope): Promise<ReceiveStatus> {
     const normalized = normalizeEnvelope(envelope);
     const registrations = this.#registry
       .forEventType(normalized.type)
@@ -708,8 +593,10 @@ export class RelayBus<TTransaction = unknown> {
       }
       for (const subscription of this.#subscriptions) {
         const transport = this.#transports.get(subscription.transport)!;
-        await transport.subscribe!(subscription.destinations, async (envelope) => {
-          await this.receive(envelope);
+        await transport.subscribe!(subscription.destinations, async (envelope, message) => {
+          await (this.#observation === undefined
+            ? this.#receive(envelope)
+            : this.#observedReceive(envelope, { transport, destination: message?.destination }));
         });
       }
     } catch (error) {
@@ -731,6 +618,7 @@ export class RelayBus<TTransaction = unknown> {
       this.#dispatcher.start();
     }
     this.#scheduleRetention();
+    this.#scheduleBacklog();
     this.#state = 'running';
     this.#logger.log(
       `[RelayBus](startComponents) relaybus started | handlers=${this.#registry.all().length} dispatcher=${this.#dispatcherEnabled}`,
@@ -747,6 +635,16 @@ export class RelayBus<TTransaction = unknown> {
         delayMs: this.#retention.intervalMs,
         repeat: true,
         unref: true,
+      });
+    }
+  }
+
+  /** Reports the backlog every `backlogInterval` while the bus runs, when an observer wants it. */
+  #scheduleBacklog(): void {
+    if (this.#backlogIntervalMs !== undefined) {
+      this.#backlogTimer = this.#observation?.startBacklog({
+        intervalMs: this.#backlogIntervalMs,
+        statistics: () => this.statistics(),
       });
     }
   }
@@ -772,6 +670,7 @@ export class RelayBus<TTransaction = unknown> {
         }
         this.#state = 'stopping';
         this.#retentionTimer?.();
+        this.#backlogTimer?.();
         const abandoned = await this.#dispatcher.stop(deadline);
         await this.#closeConnections(deadline);
         return abandoned;
@@ -785,6 +684,22 @@ export class RelayBus<TTransaction = unknown> {
     await this.#closeTransports(deadline);
     const options: CloseOptions = { signal: deadline.signal };
     await deadline.race(Promise.resolve(this.#store.close?.(options)));
+  }
+
+  /** Publishes inside the tracer's span, with its trace headers, when the bus is observed. */
+  #observedPublish(
+    events: readonly DomainEvent[],
+    input: { readonly options: PublishOptions<TTransaction>; readonly id: string | undefined },
+  ): Promise<EventEnvelope[]> {
+    const observation = this.#observation;
+    if (observation === undefined) {
+      return this.#publish(events, input);
+    }
+    return observation.publish(
+      { eventTypes: events.map((event) => String(event.type)) },
+      (headers) =>
+        this.#publish(events, { ...input, options: withTraceHeaders(input.options, headers) }),
+    );
   }
 
   async #publish(
@@ -949,7 +864,9 @@ export class RelayBus<TTransaction = unknown> {
         eventTypes: group.eventTypes,
         legacyIds: group.legacyIds,
         schema: undefined,
-        handle: (envelope) => transport.publish(envelope, destination),
+        handle:
+          this.#observation?.sender(transport, destination) ??
+          ((envelope) => transport.publish(envelope, destination)),
         options: {
           id: group.id,
           ...(route.retry === undefined ? {} : { retry: route.retry }),
@@ -1019,46 +936,4 @@ function describeEvent(event: EventReference): {
   }
   assertEventType(event.type);
   return { type: event.type, schema: (event as Partial<EventClass>).schema };
-}
-
-/**
- * Validates an event received from a broker and fills fields that JSON-based
- * wire formats commonly drop (`undefined` key, headers, correlation ids).
- */
-function normalizeEnvelope(envelope: EventEnvelope): EventEnvelope {
-  if (typeof envelope.id !== 'string' || envelope.id.length === 0) {
-    throw new InvalidEnvelopeError('Received event has no id');
-  }
-  if (typeof envelope.type !== 'string') {
-    throw new InvalidEnvelopeError(`Received event ${envelope.id} has no type`);
-  }
-  try {
-    assertEventType(envelope.type);
-  } catch (error) {
-    throw new InvalidEnvelopeError(toErrorInfo(error).message);
-  }
-  const occurredAt = toDate(envelope.occurredAt);
-  if (occurredAt === undefined) {
-    throw new InvalidEnvelopeError(`Received event ${envelope.id} has an invalid occurredAt`);
-  }
-  return {
-    id: envelope.id,
-    type: envelope.type,
-    source: typeof envelope.source === 'string' ? envelope.source : 'unknown',
-    key: optionalText(envelope.key),
-    payload: envelope.payload,
-    headers: { ...envelope.headers },
-    correlationId: optionalText(envelope.correlationId),
-    causationId: optionalText(envelope.causationId),
-    occurredAt,
-  };
-}
-
-function toDate(value: Date | string): Date | undefined {
-  const date = typeof value === 'string' ? new Date(value) : value;
-  return date instanceof Date && !Number.isNaN(date.getTime()) ? date : undefined;
-}
-
-function optionalText(value: string | null | undefined): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null;
 }

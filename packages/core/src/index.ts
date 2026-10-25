@@ -81,7 +81,21 @@ export type {
 export { createUuidV7, type IdentifierGenerator } from './identifier.js';
 export { InMemoryEventStore, type InMemoryEventStoreOptions } from './in-memory-event-store.js';
 export { InMemoryTransaction } from './in-memory-transaction.js';
-export type { FailureStage, RelayBusLogger, RelayBusObserver } from './observer.js';
+export type {
+  BacklogEvent,
+  ClaimFinishedEvent,
+  DeliveryKind,
+  FailureStage,
+  HandlerFinishedEvent,
+  HandlerStartedEvent,
+  OperationOutcome,
+  PublishFinishedEvent,
+  ReceiveFinishedEvent,
+  ReceiveOutcome,
+  RelayBusLogger,
+  RelayBusObserver,
+  TransportSentEvent,
+} from './observer.js';
 export {
   RelayBus,
   type DispatcherOptions,
@@ -107,4 +121,14 @@ export {
 } from './retry-policy.js';
 export type { StopOptions, StopResult } from './shutdown-deadline.js';
 export type { StandardSchemaV1 } from './standard-schema.js';
-export type { Transport, TransportMessageHandler } from './transport.js';
+export {
+  TRACEPARENT_HEADER,
+  TRACESTATE_HEADER,
+  traceContextOf,
+  type ProcessTraceInput,
+  type PublishTraceInput,
+  type RelayBusTracer,
+  type SendTraceInput,
+  type TraceContext,
+} from './tracing.js';
+export type { Transport, TransportMessage, TransportMessageHandler } from './transport.js';

@@ -10,10 +10,20 @@ type ObserverArgument<TMethod extends keyof RelayBusObserver> = Parameters<
 export class Notifier {
   readonly #observers: readonly RelayBusObserver[];
   readonly #logger: RelayBusLogger;
+  /** Hooks at least one observer implements, so callers skip building events nobody reads. */
+  readonly #implemented: ReadonlySet<keyof RelayBusObserver>;
 
   constructor(observers: readonly RelayBusObserver[], logger: RelayBusLogger) {
     this.#observers = observers;
     this.#logger = logger;
+    this.#implemented = new Set(
+      observers.flatMap((observer) => hookNames(observer) as (keyof RelayBusObserver)[]),
+    );
+  }
+
+  /** True when some observer implements `method`. */
+  wants(method: ObserverMethod): boolean {
+    return this.#implemented.has(method);
   }
 
   notify<TMethod extends ObserverMethod>(
@@ -67,4 +77,21 @@ export class Notifier {
       `[Notifier](logObserverFailure) relaybus observer threw | ${errorInfo.name}: ${errorInfo.message}`,
     );
   }
+}
+
+/** Names of the functions of an observer, own or inherited (an observer may be a class instance). */
+function hookNames(observer: RelayBusObserver): string[] {
+  const names: string[] = [];
+  for (
+    let target: object | null = observer;
+    target !== null && target !== Object.prototype;
+    target = Object.getPrototypeOf(target) as object | null
+  ) {
+    names.push(
+      ...Object.getOwnPropertyNames(target).filter(
+        (name) => typeof (observer as Record<string, unknown>)[name] === 'function',
+      ),
+    );
+  }
+  return names;
 }

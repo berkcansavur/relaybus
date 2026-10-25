@@ -1,8 +1,20 @@
 import type { EventEnvelope } from './event.js';
 import type { CloseOptions } from './event-store.js';
 
-/** Receives an event from a broker. Resolve only after it is durably stored. */
-export type TransportMessageHandler = (envelope: EventEnvelope) => Promise<void>;
+/** Where an incoming message came from, for observers and traces. */
+export interface TransportMessage {
+  /** Topic, routing key or queue the message arrived on. */
+  readonly destination: string;
+}
+
+/**
+ * Receives an event from a broker. Resolve only after it is durably stored. Transports pass
+ * `message` to tell where the event arrived; it is optional for transports written before it.
+ */
+export type TransportMessageHandler = (
+  envelope: EventEnvelope,
+  message?: TransportMessage,
+) => Promise<void>;
 
 /**
  * Broker port used to exchange events between services.
@@ -17,6 +29,11 @@ export type TransportMessageHandler = (envelope: EventEnvelope) => Promise<void>
 export interface Transport {
   /** Unique name referenced by routes and subscriptions. */
   readonly name: string;
+  /**
+   * The messaging system, as OpenTelemetry names it (`kafka`, `rabbitmq`), reported to observers
+   * and traces. Default: the transport's name.
+   */
+  readonly system?: string;
   connect?(): Promise<void>;
   publish(envelope: EventEnvelope, destination: string): Promise<void>;
   subscribe?(destinations: readonly string[], onMessage: TransportMessageHandler): Promise<void>;

@@ -389,7 +389,8 @@ describe('RabbitMqTransport subscribe', () => {
     await transport.subscribe(['orders'], handler);
     connections[0]!.consumerChannel.deliver!(createDelivery());
     await waitFor(() => handler.mock.calls.length === 1);
-    expect(handler).toHaveBeenCalledWith(createEnvelope());
+    // The routing key the event was published with is where it arrived.
+    expect(handler).toHaveBeenCalledWith(createEnvelope(), { destination: 'order.placed.v1' });
     await transport.close();
   });
 

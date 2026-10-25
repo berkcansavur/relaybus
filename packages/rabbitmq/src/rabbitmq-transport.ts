@@ -86,6 +86,7 @@ type PublishConfirmedInput = {
  */
 export class RabbitMqTransport implements Transport {
   readonly name: string;
+  readonly system = 'rabbitmq';
   readonly #settings: ResolvedTransportSettings;
   readonly #supervisor: ConnectionSupervisor;
   /** Serializes topology work so a subscription never races a reconnect. */
