@@ -1,3 +1,4 @@
+import { createHook } from 'node:async_hooks';
 import { describe, expect, it } from 'vitest';
 import {
   InMemoryEventStore,
@@ -87,5 +88,21 @@ describe('hot path without observers', () => {
       occurredAt: new Date('2026-01-01T00:00:00.000Z'),
     };
     expect(await bus.receive(envelope)).toBe('ignored');
+    // Budget: an ignored receive allocates two promises, as before the hooks existed (plus one of
+    // the test's own loop); a wrapping async function would double it.
+    let promises = 0;
+    const hook = createHook({
+      init(_id, type) {
+        if (type === 'PROMISE') {
+          promises += 1;
+        }
+      },
+    });
+    hook.enable();
+    for (let index = 0; index < EVENTS; index += 1) {
+      await bus.receive(envelope);
+    }
+    hook.disable();
+    expect(promises).toBeLessThanOrEqual(2 * EVENTS + 1);
   });
 });

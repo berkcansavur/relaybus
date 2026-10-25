@@ -420,7 +420,8 @@ export class RelayBus<TTransaction = unknown> {
    * only after it resolves. Throws {@link InvalidEnvelopeError} for malformed
    * events, which transports should dead-letter instead of redelivering.
    */
-  async receive(envelope: EventEnvelope): Promise<ReceiveStatus> {
+  receive(envelope: EventEnvelope): Promise<ReceiveStatus> {
+    // Not async: the store's promise is returned as is, so an unobserved receive allocates nothing extra.
     return this.#observation === undefined
       ? this.#receive(envelope)
       : this.#observedReceive(envelope, undefined);
