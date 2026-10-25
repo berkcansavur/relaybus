@@ -8,18 +8,19 @@ description: Use relaybus routes and subscriptions with the Kafka transport to p
 Service A writes an event in its database transaction. relaybus forwards it to a Kafka topic after commit. Service B stores received events once by id, then runs its handlers. The database-to-Kafka gap is covered by the outbox, and the Kafka-to-handler gap by the inbox.
 
 ```sh
-pnpm add @relaybus/core @relaybus/kafka kafkajs
+pnpm add @relaybus/core @relaybus/kafka @confluentinc/kafka-javascript
 ```
 
 ## Service A: route committed events to a topic
 
 ```ts
-import { Kafka } from 'kafkajs';
+import { KafkaJS } from '@confluentinc/kafka-javascript';
 import { RelayBus } from '@relaybus/core';
 import { KafkaTransport } from '@relaybus/kafka';
 
 const transport = new KafkaTransport({
-  kafka: new Kafka({ clientId: 'orders', brokers: ['kafka:9092'] }),
+  kafka: new KafkaJS.Kafka({ kafkaJS: { clientId: 'orders', brokers: ['kafka:9092'] } }),
+  client: 'confluent',
 });
 
 const bus = new RelayBus({
@@ -34,7 +35,8 @@ const bus = new RelayBus({
 
 ```ts
 const transport = new KafkaTransport({
-  kafka: new Kafka({ clientId: 'billing', brokers: ['kafka:9092'] }),
+  kafka: new KafkaJS.Kafka({ kafkaJS: { clientId: 'billing', brokers: ['kafka:9092'] } }),
+  client: 'confluent',
   groupId: 'billing',
 });
 
@@ -56,4 +58,4 @@ bus.subscribe(OrderPlaced, async (event) => createInvoice(event.payload.orderId)
 - **Wire format**: the CloudEvents Kafka binding in binary mode, readable by any CloudEvents-aware tool.
 - **Malformed records** are copied to `<topic>.dead` by default.
 
-Handlers must still be idempotent: delivery is at-least-once. See [@relaybus/kafka](/packages/kafka) for partitioning, ordering and the Confluent client status.
+Handlers must still be idempotent: delivery is at-least-once. See [@relaybus/kafka](/packages/kafka) for partitioning, ordering and using `kafkajs` instead of the Confluent client.
