@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "description": "Kafka transport for relaybus: forwards committed outbox events to Kafka topics (CloudEvents binding) and consumes them with an idempotent inbox, so events are not lost between database and Kafka.",
   "license": "MIT",
-  "author": "Berkcan \u015eavur <berkcansavur@gmail.com>",
+  "author": "Berkcan Şavur <berkcansavur@gmail.com>",
   "homepage": "https://berkcansavur.github.io/relaybus/packages/kafka",
   "repository": {
     "type": "git",
@@ -70,7 +70,7 @@
   "peerDependencies": {
     "@relaybus/core": "workspace:^",
     "kafkajs": "^2.2.4",
-    "@confluentinc/kafka-javascript": ">=1.0.0"
+    "@confluentinc/kafka-javascript": "^1.11.0"
   },
   "peerDependenciesMeta": {
     "kafkajs": {
@@ -85,6 +85,7 @@
     "@relaybus/testing": "workspace:*",
     "kafkajs": "2.2.4",
     "@testcontainers/kafka": "12.2.1",
-    "testcontainers": "12.2.1"
+    "testcontainers": "12.2.1",
+    "@confluentinc/kafka-javascript": "1.11.0"
   }
 }

@@ -104,11 +104,10 @@ importers:
         version: 8.71.2(eslint@10.13.0(jiti@2.7.0))(typescript@6.0.3)
 
   packages/kafka:
-    dependencies:
-      '@confluentinc/kafka-javascript':
-        specifier: '>=1.0.0'
-        version: 1.11.0
     devDependencies:
+      '@confluentinc/kafka-javascript':
+        specifier: 1.11.0
+        version: 1.11.0
       '@relaybus/core':
         specifier: workspace:*
         version: link:../core

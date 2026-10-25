@@ -87,6 +87,11 @@ export async function produceRaw(
   await producer.disconnect();
 }
 
+/** The bootstrap addresses of the shared broker, for clients other than these helpers' kafkajs. */
+export function brokerAddresses(): string[] {
+  return brokers;
+}
+
 /** Points the helpers of the calling test file at the broker the global setup started. */
 export function startKafkaBroker(): Promise<void> {
   brokers = inject('kafkaBrokers');

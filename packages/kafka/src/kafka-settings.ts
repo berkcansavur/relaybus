@@ -9,6 +9,7 @@ import { encodeEnvelope } from './cloudevents-codec.js';
 import { cloudEventsBinary, type KafkaCodec } from './codecs.js';
 import { HandlerFailedError } from './errors.js';
 import type { KafkaClientLike } from './kafka-client.js';
+import { clientDialect, type KafkaClientDialect } from './kafka-client-dialects.js';
 import type {
   InvalidMessagePolicy,
   KafkaProcessingOptions,
@@ -46,6 +47,8 @@ export interface KafkaTimings {
 export interface KafkaSettings {
   readonly name: string;
   readonly kafka: KafkaClientLike;
+  /** How to talk to `kafka`: kafkajs or Confluent. */
+  readonly dialect: KafkaClientDialect;
   readonly groupId: string | undefined;
   readonly fromBeginning: boolean;
   readonly maxInFlightRequests: number;
@@ -62,6 +65,7 @@ export function resolveKafkaSettings(options: KafkaTransportOptions): KafkaSetti
   return {
     name: options.name ?? DEFAULTS.name,
     kafka: options.kafka,
+    dialect: clientDialect(options.client),
     groupId: options.groupId,
     fromBeginning: options.fromBeginning ?? true,
     maxInFlightRequests: BoundedInteger.of(

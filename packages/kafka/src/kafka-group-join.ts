@@ -4,11 +4,6 @@ import { GroupJoinTimeoutError, TransportClosedError } from './errors.js';
 import type { KafkaConsumerLike, KafkaEachMessagePayload } from './kafka-client.js';
 import type { KafkaSettings } from './kafka-settings.js';
 
-/** Whether the client exposes the instrumentation needed to follow the group membership. */
-export function tracksMembership(consumer: KafkaConsumerLike): boolean {
-  return consumer.on !== undefined && consumer.events?.GROUP_JOIN !== undefined;
-}
-
 /** A wait for the consumer to join its group, and what ends it early. */
 type GroupJoin = { readonly promise: Promise<void>; dispose(): void };
 
@@ -53,7 +48,7 @@ export class GroupJoinWatch {
     },
   ): Promise<void> {
     await consumer.connect();
-    await consumer.subscribe({ topics, fromBeginning });
+    await consumer.subscribe(this.#settings.dialect.subscription(topics, fromBeginning));
     const joined = this.#wait(consumer);
     try {
       await consumer.run({ eachMessage });
@@ -64,7 +59,7 @@ export class GroupJoinWatch {
   }
 
   #wait(consumer: KafkaConsumerLike): GroupJoin {
-    if (!tracksMembership(consumer)) {
+    if (!this.#settings.dialect.tracksMembership(consumer)) {
       return { promise: Promise.resolve(), dispose: () => undefined };
     }
     const { name, groupId, timings } = this.#settings;

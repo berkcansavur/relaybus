@@ -60,7 +60,7 @@ export class KafkaProducerSession {
         delayMs: timings.publishTimeoutMs,
       });
     });
-    const sending = producer.send(record);
+    const sending = producer.send(this.#settings.dialect.record(record));
     sending.catch(() => undefined);
     try {
       await Promise.race([sending, timeout]);
@@ -70,8 +70,8 @@ export class KafkaProducerSession {
   }
 
   async #open(): Promise<KafkaProducerLike> {
-    const { kafka, producerConfig, maxInFlightRequests } = this.#settings;
-    const producer = kafka.producer({ ...producerConfig, idempotent: true, maxInFlightRequests });
+    const { kafka, dialect } = this.#settings;
+    const producer = kafka.producer(dialect.producerConfig(this.#settings));
     try {
       await producer.connect();
     } catch (error) {

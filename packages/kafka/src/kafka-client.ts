@@ -30,19 +30,61 @@ export interface KafkaOutgoingMessage {
 export interface KafkaProducerRecord {
   readonly topic: string;
   readonly messages: KafkaOutgoingMessage[];
-  /** Always `-1`: wait for all in-sync replicas. */
+  /**
+   * kafkajs: always `-1`, wait for all in-sync replicas. Absent for Confluent, which rejects
+   * `acks` here; the producer is created with `acks: -1` instead.
+   */
+  readonly acks?: number;
+}
+
+/** Producer settings of Confluent's KafkaJS-compatible API that this package decides itself. */
+export interface KafkaConfluentProducerSettings {
+  readonly idempotent: boolean;
+  readonly maxInFlightRequests: number;
   readonly acks: number;
 }
 
-/** Producer settings this package decides itself; user settings are merged below them. */
+/**
+ * Producer settings this package decides itself; user settings are merged below them.
+ * kafkajs gets them at the top level; Confluent inside the `kafkaJS` block and again as
+ * librdkafka properties, which win over the block.
+ */
 export interface KafkaProducerConfig {
-  readonly idempotent: boolean;
-  readonly maxInFlightRequests: number;
+  readonly idempotent?: boolean;
+  readonly maxInFlightRequests?: number;
+  readonly kafkaJS?: KafkaConfluentProducerSettings;
+  readonly 'enable.idempotence'?: boolean;
+  readonly 'max.in.flight'?: number;
+  readonly acks?: number;
 }
 
-/** Consumer settings this package decides itself; user settings are merged below them. */
-export interface KafkaConsumerConfig {
+/** Consumer settings of Confluent's KafkaJS-compatible API that this package decides itself. */
+export interface KafkaConfluentConsumerSettings {
   readonly groupId: string;
+  readonly fromBeginning: boolean;
+}
+
+/** A partition as Confluent hands it to `rebalance_cb`. */
+export interface KafkaTopicPartition {
+  readonly topic: string;
+  readonly partition: number;
+}
+
+/**
+ * Consumer settings this package decides itself; user settings are merged below them.
+ * kafkajs gets `groupId` at the top level; Confluent gets `groupId` and `fromBeginning`
+ * inside the `kafkaJS` block and again as librdkafka properties, and reports group membership
+ * through `rebalance_cb`.
+ */
+export interface KafkaConsumerConfig {
+  readonly groupId?: string;
+  readonly kafkaJS?: KafkaConfluentConsumerSettings;
+  readonly 'group.id'?: string;
+  readonly 'auto.offset.reset'?: 'earliest' | 'latest';
+  readonly rebalance_cb?: (
+    error: { readonly code: number },
+    assignment: readonly KafkaTopicPartition[],
+  ) => unknown;
 }
 
 /** Subset of the producer API: `connect`, `send`, `disconnect`. */
@@ -98,7 +140,8 @@ export interface KafkaConsumerLike {
   readonly events?: KafkaConsumerEventNames | undefined;
   on?(eventName: string, listener: (event: KafkaConsumerEvent) => void): unknown;
   connect(): Promise<void>;
-  subscribe(subscription: { topics: string[]; fromBeginning: boolean }): Promise<void>;
+  /** `fromBeginning` is given to kafkajs only; Confluent takes it in the consumer config. */
+  subscribe(subscription: { topics: string[]; fromBeginning?: boolean }): Promise<void>;
   run(config: KafkaRunConfig): Promise<void>;
   disconnect(): Promise<void>;
 }
