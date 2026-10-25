@@ -120,6 +120,8 @@ RelayBusModule.forRoot({ store, source: 'orders', transactionTimeout: '30s' });
 
 `@relaybus/eslint-plugin` ([step 7](#step-7-optional-new-packages)) finds external calls inside transactions at lint time.
 
+**Who owns the pool matters.** On a pool the store creates from `connectionString` or `poolConfig`, each connection keeps the budget as a session setting, so a publish costs no extra statement; the price is that statements outside a transaction on that connection (claims, completions, renewals) run under the budget the connection last received, `'5s'` by default. On a pool or executor you pass in, the budget lasts only for the transaction and your pool's settings are never changed. Details and when to choose which: [Tuning](/tuning#the-transaction-budget-and-who-owns-the-pool).
+
 ### Step 4: stop() returns a StopResult
 
 `bus.stop()` is now bounded: the whole shutdown takes at most `timeout` (default `dispatcher.shutdownTimeout`, 30 s) and resolves with what happened.
@@ -237,6 +239,7 @@ See [Transactions in NestJS](/recipes/transactions-in-nestjs) and [Observability
 - [ ] Routes to one destination share `retry` and `timeout`
 - [ ] Old route backlog drained, if cross-type order matters
 - [ ] No transaction waits on a slow external call (or `transactionTimeout` raised on purpose)
+- [ ] On a pool the store owns, you accept that statements outside transactions share the transaction budget (or pass your own pool)
 - [ ] `stop()` callers handle `StopResult`; grace period larger than `shutdownTimeout`
 - [ ] Dashboards read both route ids during the drain
 

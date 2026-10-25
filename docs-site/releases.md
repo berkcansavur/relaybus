@@ -53,18 +53,24 @@ Removed in 1.0.0; they still work and behave the same.
 
 ### Benchmark: 0.2.0 vs 0.3.0
 
-Method: `pnpm bench:full --base v0.2.0`, interleaved on one machine, fixed windows, database counters and exactness validation (0 lost, 0 duplicate, 0 out of order), as described in the [benchmark README](https://github.com/berkcansavur/relaybus/blob/main/benchmarks/README.md).
+In short: 0.3.0 is as fast as 0.2.0 on publish and on MongoDB, and about 1.8 times faster for keyed PostgreSQL dispatch in two cells. No cell showed a lost, duplicated or out-of-order delivery. Most cells have one sample per side, so a difference below about 10 % is noise. The full tables and caveats are in [Performance: 0.3.0 vs 0.2.0](/performance#_0-3-0-vs-0-2-0).
 
-The full 0.2.0 against 0.3.0 matrix has not been run yet. This table holds what has been measured so far (Apple M4, Docker Desktop, PostgreSQL 17, Node 24.3.0, one sample per side, so ratios are indicative only) and is completed from the full run before the release is tagged.
+Method: `pnpm bench:full --base v0.2.0`, interleaved on one machine (Apple M4, Docker Desktop, PostgreSQL 17, MongoDB 7, Node 24.3.0), fixed windows, database counters and exactness validation, as described in the [benchmark README](https://github.com/berkcansavur/relaybus/blob/main/benchmarks/README.md). The full run (39 minutes, all cells) used commit `a8587ff`; every sample was valid except the two of the PostgreSQL fan-out cell on four instances, whose preloaded backlog was too small on both sides, so that cell is left out. The publish and mixed-load cells were measured again after two publish fixes, with 2 samples per side and the 0.2.0 side taken from stored 0.2.0 samples.
 
-| Cell                                                                 | Metric                  | 0.2.0            | 0.3.0            | Ratio | Samples |
-| -------------------------------------------------------------------- | ----------------------- | ---------------- | ---------------- | ----- | ------- |
-| Routed dispatch `hot:10`, 5 ms ack, 1 instance, tuned                | deliveries per second   | 731              | 745              | 1.02  | 1 / 1   |
-| Routed dispatch `hot:10`, 5 ms ack, 1 instance, tuned                | WAL bytes per delivery  | 1,619            | 1,885            | 1.16  | 1 / 1   |
-| Routed dispatch `hot:10`, 5 ms ack, 1 instance, tuned                | statements per delivery | 1.20             | 1.20             | 1.00  | 1 / 1   |
-| Publish, PostgreSQL and MongoDB dispatch, keyed dispatch, mixed load |                         | not yet measured | not yet measured |       |         |
+| Scenario                                          | 0.2.0 per second | 0.3.0 per second |        Ratio |        Samples        |
+| ------------------------------------------------- | ---------------: | ---------------: | -----------: | :-------------------: |
+| PostgreSQL publish, 1 publisher, 1 event per call |            1,543 |            1,573 |         1.02 |         2 / 2         |
+| PostgreSQL publish, 32 publishers, 1 event        |            6,235 |            6,111 |         0.98 |         2 / 2         |
+| PostgreSQL publish, 8 publishers, 1,000 keys      |            3,789 |            4,145 |         1.09 |         2 / 2         |
+| PostgreSQL mixed load, 5,000 per second, tuned    |            4,133 |            4,032 |         0.98 |         2 / 2         |
+| PostgreSQL routed keyed dispatch, 1,000 keys      |            3,267 |            5,827 |         1.78 |         1 / 1         |
+| PostgreSQL keyed dispatch, 1,000 keys, 4 workers  |            4,453 |            7,931 |         1.78 |         1 / 1         |
+| PostgreSQL dispatch, all other cells              |                - |                - | 0.88 to 1.19 | 1 / 1, one cell 3 / 3 |
+| MongoDB dispatch, all cells                       |                - |                - | 0.98 to 1.06 | 1 / 1, one cell 3 / 3 |
 
-Both samples were valid. The WAL difference is within what one sample can show (its full-page-image share moved from 0.10 to 0.16 per delivery); it needs the repeated run before it is called a regression or noise.
+Statements per publish are 4 in both versions (4.07 against 4.07 at one publisher), so the transaction budget costs no extra round trip. Mixed-load p99 ratios are not meaningful at 5,000 per second: both sides are saturated and p99 moved between 79 ms and 10.6 s from run to run.
+
+Two things to know. First, PostgreSQL WAL bytes per delivery were 8 to 11 % higher in four dispatch cells and 5 to 8 % lower in five others (one sample each, except one cell with three), so there is no clear direction yet. Second, the first full run showed 25 % more statements per publish (5 against 4). That was the transaction budget and was fixed before this table was taken, in `a13fb7e` and `2fb3cde`. The publish cells that were not measured again (8 publishers with batches, five handlers, hot keys) were 0.79 to 1.02 in the full run, before the fix.
 
 ### Known issues
 

@@ -101,6 +101,17 @@ Raise `concurrency` for handlers that mostly wait on I/O; keep it near the pool 
 to the database in the delivery's transaction (`transactional: true`). Keep `pollInterval` at `'1s'`:
 notifications start new work, the poll only picks up retries and anything a lost notification missed.
 
+## The transaction budget and who owns the pool
+
+`bus.transaction` holds every transaction to `transactionTimeout` (default `'5s'`). Where the database applies that budget depends on who created the pool:
+
+| Pool                                                             | Where the budget lives                                                                                                                                  | Cost                                                                                             |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Created by the store (`connectionString` or `poolConfig`)        | Each connection keeps the budget as a session setting. The first `bus.transaction` on a connection sets it with `BEGIN`; later ones send nothing extra. | A publish costs what it did without a budget: `BEGIN`, the insert, `COMMIT`.                     |
+| Passed in by you (`pool`, or an executor over Prisma, Knex, ...) | The budget is set for the transaction only and is gone when it ends. Your pool's session settings are never changed.                                    | Nothing outside the transaction is affected, and the budget is set again with every transaction. |
+
+The trade-off of the owned pool: statements that run **outside** a transaction on that connection (claiming, completing and renewing deliveries) run under the budget the connection last received. With the default `'5s'` that is a `statement_timeout` of 5 seconds on those statements as well, and a raised budget (say `'30s'`) raises it for them. A transaction without a budget puts the session defaults back in its own `BEGIN`. If you need those statements to follow your own database settings, or want the budget to stay strictly per transaction, pass a pool you created. With `preparedStatements: false`, which you set behind a pooler in transaction mode, the budget stays per transaction on every pool, because session settings would reach other clients.
+
 ## PgBouncer in transaction mode
 
 A pooler in transaction mode hands every transaction a different server session. Two things need a session:
