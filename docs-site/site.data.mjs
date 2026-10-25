@@ -202,6 +202,24 @@ export const sections = [
           'Recommended relaybus settings for a single-connection API, a high-traffic API, a worker fleet, PgBouncer in transaction mode and a MongoDB replica set.',
       },
       {
+        title: 'Upgrading from 0.2 to 0.3',
+        path: 'upgrading',
+        description:
+          'Step-by-step upgrade of relaybus 0.2 to 0.3: route id change and draining the old route backlog, the 5 second transaction budget, the StopResult of stop(), decorator and codec renames, error codes and the optional new packages.',
+      },
+      {
+        title: 'Stability',
+        path: 'stability',
+        description:
+          'The relaybus API stability policy: semver for 0.x and 1.x, what is public API, deprecations, wire-format and database schema stability, supported runtimes.',
+      },
+      {
+        title: 'Compatibility',
+        path: 'compatibility',
+        description:
+          'The tested matrix of relaybus (Node.js, CommonJS and ESM, NestJS, PostgreSQL clients and ORMs, MongoDB, Kafka, RabbitMQ), what is unsupported and notes for serverless.',
+      },
+      {
         title: 'FAQ',
         path: 'faq',
         description:
@@ -210,7 +228,8 @@ export const sections = [
       {
         title: 'Releases',
         path: 'releases',
-        description: 'How relaybus is versioned and released, and where to find the changelog.',
+        description:
+          'What is new in relaybus 0.3.0, its breaking changes, deprecations, known issues and a benchmark against 0.2.0, and how relaybus is versioned and released.',
       },
     ],
   },

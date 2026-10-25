@@ -49,8 +49,11 @@ relaybus stores every event in the same database transaction as your business da
 
 - [relaybus vs alternatives](https://berkcansavur.github.io/relaybus/comparison.md): How relaybus compares with @nestjs/event-emitter, @nestjs/cqrs, @nestjs/outbox, BullMQ, pg-boss and using Kafka directly.
 - [Tuning for your workload](https://berkcansavur.github.io/relaybus/tuning.md): Recommended relaybus settings for a single-connection API, a high-traffic API, a worker fleet, PgBouncer in transaction mode and a MongoDB replica set.
+- [Upgrading from 0.2 to 0.3](https://berkcansavur.github.io/relaybus/upgrading.md): Step-by-step upgrade of relaybus 0.2 to 0.3: route id change and draining the old route backlog, the 5 second transaction budget, the StopResult of stop(), decorator and codec renames, error codes and the optional new packages.
+- [Stability](https://berkcansavur.github.io/relaybus/stability.md): The relaybus API stability policy: semver for 0.x and 1.x, what is public API, deprecations, wire-format and database schema stability, supported runtimes.
+- [Compatibility](https://berkcansavur.github.io/relaybus/compatibility.md): The tested matrix of relaybus (Node.js, CommonJS and ESM, NestJS, PostgreSQL clients and ORMs, MongoDB, Kafka, RabbitMQ), what is unsupported and notes for serverless.
 - [FAQ](https://berkcansavur.github.io/relaybus/faq.md): Answers to common questions: publishing events reliably in NestJS, the transactional outbox pattern and avoiding lost events between a database and Kafka.
-- [Releases](https://berkcansavur.github.io/relaybus/releases.md): How relaybus is versioned and released, and where to find the changelog.
+- [Releases](https://berkcansavur.github.io/relaybus/releases.md): What is new in relaybus 0.3.0, its breaking changes, deprecations, known issues and a benchmark against 0.2.0, and how relaybus is versioned and released.
 
 ## Optional
 
