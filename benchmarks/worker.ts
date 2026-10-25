@@ -60,7 +60,9 @@ function adapt<TTransaction>(
   });
   return {
     start: () => bus.start(),
-    stop: () => bus.stop(),
+    stop: async () => {
+      await bus.stop();
+    },
     subscribe: (id, handler) => void bus.subscribe(Bench, handler, { id }),
     publishInTransaction: (events, key) =>
       bus.transaction(async (transaction) => {

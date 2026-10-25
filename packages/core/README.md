@@ -93,7 +93,7 @@ Use a database store in production: [`@relaybus/postgres`](../postgres) or
 | `dispatcher.batchSize`                    | concurrency                                   | Deliveries claimed per query.                                                                                                                 |
 | `dispatcher.pollInterval`                 | `'1s'`                                        | Idle wait between claims; retries are picked up on this cadence.                                                                              |
 | `dispatcher.leaseDuration`                | `'30s'`                                       | Lease length, renewed every third while a handler runs.                                                                                       |
-| `dispatcher.shutdownTimeout`              | `'30s'`                                       | Wait for running handlers on `stop`, then release them.                                                                                       |
+| `dispatcher.shutdownTimeout`              | `'30s'`                                       | Longest `stop` takes in all (default of `stop({ timeout })`); handlers are aborted and released at four fifths of it.                         |
 | `dispatcher.completionBatchWindow`        | `'2ms'`                                       | Deliveries that finish within this window are completed with one store call; `0` completes one by one.                                        |
 | `dispatcher.completionBatchSize`          | `200`                                         | Most deliveries completed in one store call.                                                                                                  |
 | `retention.completed`                     | `'7d'`                                        | Delete events whose deliveries all completed after this; also the deduplication horizon. A completed delivery is deleted at once (see below). |
@@ -310,6 +310,25 @@ deploy, are still claimed and sent by the new route; the store rows keep their o
 
 `listDeliveries(query)`, `requeue(ids)`, `statistics()`, `purgeExpired()`,
 `handlers()`, `runOnce()` and `drain()` (tests), `start()` and `stop()`.
+
+**`stop({ timeout })` is bounded.** The whole shutdown (stop claiming, wait for running
+handlers, hand back leases, close transports and the store) takes at most `timeout`, default
+`dispatcher.shutdownTimeout` (30 s). Running handlers get four fifths of it; then their
+`context.signal` aborts and their deliveries are released for another process. If the deadline
+itself passes (a hung query, a broker that does not answer), `stop` gives up waiting, force-closes
+what relaybus opened itself (the pool a store created from `connectionString`, its listening
+connection, a RabbitMQ transport's connection) and resolves; it never closes a pool or client you
+passed in, and never rejects because of the deadline. It resolves with a `StopResult`:
+
+```ts
+const { graceful, abandonedDeliveries, durationMs } = await bus.stop({ timeout: '25s' });
+```
+
+`graceful` is false when the deadline passed, and a warning is logged
+(`[RelayBus](stop) Shutdown deadline passed, forced close | abandoned=1 | timeoutMs=25000`).
+Abandoned deliveries keep their lease until it expires (`dispatcher.leaseDuration`), then another
+process runs them again: at-least-once still holds, so keep handlers idempotent. Kafka's
+`disconnect` has no forced variant; past the deadline the bus simply stops waiting for it.
 
 **Completed deliveries are deleted.** Completing a delivery removes its row instead
 of updating it, which is what keeps the write cost of a delivery constant (see

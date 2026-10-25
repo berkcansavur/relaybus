@@ -4,6 +4,7 @@ import {
   type AppendResult,
   type ClaimRequest,
   type ClaimedDelivery,
+  type CloseOptions,
   type DeliveryQuery,
   type DeliveryRecord,
   type ErrorInfo,
@@ -24,6 +25,7 @@ import { PgExecutor } from './pg-executor.js';
 import { PostgresAppend } from './postgres-append.js';
 import { PostgresClaims } from './postgres-claim.js';
 import { PostgresCompletion } from './postgres-completion.js';
+import { OwnedConnections } from './owned-connections.js';
 import { PostgresMaintenance } from './postgres-maintenance.js';
 import type { PostgresStoreState } from './postgres-store-state.js';
 import { createPostgresSchemaStatements, postgresSchemaMarker } from './schema.js';
@@ -144,6 +146,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   readonly #claims: PostgresClaims<TTransaction>;
   readonly #completion: PostgresCompletion<TTransaction>;
   readonly #maintenance: PostgresMaintenance<TTransaction>;
+  readonly #owned = new OwnedConnections();
 
   constructor(options: PostgresEventStoreOptions<TTransaction>) {
     const { purgeBatchSize, wakeUp, queryOptions } = resolveStoreSettings(options);
@@ -151,7 +154,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     const statements = new PostgresStatements(names);
     const schemaStatements = createPostgresSchemaStatements(options);
     const logger = options.logger ?? console;
-    const { executor, pool, ownedPool } = connect(options, logger);
+    const { executor, pool, ownedPool } = connect(options, { logger, owned: this.#owned });
     const state: PostgresStoreState<TTransaction> = {
       executor,
       statements,
@@ -339,6 +342,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       async () => {
         // A client of its own, with the pool's connection settings: the pool keeps all its connections.
         const client = new Client(options);
+        this.#owned.track(client);
         await client.connect();
         return client;
       },
@@ -380,14 +384,28 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     return this.#maintenance.statistics(now);
   }
 
-  /** Ends the pool this store created from `connectionString`. Pools and executors you passed in stay open. */
-  async close(): Promise<void> {
+  /**
+   * Ends the pool this store created from `connectionString`. Pools and executors you passed in stay
+   * open. Once `options.signal` aborts (the shutdown deadline passed), the connections the store opened
+   * itself are destroyed: queries still running on them fail at once instead of holding the shutdown.
+   */
+  async close(options: CloseOptions = {}): Promise<void> {
     this.#state.closed = true;
     this.#state.trailingNotification?.();
     this.#state.trailingNotification = undefined;
     const pool = this.#state.ownedPool;
     this.#state.ownedPool = undefined;
-    await pool?.end();
+    const { signal } = options;
+    const force = (): void => this.#owned.destroyAll();
+    if (signal?.aborted === true) {
+      force();
+    }
+    signal?.addEventListener('abort', force, { once: true });
+    try {
+      await pool?.end();
+    } finally {
+      signal?.removeEventListener('abort', force);
+    }
   }
 }
 
@@ -432,7 +450,7 @@ function resolveStoreSettings<TTransaction>(options: PostgresEventStoreOptions<T
  */
 function connect<TTransaction>(
   options: PostgresEventStoreOptions<TTransaction>,
-  logger: RelayBusLogger,
+  { logger, owned }: { readonly logger: RelayBusLogger; readonly owned: OwnedConnections },
 ): {
   executor: PostgresExecutor<TTransaction>;
   pool: Pool | undefined;
@@ -442,7 +460,12 @@ function connect<TTransaction>(
     return { executor: options.executor, pool: undefined, ownedPool: undefined };
   }
   const pool =
-    options.pool ?? new Pool({ ...options.poolConfig, connectionString: options.connectionString });
+    options.pool ??
+    new Pool({
+      ...options.poolConfig,
+      connectionString: options.connectionString,
+      Client: owned.clientClass(),
+    });
   let ownedPool: Pool | undefined;
   if (options.pool === undefined) {
     const poolLogger = options.logger ?? console;

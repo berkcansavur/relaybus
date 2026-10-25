@@ -28,7 +28,7 @@ With `transactional: true` the handler runs in a store transaction that also com
 
 ## Shutdown
 
-On `stop`, the dispatcher stops claiming, waits for running handlers up to `shutdownTimeout` (30 seconds by default), then releases the rest without consuming an attempt.
+On `stop`, the dispatcher stops claiming and waits for running handlers for four fifths of the stop timeout (`stop({ timeout })`, default `dispatcher.shutdownTimeout`, 30 seconds), then aborts the rest and releases them without consuming an attempt. The whole stop, closing transports and the store included, ends at the timeout: deliveries still in flight then (their release did not answer) are abandoned with their lease, which expires after `leaseDuration`, and another process runs them again. At-least-once holds either way.
 
 ## Related
 

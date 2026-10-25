@@ -1,4 +1,5 @@
 import type { EventEnvelope } from './event.js';
+import type { CloseOptions } from './event-store.js';
 
 /** Receives an event from a broker. Resolve only after it is durably stored. */
 export type TransportMessageHandler = (envelope: EventEnvelope) => Promise<void>;
@@ -25,6 +26,9 @@ export interface Transport {
    * connection. Transports without it count as ready.
    */
   isReady?(): boolean;
-  /** Releases connections. A closed transport is not reopened. */
-  close(): Promise<void>;
+  /**
+   * Releases connections. A closed transport is not reopened. Once `options.signal` aborts (the
+   * shutdown deadline passed), stop waiting and drop the connections it opened itself.
+   */
+  close(options?: CloseOptions): Promise<void>;
 }

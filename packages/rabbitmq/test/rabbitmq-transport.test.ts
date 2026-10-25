@@ -614,3 +614,129 @@ describe('RabbitMqTransport close', () => {
     await transport.close();
   });
 });
+
+describe('RabbitMqTransport forced close', () => {
+  /** A connection whose closing handshake never completes, with the socket amqplib keeps under it. */
+  function hangingConnection(stream?: { destroy: () => void }): FakeConnection {
+    const connection = new FakeConnection();
+    connection.close.mockImplementation(() => new Promise<void>(() => undefined));
+    Object.assign(connection, { connection: stream === undefined ? {} : { stream } });
+    return connection;
+  }
+
+  it('destroys the socket of its connection when the shutdown deadline passes', async () => {
+    const destroy = vi.fn();
+    const connection = hangingConnection({ destroy });
+    const transport = new RabbitMqTransport({ connect: async () => connection });
+    await transport.connect();
+    const deadline = new AbortController();
+    void transport.close({ signal: deadline.signal });
+    // The channels are closed and the closing handshake of the connection hangs.
+    await waitFor(() => connection.close.mock.calls.length === 1);
+    expect(destroy).not.toHaveBeenCalled();
+    deadline.abort();
+    expect(destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('destroys the socket when the deadline passes while consumers still drain', async () => {
+    const destroy = vi.fn();
+    const connection = hangingConnection({ destroy });
+    const transport = new RabbitMqTransport({
+      connect: async () => connection,
+      consumerGroup: 'billing',
+    });
+    await transport.connect();
+    await transport.subscribe(['orders'], () => new Promise<void>(() => undefined));
+    const consumerChannel = connection.consumerChannel;
+    consumerChannel.cancel.mockImplementation(() => new Promise(() => undefined));
+    const deadline = new AbortController();
+    void transport.close({ signal: deadline.signal });
+    await waitFor(() => consumerChannel.cancel.mock.calls.length === 1);
+    deadline.abort();
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(connection.close).not.toHaveBeenCalled();
+  });
+
+  it('destroys it at once when the deadline passed before close was called', async () => {
+    const destroy = vi.fn();
+    const transport = new RabbitMqTransport({
+      connect: async () => hangingConnection({ destroy }),
+    });
+    await transport.connect();
+    void transport.close({ signal: AbortSignal.abort() });
+    expect(destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('forces nothing when there is no connection or no socket to destroy', async () => {
+    const withoutSocket = new RabbitMqTransport({ connect: async () => hangingConnection() });
+    await withoutSocket.connect();
+    void withoutSocket.close({ signal: AbortSignal.abort() });
+    const plain = new RabbitMqTransport({ connect: async () => new FakeConnection() });
+    await plain.connect();
+    await expect(plain.close({ signal: AbortSignal.abort() })).resolves.toBeUndefined();
+    const unconnected = new RabbitMqTransport({ connect: async () => new FakeConnection() });
+    await expect(unconnected.close({ signal: AbortSignal.abort() })).resolves.toBeUndefined();
+  });
+
+  it('cuts a connection that opens only after a forced close', async () => {
+    const destroy = vi.fn();
+    const connection = hangingConnection({ destroy });
+    let open!: (opened: FakeConnection) => void;
+    const transport = new RabbitMqTransport({
+      connect: () => new Promise<FakeConnection>((resolve) => (open = resolve)),
+    });
+    const connecting = transport.connect();
+    await transport.close({ signal: AbortSignal.abort() });
+    open(connection);
+    await expect(connecting).rejects.toThrow(RabbitMqUnavailableError);
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(connection.close).not.toHaveBeenCalled();
+  });
+
+  it('closes a connection that opens only after a graceful close', async () => {
+    const connection = new FakeConnection();
+    let open!: (opened: FakeConnection) => void;
+    const transport = new RabbitMqTransport({
+      connect: () => new Promise<FakeConnection>((resolve) => (open = resolve)),
+    });
+    const connecting = transport.connect();
+    await transport.close();
+    open(connection);
+    await expect(connecting).rejects.toThrow(RabbitMqUnavailableError);
+    expect(connection.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('cuts a discarded connection whose closing handshake hangs', async () => {
+    const destroy = vi.fn();
+    const connection = hangingConnection({ destroy });
+    connection.createConfirmChannel.mockRejectedValue(new Error('channel refused'));
+    const transport = new RabbitMqTransport({ connect: async () => connection });
+    void transport.connect().catch(() => undefined);
+    await waitFor(() => connection.close.mock.calls.length === 1);
+    void transport.close({ signal: AbortSignal.abort() });
+    expect(destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets a second close cut the connection the first one is still closing', async () => {
+    const destroy = vi.fn();
+    const connection = hangingConnection({ destroy });
+    const transport = new RabbitMqTransport({ connect: async () => connection });
+    await transport.connect();
+    void transport.close();
+    await waitFor(() => connection.close.mock.calls.length === 1);
+    void transport.close({ signal: AbortSignal.abort() });
+    expect(destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops listening to the deadline once it closed', async () => {
+    const destroy = vi.fn();
+    const connection = new FakeConnection();
+    Object.assign(connection, { connection: { stream: { destroy } } });
+    const transport = new RabbitMqTransport({ connect: async () => connection });
+    await transport.connect();
+    const deadline = new AbortController();
+    await transport.close({ signal: deadline.signal });
+    deadline.abort();
+    expect(destroy).not.toHaveBeenCalled();
+  });
+});

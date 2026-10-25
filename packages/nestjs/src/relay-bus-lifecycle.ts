@@ -11,7 +11,9 @@ import { registerBus, unregisterBus } from './relay-bus-registry.js';
 
 /**
  * Starts the bus once every handler is registered and the application has
- * bootstrapped, and stops it (draining running handlers) on shutdown. A start
+ * bootstrapped, and stops it (draining running handlers, within `dispatcher.shutdownTimeout`) on
+ * shutdown: `bus.stop()` resolves at that deadline at the latest, so a hung query or broker cannot
+ * hold `app.close()` until the platform kills the process. A start
  * failure rejects the hook, so the application does not boot. `@RelayBusTransaction()`
  * methods find the bus from module initialisation until the application has shut down.
  */

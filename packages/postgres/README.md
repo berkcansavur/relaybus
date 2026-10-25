@@ -50,7 +50,9 @@ try {
 ```
 
 The transaction handle is a `pg` `PoolClient`. If you pass `connectionString` instead of `pool`, the store creates and,
-on `close()`, ends its own pool. A pool or executor you pass in is never closed by the store.
+on `close()`, ends its own pool. A pool or executor you pass in is never closed by the store. When `bus.stop()` runs past
+its deadline, the store destroys the connections it opened itself (its own pool's and the one it listens for
+notifications on), so a query stuck on a lock fails at once instead of holding the shutdown; your pool is left as is.
 
 ### Other libraries
 

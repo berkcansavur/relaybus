@@ -52,7 +52,21 @@ add the transaction type when you want it typed: `RelayBus<PoolClient>` (the gen
 runtime, so DI is unaffected).
 
 Call `app.enableShutdownHooks()` in `main.ts` so SIGTERM/SIGINT close the app and let the bus
-drain running handlers (`dispatcher.shutdownTimeout`, default 30s).
+drain running handlers. The whole `bus.stop()` is bounded by `dispatcher.shutdownTimeout`
+(default 30s): past it, running handlers are abandoned (their leases expire and another pod runs
+them again) and the connections relaybus opened itself are force-closed, so a hung query or broker
+cannot keep the pod alive until Kubernetes kills it. Keep the timeout below the pod's
+`terminationGracePeriodSeconds`, leaving room for the rest of `app.close()`:
+
+```ts
+// main.ts
+const app = await NestFactory.create(AppModule);
+app.enableShutdownHooks();
+await app.listen(3000);
+
+// app.module.ts, for a pod with terminationGracePeriodSeconds: 30
+RelayBusModule.forRoot({ store, dispatcher: { shutdownTimeout: '25s' } });
+```
 
 ## `RelayBusModule`
 
@@ -82,7 +96,7 @@ logs through a Nest `Logger` with context `RelayBus`, so `app.useLogger(...)` co
 | `dispatcher.batchSize`                        | concurrency               | Deliveries claimed per query                                                     |
 | `dispatcher.pollInterval`                     | `'1s'`                    | Wait between claims when idle                                                    |
 | `dispatcher.leaseDuration`                    | `'30s'`                   | Renewed every third of it                                                        |
-| `dispatcher.shutdownTimeout`                  | `'30s'`                   | How long shutdown waits for running handlers                                     |
+| `dispatcher.shutdownTimeout`                  | `'30s'`                   | Longest the whole shutdown takes; past it, handlers are abandoned                |
 | `retention.completed` / `.dead` / `.interval` | `'7d'` / `false` / `'1h'` | Cleanup of finished deliveries                                                   |
 | `transports`, `routes`, `subscriptions`       | none                      | Broker fan-out and fan-in (`@relaybus/kafka`, `@relaybus/rabbitmq`)              |
 | `setupStore`                                  | `true`                    | Create tables/indexes on start                                                   |
@@ -243,8 +257,9 @@ RelayBusModule.forRoot({
 2. `onApplicationBootstrap`: `bus.start()` creates the schema (unless `setupStore: false`),
    connects transports and starts the dispatcher. If it rejects (database down, broker
    unreachable) the application does not boot.
-3. `beforeApplicationShutdown`: `bus.stop()` stops claiming, waits for running handlers up to
-   `shutdownTimeout`, then closes transports and the store. Needs `app.enableShutdownHooks()` for
+3. `beforeApplicationShutdown`: `bus.stop()` stops claiming, waits for running handlers, then
+   closes transports and the store, all within `shutdownTimeout` (it force-closes and resolves
+   when the deadline passes, see above). Needs `app.enableShutdownHooks()` for
    signals; `app.close()` runs it regardless. Nest runs `onApplicationShutdown` hooks (where
    TypeORM, Mongoose and most pools disconnect) after this, so handlers still have their
    connections while draining. If your own provider disconnects in `onModuleDestroy` (common with

@@ -124,6 +124,17 @@ export interface EventStoreStatistics {
   readonly oldestDueAt: Date | null;
 }
 
+/** How `stop` closes a transport or a store. */
+export interface CloseOptions {
+  /**
+   * Aborted when the shutdown deadline passes (`bus.stop({ timeout })`), possibly before `close` is
+   * called. From then on, close what you opened yourself at once (destroy connections, cancel
+   * running queries) instead of waiting for it to finish; the bus no longer waits for `close`.
+   * Leave alone what the application passed in.
+   */
+  readonly signal?: AbortSignal;
+}
+
 /** How a store runs one transaction of `bus.transaction`. */
 export interface EventStoreTransactionOptions {
   /**
@@ -222,6 +233,6 @@ export interface EventStore<TTransaction = unknown> {
    * that stops listening, or with `undefined` when this store cannot listen. Optional.
    */
   watchNewDeliveries?(listener: () => void): Promise<(() => Promise<void>) | undefined>;
-  /** Releases connections the store opened itself. */
-  close?(): Promise<void>;
+  /** Releases connections the store opened itself; forced once `options.signal` aborts. */
+  close?(options?: CloseOptions): Promise<void>;
 }

@@ -72,7 +72,7 @@ function failingFirstPlacement(transport: Transport): Transport {
 export function describeSharedCatalogServices(broker: BrokerFixture): void {
   describe(`two services sharing one catalog over ${broker.name}`, () => {
     let databases: ServiceDatabases;
-    const running: { stop(): Promise<void> }[] = [];
+    const running: { stop(): Promise<unknown> }[] = [];
     const schemas: OrdersService[] = [];
 
     // One container at a time: starting three at once on a loaded machine made

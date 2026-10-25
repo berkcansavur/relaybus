@@ -8,7 +8,16 @@ import {
   type RelayBusModuleOptions,
   type RelayBusModuleOptionsFactory,
 } from '../src/index.js';
-import { busOf, createApplication, manualOptions, relayBusRoot } from './helpers.js';
+import { OrderPlaced, busOf, createApplication, manualOptions, relayBusRoot } from './helpers.js';
+
+async function waitFor(condition: () => boolean): Promise<void> {
+  for (let waited = 0; !condition(); waited += 5) {
+    if (waited > 2_000) {
+      throw new Error('waitFor timed out');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -55,6 +64,48 @@ describe('RelayBusModule.forRoot', () => {
     await moduleRef.close();
 
     expect(bus.isRunning).toBe(false);
+  });
+
+  it('closes the application within the shutdown timeout when a handler and the store hang', async () => {
+    class HangingReleaseStore extends InMemoryEventStore {
+      override release(): Promise<boolean> {
+        return new Promise<boolean>(() => undefined);
+      }
+    }
+    const store = new HangingReleaseStore();
+    const moduleRef = await initialise(
+      await createApplication({
+        imports: [
+          RelayBusModule.forRoot({
+            store,
+            transactionMode: 'optional',
+            dispatcher: { pollInterval: 5, shutdownTimeout: 100 },
+          }),
+        ],
+      }),
+    );
+    const bus = busOf(moduleRef);
+    let started = false;
+    bus.subscribe(
+      OrderPlaced,
+      () => {
+        started = true;
+        return new Promise<void>(() => undefined);
+      },
+      { id: 'stuck' },
+    );
+    vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    await bus.publish(new OrderPlaced({ orderId: 'o-1' }));
+    await waitFor(() => started);
+
+    const closing = Date.now();
+    await moduleRef.close();
+
+    expect(Date.now() - closing).toBeLessThan(1_000);
+    expect(bus.isRunning).toBe(false);
+    expect(Logger.prototype.warn).toHaveBeenCalledWith(
+      '[RelayBus](stop) Shutdown deadline passed, forced close | abandoned=1 | timeoutMs=100',
+    );
   });
 
   it('forwards bus log lines to a Nest Logger with the RelayBus context', async () => {

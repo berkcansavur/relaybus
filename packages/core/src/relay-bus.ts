@@ -14,8 +14,8 @@ import {
   type SubscribeCatalogOptions,
 } from './catalog.js';
 import { systemClock, type Clock } from './clock.js';
-import { Dispatcher } from './dispatcher.js';
-import { toMilliseconds, type Duration } from './duration.js';
+import { Dispatcher, type DispatcherSettings } from './dispatcher.js';
+import { toMilliseconds, toTimerMilliseconds, type Duration } from './duration.js';
 import {
   ConfigurationError,
   DrainIncompleteError,
@@ -26,6 +26,7 @@ import {
 } from './errors.js';
 import type {
   AppendEntry,
+  CloseOptions,
   DeliveryQuery,
   DeliveryRecord,
   EventStore,
@@ -67,6 +68,12 @@ import {
 } from './relay-bus-settings.js';
 import { DEFAULT_ROUTE_RETRY_POLICY, type RetryPolicyOptions } from './retry-policy.js';
 import { groupRoutes, type RouteGroup } from './route-groups.js';
+import {
+  withinDeadline,
+  type ShutdownDeadline,
+  type StopOptions,
+  type StopResult,
+} from './shutdown-deadline.js';
 import { runBudgetedTransaction } from './transaction-budget.js';
 import type { StandardSchemaV1 } from './standard-schema.js';
 import type { Transport } from './transport.js';
@@ -98,7 +105,11 @@ export interface DispatcherOptions {
   readonly pollInterval?: Duration;
   /** Lease length; renewed every third of it while the handler runs. Default `'30s'`. */
   readonly leaseDuration?: Duration;
-  /** How long `stop` waits for running handlers before aborting them. Default `'30s'`. */
+  /**
+   * Longest `stop` takes in all, and its default `timeout`: waiting for running handlers, handing
+   * back leases, closing transports and the store. Past it, `stop` aborts the handlers still
+   * running, force-closes what relaybus opened itself and resolves. Default `'30s'`.
+   */
   readonly shutdownTimeout?: Duration;
   /**
    * Longest a finished delivery waits so that deliveries finishing around the
@@ -295,9 +306,10 @@ export class RelayBus<TTransaction = unknown> {
   readonly #setupStore: boolean;
   readonly #retention: { completedMs: number | null; deadMs: number | null; intervalMs: number };
   #retentionTimer: CancelTimer | undefined;
+  readonly #shutdownTimeoutMs: number;
   #state: BusState = 'idle';
   #starting: Promise<void> | undefined;
-  #stopping: Promise<void> | undefined;
+  #stopping: Promise<StopResult> | undefined;
 
   constructor(options: RelayBusOptions<TTransaction>) {
     this.#store = options.store;
@@ -322,17 +334,22 @@ export class RelayBus<TTransaction = unknown> {
     this.#subscriptions = options.subscriptions ?? [];
     this.#registerConnections(options);
     this.#dispatcherEnabled = isDispatcherEnabled(options);
-    this.#dispatcher = this.#createDispatcher(options);
+    const settings = createDispatcherSettings(options.dispatcher, this.#generateIdentifier);
+    this.#shutdownTimeoutMs = settings.shutdownTimeoutMs;
+    this.#dispatcher = this.#createDispatcher(settings, options);
   }
 
-  #createDispatcher(options: RelayBusOptions<TTransaction>): Dispatcher {
+  #createDispatcher(
+    settings: DispatcherSettings,
+    options: RelayBusOptions<TTransaction>,
+  ): Dispatcher {
     return new Dispatcher({
       store: this.#store,
       registry: this.#registry,
       clock: this.#clock,
       random: options.random ?? Math.random,
       notifier: this.#notifier,
-      settings: createDispatcherSettings(options.dispatcher, this.#generateIdentifier),
+      settings,
     });
   }
 
@@ -581,26 +598,46 @@ export class RelayBus<TTransaction = unknown> {
   }
 
   /**
-   * Stops dispatching, waits for running handlers, closes transports and the
-   * store. Waits for a start in progress first. Safe to call more than once.
+   * Stops claiming, waits for running handlers, hands back leases, closes transports and the store,
+   * all within `options.timeout` (default `dispatcher.shutdownTimeout`). When the deadline passes it
+   * aborts the handlers still running, force-closes what relaybus opened itself (never pools or
+   * clients the application passed in) and resolves anyway: it never rejects because of the
+   * deadline. Abandoned deliveries stay leased until their lease expires and then run again
+   * (at-least-once). Waits for a start in progress first. Safe to call more than once: later calls
+   * get the result of the first.
    */
-  async stop(): Promise<void> {
+  async stop(options: StopOptions = {}): Promise<StopResult> {
+    const timeoutMs =
+      options.timeout === undefined
+        ? this.#shutdownTimeoutMs
+        : toTimerMilliseconds(options.timeout, 'timeout');
     if (this.#stopping !== undefined) {
       return this.#stopping;
     }
-    if (this.#state === 'starting') {
-      await this.#starting!.catch(() => undefined);
+    if (this.#state !== 'running' && this.#state !== 'starting') {
+      return this.#stopOutsideRun(timeoutMs);
     }
-    if (this.#state === 'idle') {
-      // Batches run by hand may have left settlements that the dispatcher keeps retrying in the background.
-      await this.#dispatcher.stop();
-      return;
+    this.#stopping = this.#stopComponents(timeoutMs);
+    const result = await this.#stopping;
+    if (!result.graceful) {
+      this.#logger.warn(
+        `[RelayBus](stop) Shutdown deadline passed, forced close | abandoned=${result.abandonedDeliveries} | timeoutMs=${timeoutMs}`,
+      );
     }
-    if (this.#state !== 'running') {
-      return;
+    return result;
+  }
+
+  /**
+   * A bus that is not running: an idle one only settles what batches run by hand left behind (and
+   * stays startable); a stopped one has nothing left to do.
+   */
+  async #stopOutsideRun(timeoutMs: number): Promise<StopResult> {
+    if (this.#state !== 'idle') {
+      return { graceful: true, abandonedDeliveries: 0, durationMs: 0 };
     }
-    this.#stopping = this.#stopComponents();
-    return this.#stopping;
+    return withinDeadline({ clock: this.#clock, timeoutMs }, (deadline) =>
+      this.#dispatcher.stop(deadline),
+    );
   }
 
   /**
@@ -676,13 +713,32 @@ export class RelayBus<TTransaction = unknown> {
         });
       }
     } catch (error) {
-      await this.#closeTransports();
+      await withinDeadline(
+        { clock: this.#clock, timeoutMs: this.#shutdownTimeoutMs },
+        async (deadline) => {
+          await this.#closeTransports(deadline);
+          return 0;
+        },
+      );
       this.#state = 'stopped';
       throw error;
+    }
+    if (this.#state !== 'starting') {
+      // A stop gave up waiting for this start and closed the transports and the store already.
+      throw new LifecycleError('relaybus was stopped before it finished starting');
     }
     if (this.#dispatcherEnabled) {
       this.#dispatcher.start();
     }
+    this.#scheduleRetention();
+    this.#state = 'running';
+    this.#logger.log(
+      `[RelayBus](startComponents) relaybus started | handlers=${this.#registry.all().length} dispatcher=${this.#dispatcherEnabled}`,
+    );
+  }
+
+  /** Applies the retention policy every `retention.interval` while the bus runs, when it deletes anything. */
+  #scheduleRetention(): void {
     if (this.#retention.completedMs !== null || this.#retention.deadMs !== null) {
       this.#retentionTimer = schedule(this.#clock, {
         run: () => {
@@ -693,22 +749,42 @@ export class RelayBus<TTransaction = unknown> {
         unref: true,
       });
     }
-    this.#state = 'running';
-    this.#logger.log(
-      `[RelayBus](startComponents) relaybus started | handlers=${this.#registry.all().length} dispatcher=${this.#dispatcherEnabled}`,
-    );
   }
 
-  async #stopComponents(): Promise<void> {
-    this.#state = 'stopping';
-    this.#retentionTimer?.();
+  /**
+   * Waits for a start in progress (a failed start leaves nothing to stop), then stops the dispatcher
+   * and closes the transports and the store. A start still running at the deadline is given up: the
+   * transports and the store are force-closed and the start rejects when it resumes.
+   */
+  async #stopComponents(timeoutMs: number): Promise<StopResult> {
     try {
-      await this.#dispatcher.stop();
-      await this.#closeTransports();
-      await this.#store.close?.();
+      return await withinDeadline({ clock: this.#clock, timeoutMs }, async (deadline) => {
+        if (this.#state === 'starting') {
+          const started = await deadline.race(this.#starting!.catch(() => undefined));
+          if (started === 'timeout') {
+            this.#state = 'stopping';
+            await this.#closeConnections(deadline);
+            return 0;
+          }
+        }
+        if (this.#state !== 'running') {
+          return 0;
+        }
+        this.#state = 'stopping';
+        this.#retentionTimer?.();
+        const abandoned = await this.#dispatcher.stop(deadline);
+        await this.#closeConnections(deadline);
+        return abandoned;
+      });
     } finally {
       this.#state = 'stopped';
     }
+  }
+
+  async #closeConnections(deadline: ShutdownDeadline): Promise<void> {
+    await this.#closeTransports(deadline);
+    const options: CloseOptions = { signal: deadline.signal };
+    await deadline.race(Promise.resolve(this.#store.close?.(options)));
   }
 
   async #publish(
@@ -906,10 +982,12 @@ export class RelayBus<TTransaction = unknown> {
     });
   }
 
-  async #closeTransports(): Promise<void> {
+  /** Closes every transport, each at most until the deadline; past it they are asked to force. */
+  async #closeTransports(deadline: ShutdownDeadline): Promise<void> {
+    const options: CloseOptions = { signal: deadline.signal };
     for (const transport of this.#transports.values()) {
       try {
-        await transport.close();
+        await deadline.race(transport.close(options));
       } catch (error) {
         this.#logger.error(
           `[RelayBus](closeTransports) Failed to close transport | transport=${transport.name} error=${toErrorInfo(error).message}`,

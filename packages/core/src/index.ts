@@ -60,6 +60,7 @@ export {
   type AppendResult,
   type ClaimRequest,
   type ClaimedDelivery,
+  type CloseOptions,
   type DeliveryQuery,
   type DeliveryRecord,
   type DeliveryStatus,
@@ -104,5 +105,6 @@ export {
   type RetryPolicy,
   type RetryPolicyOptions,
 } from './retry-policy.js';
+export type { StopOptions, StopResult } from './shutdown-deadline.js';
 export type { StandardSchemaV1 } from './standard-schema.js';
 export type { Transport, TransportMessageHandler } from './transport.js';

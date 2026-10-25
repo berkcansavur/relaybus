@@ -11,6 +11,7 @@ import { schedule, sleep, type CancelTimer } from './internal/timers.js';
 import { validatePayload, type EventEnvelope } from './event.js';
 import type { ClaimedDelivery, EventStore } from './event-store.js';
 import { runInIsolatedScope } from './execution-scope.js';
+import { ShutdownDeadline } from './shutdown-deadline.js';
 import type { HandlerContext, HandlerRegistration, HandlerRegistry } from './handler-registry.js';
 import type { Notifier } from './notifier.js';
 import { computeRetryDelay, isRetryableError } from './retry-policy.js';
@@ -139,6 +140,10 @@ export class Dispatcher {
   #quietRefillTimer: CancelTimer | undefined;
   #unwatch: (() => Promise<void>) | undefined;
   #watching: Promise<void> | undefined;
+  /** Set when a stop gave up at its deadline: the store may be closed, so nothing more is started or retried. */
+  #abandoned = false;
+  /** Stops the lease renewal (or transactional lease guard) of each delivery whose handler runs. */
+  readonly #leaseKeepers = new Map<ClaimedDelivery, () => void>();
 
   constructor(dependencies: DispatcherDependencies) {
     this.#dependencies = dependencies;
@@ -248,14 +253,28 @@ export class Dispatcher {
   }
 
   /**
-   * Stops claiming, waits up to the shutdown timeout for running handlers,
-   * then aborts the rest and releases their deliveries for another process.
+   * Stops claiming and waits for running handlers until the drain point of `deadline` (default: the
+   * shutdown timeout from now), then aborts the rest and releases their deliveries for another
+   * process. Deliveries still in flight when the deadline itself passes are abandoned: their leases
+   * expire and they run again elsewhere. Resolves with how many were abandoned.
    */
-  async stop(): Promise<void> {
+  async stop(deadline?: ShutdownDeadline): Promise<number> {
+    const { clock, settings } = this.#dependencies;
+    const own = deadline ?? new ShutdownDeadline(clock, settings.shutdownTimeoutMs);
+    try {
+      return await this.#stopWithin(own);
+    } finally {
+      if (deadline === undefined) {
+        own.dispose();
+      }
+    }
+  }
+
+  async #stopWithin(deadline: ShutdownDeadline): Promise<number> {
     if (!this.#running) {
       // Batches run by hand (`runOnce`) leave settlements to recover without ever starting the loop.
-      await this.#closeRecovery(Date.now() + this.#dependencies.settings.shutdownTimeoutMs);
-      return;
+      await this.#closeRecovery(deadline);
+      return 0;
     }
     this.#running = false;
     this.#completions?.setClosing(true);
@@ -264,18 +283,39 @@ export class Dispatcher {
     this.#quietRefillTimer?.();
     this.#quietRefillTimer = undefined;
     this.#signal(this.#refillThreshold);
-    const deadline = Date.now() + this.#dependencies.settings.shutdownTimeoutMs;
-    await this.#waitUntil(this.#stopWatching(), deadline);
-    await this.#waitUntil(this.#loop!, deadline);
+    await deadline.race(this.#stopWatching());
+    await deadline.race(this.#loop!);
     const settled = Promise.allSettled([...this.#inFlight].map((delivery) => delivery.settled));
-    if ((await this.#waitUntil(settled, deadline)) === 'timeout') {
+    if ((await deadline.raceDrain(settled)) === 'timeout') {
       for (const delivery of this.#inFlight) {
         delivery.controller.abort(new DispatcherStoppedError('relaybus dispatcher stopped'));
       }
-      await settled;
+      if ((await deadline.race(settled)) === 'timeout') {
+        return this.#abandon();
+      }
     }
     await this.#closeRecovery(deadline);
-    await this.#waitUntil(this.#relinquish(), deadline);
+    await deadline.race(this.#relinquish());
+    return 0;
+  }
+
+  /**
+   * The deadline passed with deliveries still in flight (aborted, their release not answered): forgets
+   * them and every settlement still to retry. Whatever they release or complete from now on may reach a
+   * closed store; a delivery whose state change is lost stays leased until the lease expires and then
+   * runs again (at-least-once).
+   */
+  #abandon(): number {
+    this.#abandoned = true;
+    // Their leases must run out, so that another process takes the deliveries.
+    for (const stopKeeping of this.#leaseKeepers.values()) {
+      stopKeeping();
+    }
+    this.#leaseKeepers.clear();
+    this.#recoveryTimer?.();
+    this.#recoveryTimer = undefined;
+    this.#pending.clear();
+    return this.#inFlight.size;
   }
 
   /**
@@ -283,14 +323,14 @@ export class Dispatcher {
    * store: it ends before the last pass starts. A store that does not answer before the deadline gets no
    * further call, since it may be closed right after.
    */
-  async #closeRecovery(deadline: number): Promise<void> {
+  async #closeRecovery(deadline: ShutdownDeadline): Promise<void> {
     this.#recoveryTimer?.();
     this.#recoveryTimer = undefined;
     const lastTry = (async () => {
       await this.#recovery;
       await this.#recoverSettlements();
     })();
-    await this.#waitUntil(lastTry, deadline);
+    await deadline.race(lastTry);
     this.#pending.clear();
   }
 
@@ -326,6 +366,9 @@ export class Dispatcher {
   }
 
   #retain(entry: PendingSettlement): void {
+    if (this.#abandoned) {
+      return;
+    }
     this.#pending.set(pendingKey(entry.delivery), entry);
     this.#recoveryTimer ??= schedule(this.#dependencies.clock, {
       run: () => void this.#recoverSettlements(),
@@ -493,7 +536,8 @@ export class Dispatcher {
           this.#exhaustedHandlers.delete(handler);
         }
       }
-      for (const delivery of claimed) {
+      // A claim that answers after a stop gave up is left to lease expiry: the store may be closed.
+      for (const delivery of this.#abandoned ? [] : claimed) {
         started.push(this.#start(delivery));
       }
     }
@@ -584,6 +628,7 @@ export class Dispatcher {
       stopHeartbeat = registration.transactional
         ? await this.#guardTransactionalLease(registration, { delivery, controller })
         : this.#startHeartbeat(delivery, controller);
+      this.#leaseKeepers.set(delivery, stopHeartbeat);
       const outcome = await this.#runHandler(registration, { delivery, controller });
       const durationMs = clock.now().getTime() - startedAt;
       if (outcome === 'completed') {
@@ -610,6 +655,7 @@ export class Dispatcher {
       return false;
     } finally {
       stopHeartbeat();
+      this.#leaseKeepers.delete(delivery);
     }
   }
 

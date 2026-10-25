@@ -2,6 +2,7 @@ import {
   ConfigurationError,
   systemClock,
   toErrorInfo,
+  type CloseOptions,
   type EventEnvelope,
   type Transport,
   type TransportMessageHandler,
@@ -91,7 +92,7 @@ export class RabbitMqTransport implements Transport {
   readonly #topologyWork = new SerialQueue();
   #live: LiveConnection | undefined;
   #subscription: Subscription | undefined;
-  #closed = false;
+  #closing: Promise<void> | undefined;
 
   constructor(options: RabbitMqTransportOptions) {
     this.#settings = resolveSettings(options);
@@ -264,21 +265,30 @@ export class RabbitMqTransport implements Transport {
   /**
    * Stops consuming, waits up to `shutdownTimeout` for running handlers
    * (messages still being retried go back to the queue), then closes the
-   * channels and the connection.
+   * channels and the connection. Once `options.signal` aborts (the bus shutdown deadline passed),
+   * the connection's socket is destroyed instead of waiting for the broker.
    */
-  async close(): Promise<void> {
-    if (this.#closed) {
-      return;
+  async close(options: CloseOptions = {}): Promise<void> {
+    const { signal } = options;
+    const force = (): void => this.#supervisor.forceClose();
+    if (signal?.aborted === true) {
+      force();
     }
-    this.#closed = true;
-    await this.#supervisor.close(() =>
-      this.#topologyWork.run(async () => {
-        const live = this.#live;
-        this.#live = undefined;
-        await this.#subscription?.consumer.stop();
-        await live?.publisher.channel.close().catch(() => undefined);
-      }),
-    );
+    signal?.addEventListener('abort', force, { once: true });
+    try {
+      // A second call shares the work of the first, and its signal can still cut the connection.
+      this.#closing ??= this.#supervisor.close(() =>
+        this.#topologyWork.run(async () => {
+          const live = this.#live;
+          this.#live = undefined;
+          await this.#subscription?.consumer.stop();
+          await live?.publisher.channel.close().catch(() => undefined);
+        }),
+      );
+      await this.#closing;
+    } finally {
+      signal?.removeEventListener('abort', force);
+    }
   }
 
   async #establishChannels(connection: AmqpConnection): Promise<void> {
