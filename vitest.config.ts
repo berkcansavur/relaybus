@@ -10,6 +10,7 @@ const packages = [
   'rabbitmq',
   'testing',
   'eslint-plugin',
+  'otel',
 ];
 
 const alias = Object.fromEntries([
@@ -44,6 +45,8 @@ const serialIntegrationTests = [
   'packages/kafka/test/catalog-services.integration.test.ts',
   'packages/rabbitmq/test/catalog-services.integration.test.ts',
   'packages/nestjs/test/catalog-services.integration.test.ts',
+  // Two services and a trace across RabbitMQ, waiting on the wall clock.
+  'packages/otel/test/rabbitmq-trace.integration.test.ts',
   // Transaction budgets of a few hundred milliseconds against wall-clock sleeps.
   'packages/postgres/test/transaction-timeout.integration.test.ts',
   'packages/mongodb/test/transaction-timeout.integration.test.ts',

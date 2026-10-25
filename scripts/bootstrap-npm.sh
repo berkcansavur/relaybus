@@ -15,7 +15,7 @@ pnpm build
 PACK_DIR="$(mktemp -d)"
 trap 'rm -rf "$PACK_DIR"' EXIT
 
-for dir in core testing nestjs postgres mongodb kafka rabbitmq eslint-plugin; do
+for dir in core testing nestjs postgres mongodb kafka rabbitmq eslint-plugin otel; do
   pkg="packages/$dir"
   name="$(node -p "require('./$pkg/package.json').name")"
   current="$(node -p "require('./$pkg/package.json').version")"

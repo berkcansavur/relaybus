@@ -13,6 +13,7 @@ export default {
         'rabbitmq',
         'testing',
         'eslint-plugin',
+        'otel',
         'repo',
         'ci',
         'deps',

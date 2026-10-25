@@ -12,7 +12,8 @@
       "@relaybus/kafka": ["./packages/kafka/src/index.ts"],
       "@relaybus/rabbitmq": ["./packages/rabbitmq/src/index.ts"],
       "@relaybus/testing": ["./packages/testing/src/index.ts"],
-      "@relaybus/eslint-plugin": ["./packages/eslint-plugin/src/index.ts"]
+      "@relaybus/eslint-plugin": ["./packages/eslint-plugin/src/index.ts"],
+      "@relaybus/otel": ["./packages/otel/src/index.ts"]
     }
   },
   "include": [

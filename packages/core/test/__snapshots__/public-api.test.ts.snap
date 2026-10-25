@@ -265,6 +265,17 @@ exports[`public API > @relaybus/nestjs keeps its exported surface 1`] = `
 ]
 `;
 
+exports[`public API > @relaybus/otel keeps its exported surface 1`] = `
+[
+  "ATTRIBUTES: value",
+  "METRICS: value",
+  "RelayBusOpenTelemetry: type",
+  "RelayBusOpenTelemetryOptions: type",
+  "W3CTraceContextPropagator: value+type",
+  "relayBusOpenTelemetry: value",
+]
+`;
+
 exports[`public API > @relaybus/postgres keeps its exported surface 1`] = `
 [
   "PgExecutor: value+type",

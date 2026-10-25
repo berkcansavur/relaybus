@@ -12,6 +12,7 @@ const packages = [
   'rabbitmq',
   'testing',
   'eslint-plugin',
+  'otel',
 ];
 
 // Stryker runs in place (`inPlace: true`), so these paths are the mutated files.

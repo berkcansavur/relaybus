@@ -8,6 +8,7 @@ const packages = [
   'kafka',
   'mongodb',
   'nestjs',
+  'otel',
   'postgres',
   'rabbitmq',
   'testing',
