@@ -46,6 +46,7 @@ export {
   type KafkaTransportOptions,
 } from './kafka-transport.js';
 export { fromHeader, fromPayloadField } from './field-extractors.js';
+export { decodeKafkaRecord } from './kafka-records.js';
 export {
   decodeCloudEvent,
   plainJsonDecoder,

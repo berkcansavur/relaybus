@@ -25,6 +25,7 @@ export { RabbitMqTransport } from './rabbitmq-transport.js';
 export {
   cloudEventsBinary,
   cloudEventsStructured,
+  decodeRabbitMqMessage,
   jsonEnvelope,
   type RabbitMqCodec,
   type RabbitMqJsonEnvelopeMapping,

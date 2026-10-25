@@ -9,8 +9,8 @@ import {
 } from '@relaybus/core';
 import { Milliseconds, NonEmptyText, PositiveInteger } from '@relaybus/core/internal';
 import type { AmqpConnection, AmqpMessage } from './amqp-types.js';
-import { cloudEventsBinary, type RabbitMqCodec } from './codecs.js';
-import { completeDecodedEvent, type RabbitMqMessageDecoder } from './inbound-decoders.js';
+import { cloudEventsBinary, decodeRabbitMqMessage, type RabbitMqCodec } from './codecs.js';
+import type { RabbitMqMessageDecoder } from './inbound-decoders.js';
 import { buildRetryLadder } from './redelivery.js';
 import { decodeEnvelope, encodeEnvelope, type EncodedMessage } from './wire-format.js';
 
@@ -376,7 +376,7 @@ function resolveCodec({
   }
   return {
     encode: chosen.encode,
-    decode: (message) => completeDecodedEvent(chosen.decode(message), message),
+    decode: (message) => decodeRabbitMqMessage(chosen, message),
   };
 }
 

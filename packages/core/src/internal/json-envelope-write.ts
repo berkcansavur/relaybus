@@ -1,5 +1,5 @@
 import type { EventEnvelope } from '../event.js';
-import type { JsonEnvelopeFailures, JsonWireMessage } from './json-envelope.js';
+import type { JsonEnvelopeFailures, JsonWireMessage, TimeFormat } from './json-envelope.js';
 import {
   ARRAY_INDEX,
   type Context,
@@ -12,6 +12,7 @@ import {
 
 /** RFC 3339 years have four digits. */
 const MAXIMUM_RFC3339_YEAR = 9999;
+const MILLISECONDS_PER_SECOND = 1000;
 
 export function writeMessage(
   envelope: EventEnvelope,
@@ -19,9 +20,9 @@ export function writeMessage(
 ): JsonWireMessage {
   const root: Record<string, unknown> = {};
   const headers: [string, string][] = [];
-  const put = (location: Location, value: string): void => {
+  const put = (location: Location, value: string | number): void => {
     if ('header' in location) {
-      headers.push([location.header, value]);
+      headers.push([location.header, String(value)]);
     } else {
       setAt(root, { path: location.path, value });
     }
@@ -38,7 +39,7 @@ export function writeMessage(
   if (plan.id !== undefined) {
     put(plan.id, envelope.id);
   }
-  for (const [name, value] of optionalValues(envelope, failures)) {
+  for (const [name, value] of optionalValues(envelope, { plan, failures })) {
     const location = plan.optional[name];
     if (location !== undefined && value !== null) {
       put(location, value);
@@ -46,18 +47,32 @@ export function writeMessage(
   }
   return {
     body: writeBody(envelope, { plan, root }),
-    headers: Object.fromEntries([...eventHeaderEntries(envelope, { plan, failures }), ...headers]),
+    headers: Object.fromEntries([
+      ...eventHeaderEntries(envelope, { plan, failures }),
+      ...headers,
+      ...extraHeaderEntries(envelope, plan),
+    ]),
   };
+}
+
+function extraHeaderEntries(envelope: EventEnvelope, plan: Plan): [string, string][] {
+  return plan.extraHeaders.map(([name, value]) => [
+    name,
+    typeof value === 'function' ? value(envelope) : value,
+  ]);
 }
 
 function optionalValues(
   envelope: EventEnvelope,
-  failures: JsonEnvelopeFailures,
-): [OptionalName, string | null][] {
+  { plan, failures }: Context,
+): [OptionalName, string | number | null][] {
   return [
     ['key', envelope.key],
     ['source', envelope.source],
-    ['occurredAt', formatTime(envelope, failures)],
+    [
+      'occurredAt',
+      timeValue(formatTime(envelope, failures), { envelope, format: plan.timeFormat }),
+    ],
     ['correlationId', envelope.correlationId],
     ['causationId', envelope.causationId],
   ];
@@ -77,7 +92,37 @@ function writeBody(
       value: Object.fromEntries(Object.entries(envelope.headers)),
     });
   }
-  return root;
+  for (const { path, value } of plan.extraBody) {
+    setAt(root, { path, value: typeof value === 'function' ? value(envelope) : value });
+  }
+  return ordered(root, plan.bodyOrder);
+}
+
+/** The time as the format writes it; the RFC 3339 text is checked first either way. */
+function timeValue(
+  text: string,
+  { envelope, format }: { readonly envelope: EventEnvelope; readonly format: TimeFormat },
+): string | number {
+  const milliseconds = envelope.occurredAt.getTime();
+  if (format === 'epoch-millis') {
+    return milliseconds;
+  }
+  return format === 'epoch-seconds' ? Math.floor(milliseconds / MILLISECONDS_PER_SECOND) : text;
+}
+
+/** The body with the listed top-level fields first, in the listed order. */
+function ordered(root: Record<string, unknown>, order: readonly string[]): Record<string, unknown> {
+  if (order.length === 0) {
+    return root;
+  }
+  const result: Record<string, unknown> = {};
+  const names = [...order.filter((name) => Object.hasOwn(root, name)), ...Object.keys(root)];
+  for (const name of names) {
+    if (!Object.hasOwn(result, name)) {
+      defineValue(result, { name, value: root[name] });
+    }
+  }
+  return result;
 }
 
 /** The event headers that travel as message headers; a name a mapped field uses is refused. */
