@@ -172,10 +172,47 @@ export class MongoLaneLeases {
     },
   ): Promise<{ readonly recorded: Set<number>; readonly handedBack: Set<number> }> {
     const picksByLane = new Map<number, string[]>();
-    const handedBack = new Set<number>();
     for (const document of picked) {
       picksByLane.set(document.laneId, [...(picksByLane.get(document.laneId) ?? []), document._id]);
     }
+    const { operations, handedBack } = this.#planLaneRecords(scope, {
+      picksByLane,
+      runningIds,
+      request,
+    });
+    if (operations.length === 0) {
+      return { recorded: new Set(), handedBack };
+    }
+    const result = await this.#state.lanes.bulkWrite(operations, { ordered: false });
+    if (result.matchedCount === operations.length) {
+      return { recorded: new Set(picksByLane.keys()), handedBack };
+    }
+    return {
+      recorded: await this.#readRecorded(scope, { laneIds: [...picksByLane.keys()], request }),
+      handedBack,
+    };
+  }
+
+  /**
+   * One conditional write per lane of the claim: a picked lane records its picks, a lane that
+   * yielded nothing and runs nothing is freed (and reported as handed back).
+   */
+  #planLaneRecords(
+    scope: ReadonlyMap<number, ScopeLane>,
+    {
+      picksByLane,
+      runningIds,
+      request,
+    }: {
+      readonly picksByLane: ReadonlyMap<number, string[]>;
+      readonly runningIds: ReadonlySet<string>;
+      readonly request: ClaimRequest;
+    },
+  ): {
+    readonly operations: Array<AnyBulkWriteOperation<LaneDocument>>;
+    readonly handedBack: Set<number>;
+  } {
+    const handedBack = new Set<number>();
     const operations: Array<AnyBulkWriteOperation<LaneDocument>> = [];
     for (const lane of scope.values()) {
       const gone = lane.listed.filter((id) => !runningIds.has(id));
@@ -191,17 +228,7 @@ export class MongoLaneLeases {
         handedBack.add(lane.laneId);
       }
     }
-    if (operations.length === 0) {
-      return { recorded: new Set(), handedBack };
-    }
-    const result = await this.#state.lanes.bulkWrite(operations, { ordered: false });
-    if (result.matchedCount === operations.length) {
-      return { recorded: new Set(picksByLane.keys()), handedBack };
-    }
-    return {
-      recorded: await this.#readRecorded(scope, { laneIds: [...picksByLane.keys()], request }),
-      handedBack,
-    };
+    return { operations, handedBack };
   }
 
   /** The lanes of `laneIds` whose record of this claim applied, read back after a partial bulk write. */

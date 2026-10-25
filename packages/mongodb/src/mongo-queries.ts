@@ -9,7 +9,9 @@ import {
   toCompletedDeliveryRecord,
   toDeliveryRecord,
   toEnvelope,
+  type CompletedDeliveryDocument,
   type DeliveryDocument,
+  type LaneDocument,
 } from './documents.js';
 import type { MongoStoreState } from './mongo-store-state.js';
 
@@ -33,17 +35,7 @@ export class MongoQueries {
       .find({ 'inFlight.0': { $exists: true } }, { projection: { epoch: 0 } })
       .toArray();
     const listed = lanes.flatMap((lane) => lane.inFlight);
-    // A Map, not an object: an untrusted status such as 'constructor' must not find anything.
-    const derivedStatuses = new Map<string, Filter<DeliveryDocument>>([
-      ['processing', { status: 'pending', _id: { $in: listed } }],
-      ['pending', { status: 'pending', _id: { $nin: listed } }],
-    ]);
-    const filter: Filter<DeliveryDocument> = {
-      ...common,
-      ...(status === undefined
-        ? {}
-        : (derivedStatuses.get(status) ?? { status: status as DeliveryDocument['status'] })),
-    };
+    const filter: Filter<DeliveryDocument> = { ...common, ...statusFilter(status, listed) };
     const sort = { createdAt: 1, _id: 1 } as const;
     const documents = await this.#state.deliveries.find(filter, { sort, limit }).toArray();
     const history =
@@ -54,27 +46,7 @@ export class MongoQueries {
       ...documents.map((document) => document.eventId),
       ...history.map((document) => document.eventId),
     ]);
-    const laneById = new Map(lanes.map((lane) => [lane._id, lane]));
-    const records = [
-      ...documents.map((document) => {
-        const lane = laneById.get(document.laneId);
-        const runs =
-          document.status === 'pending' && lane?.inFlight.includes(document._id) === true;
-        return toDeliveryRecord(document, {
-          event: events.get(document.eventId)!,
-          runningIn: runs ? lane : undefined,
-        });
-      }),
-      ...history.map((document) =>
-        toCompletedDeliveryRecord(document, events.get(document.eventId)!),
-      ),
-    ];
-    return records
-      .sort(
-        (left, right) =>
-          left.createdAt.getTime() - right.createdAt.getTime() || compareText(left.id, right.id),
-      )
-      .slice(0, limit);
+    return toSortedRecords({ documents, history, events, lanes }).slice(0, limit);
   }
 
   /** Implements {@link MongoEventStore.requeue}. */
@@ -142,7 +114,7 @@ export class MongoQueries {
     }
     return this.#state.deliveries
       .find(
-        { _id: { $in: [...listed] }, status: 'pending' },
+        { _id: { $in: listed }, status: 'pending' },
         { projection: { handler: 1, key: 1, laneId: 1 } },
       )
       .toArray();
@@ -154,6 +126,47 @@ export class MongoQueries {
       .toArray();
     return new Map(documents.map((document) => [document._id, toEnvelope(document)]));
   }
+}
+
+/** The filter of a status: `processing` and `pending` are derived from the lanes, the rest are stored. */
+function statusFilter(status: string | undefined, listed: string[]): Filter<DeliveryDocument> {
+  if (status === undefined) {
+    return {};
+  }
+  // A Map, not an object: an untrusted status such as 'constructor' must not find anything.
+  const derivedStatuses = new Map<string, Filter<DeliveryDocument>>([
+    ['processing', { status: 'pending', _id: { $in: listed } }],
+    ['pending', { status: 'pending', _id: { $nin: listed } }],
+  ]);
+  return derivedStatuses.get(status) ?? { status: status as DeliveryDocument['status'] };
+}
+
+/** The records of the delivery documents and the completion history, oldest first. */
+function toSortedRecords(input: {
+  readonly documents: readonly DeliveryDocument[];
+  readonly history: readonly CompletedDeliveryDocument[];
+  readonly events: ReadonlyMap<string, EventEnvelope>;
+  readonly lanes: readonly LaneDocument[];
+}): DeliveryRecord[] {
+  const { documents, history, events, lanes } = input;
+  const laneById = new Map(lanes.map((lane) => [lane._id, lane]));
+  const records = [
+    ...documents.map((document) => {
+      const lane = laneById.get(document.laneId);
+      const runs = document.status === 'pending' && lane?.inFlight.includes(document._id) === true;
+      return toDeliveryRecord(document, {
+        event: events.get(document.eventId)!,
+        runningIn: runs ? lane : undefined,
+      });
+    }),
+    ...history.map((document) =>
+      toCompletedDeliveryRecord(document, events.get(document.eventId)!),
+    ),
+  ];
+  return records.sort(
+    (left, right) =>
+      left.createdAt.getTime() - right.createdAt.getTime() || compareText(left.id, right.id),
+  );
 }
 
 function compareText(left: string, right: string): number {

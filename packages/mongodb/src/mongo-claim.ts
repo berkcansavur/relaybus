@@ -1,16 +1,13 @@
 import type { ClaimRequest, ClaimedDelivery } from '@relaybus/core';
-import {
-  CompositeKey,
-  DeliveryLeaseIdentity,
-  OwnerSerializedClaims,
-} from '@relaybus/core/internal';
+import { CompositeKey, OwnerSerializedClaims } from '@relaybus/core/internal';
 import { ClaimScan, orderingIdentity } from './claim-scan.js';
 import type { DeliveryDocument, LaneDocument } from './documents.js';
 import { formatLeaseToken, parseLeaseToken } from './lanes.js';
+import { MongoLaneReconciler } from './mongo-lane-reconciler.js';
 import type { MongoLaneLeases } from './mongo-lane-leases.js';
 import type { MongoOrdering } from './mongo-ordering.js';
 import type { MongoQueries } from './mongo-queries.js';
-import { runInTransaction, type MongoStoreState, type ScopeLane } from './mongo-store-state.js';
+import { type MongoStoreState, type ScopeLane } from './mongo-store-state.js';
 
 /** Deliveries that waited behind one unfinished predecessor before they are parked. */
 const PARK_BACKLOG_THRESHOLD = 32;
@@ -38,6 +35,29 @@ type PickAcrossLanesInput = {
   readonly picked: DeliveryDocument[];
 };
 
+/** The claimed deliveries as the claim hands them to the caller. */
+function toClaimedDeliveries(
+  claimed: readonly DeliveryDocument[],
+  context: {
+    readonly scope: ReadonlyMap<number, ScopeLane>;
+    readonly events: Awaited<ReturnType<MongoQueries['readEnvelopes']>>;
+    readonly request: ClaimRequest;
+  },
+): ClaimedDelivery[] {
+  const { scope, events, request } = context;
+  return claimed.map((document) => ({
+    deliveryId: document._id,
+    leaseToken: formatLeaseToken(document.laneId, {
+      epoch: scope.get(document.laneId)!.epoch,
+      claims: document.claims ?? 0,
+    }),
+    handler: document.handler,
+    attempt: document.attempts + 1,
+    leaseExpiresAt: request.leaseExpiresAt,
+    event: events.get(document.eventId)!,
+  }));
+}
+
 /** The held lanes as the claim read them. */
 function scopeOf(held: readonly LaneDocument[]): Map<number, ScopeLane> {
   return new Map<number, ScopeLane>(
@@ -59,6 +79,7 @@ export class MongoClaims extends OwnerSerializedClaims {
   readonly #laneLeases: MongoLaneLeases;
   readonly #ordering: MongoOrdering;
   readonly #queries: MongoQueries;
+  readonly #reconciler: MongoLaneReconciler;
 
   constructor(
     state: MongoStoreState,
@@ -73,6 +94,7 @@ export class MongoClaims extends OwnerSerializedClaims {
     this.#laneLeases = collaborators.laneLeases;
     this.#ordering = collaborators.ordering;
     this.#queries = collaborators.queries;
+    this.#reconciler = new MongoLaneReconciler(state);
   }
 
   /** Mongo claims nothing for a limit of 0 or below (a limit that is not a number is tried). */
@@ -93,7 +115,7 @@ export class MongoClaims extends OwnerSerializedClaims {
     if (this.#state.unreconciledOwners.has(owner)) {
       // An earlier reconciliation failed: a delivery may still be listed that nobody runs, and the
       // owner's other deliveries may keep the lane alive, so it is done before claiming anything.
-      await this.#reconcileLanes(owner);
+      await this.#reconciler.reconcile(owner);
       this.#state.unreconciledOwners.delete(owner);
     }
     try {
@@ -109,7 +131,7 @@ export class MongoClaims extends OwnerSerializedClaims {
       }
       return claimed;
     } catch (error) {
-      const [reconciled] = await Promise.allSettled([this.#reconcileLanes(owner)]);
+      const [reconciled] = await Promise.allSettled([this.#reconciler.reconcile(owner)]);
       if (reconciled.status === 'rejected') {
         this.#state.unreconciledOwners.add(owner);
       }
@@ -117,83 +139,8 @@ export class MongoClaims extends OwnerSerializedClaims {
     }
   }
 
-  /**
-   * Takes every delivery this instance does not run out of the lanes `owner`
-   * holds on it: every listed delivery whose current claim (lane epoch and
-   * claim generation now) was not handed out by this instance, or was settled.
-   * One transaction, and the lanes are written first under their epoch and
-   * holder: a worker taking a lane over meanwhile conflicts with it, so its
-   * claim is never touched. The claim generation of every delivery taken out
-   * moves on, so no lease of those claims (a completion that failed and is
-   * retried later, say) can ever match a later claim of the same delivery.
-   * Registrations of this owner that are not the current claim of a listed
-   * delivery are dropped.
-   */
-  async #reconcileLanes(owner: string): Promise<void> {
-    await runInTransaction(this.#state, async (session) => {
-      const held = await this.#state.lanes
-        .find({ owner, holder: this.#state.instanceId }, { session })
-        .toArray();
-      const listed = held.flatMap((lane) => lane.inFlight);
-      const claimsById = new Map(
-        (
-          await this.#state.deliveries
-            .find(
-              { _id: { $in: listed }, status: 'pending' },
-              { session, projection: { claims: 1 } },
-            )
-            .toArray()
-        ).map((document) => [document._id, document.claims ?? 0]),
-      );
-      const current = new Set<string>();
-      const unclaimed = held.map((lane) => ({
-        lane,
-        ids: lane.inFlight.filter((id) => {
-          const key = DeliveryLeaseIdentity.of(
-            id,
-            formatLeaseToken(lane._id, { epoch: lane.epoch, claims: claimsById.get(id) ?? 0 }),
-          );
-          current.add(key);
-          return !this.#state.handedOut.has(key);
-        }),
-      }));
-      this.#state.handedOut.forgetWhere(
-        (entry, identity) => entry.owner === owner && !current.has(identity),
-      );
-      if (held.length === 0) {
-        return;
-      }
-      // Every lane gets a new revision, also one with nothing to take out: a record of the failed
-      // claim that is still on its way to the server then matches nothing when it arrives.
-      await this.#state.lanes.bulkWrite(
-        unclaimed.map(({ lane, ids }) => ({
-          updateOne: {
-            filter: { _id: lane._id, epoch: lane.epoch, holder: this.#state.instanceId },
-            update: { $pull: { inFlight: { $in: ids } }, $inc: { revision: 1 } },
-          },
-        })),
-        { session, ordered: false },
-      );
-      await this.#state.deliveries.updateMany(
-        { _id: { $in: unclaimed.flatMap((entry) => entry.ids) }, status: 'pending' },
-        { $inc: { claims: 1 } },
-        { session },
-      );
-    });
-  }
-
   async #claimNow(request: ClaimRequest): Promise<ClaimedDelivery[]> {
-    // Independent reads, so they share one round trip: unparking only has to finish before candidates are read.
-    const [held] = await Promise.all([
-      this.#state.lanes
-        .find({
-          owner: request.leaseOwner,
-          holder: this.#state.instanceId,
-          leaseExpiresAt: { $gt: request.now },
-        })
-        .toArray(),
-      this.#ordering.unparkNextDeliveries(request.handlers),
-    ]);
+    const held = await this.#readHeldLanes(request);
     await this.#laneLeases.chargeLost(held);
     const scope = scopeOf(held);
     // Loaded while the first candidates are read; only keyed candidates and the record need it.
@@ -215,17 +162,23 @@ export class MongoClaims extends OwnerSerializedClaims {
       scope,
     );
     await this.#ordering.parkWaiting(scan.waitingBacklogs(PARK_BACKLOG_THRESHOLD, handedBack));
-    return claimed.map((document) => ({
-      deliveryId: document._id,
-      leaseToken: formatLeaseToken(document.laneId, {
-        epoch: scope.get(document.laneId)!.epoch,
-        claims: document.claims ?? 0,
-      }),
-      handler: document.handler,
-      attempt: document.attempts + 1,
-      leaseExpiresAt: request.leaseExpiresAt,
-      event: events.get(document.eventId)!,
-    }));
+    return toClaimedDeliveries(claimed, { scope, events, request });
+  }
+
+  /** The lanes the owner holds on this instance, read while the next deliveries are unparked. */
+  async #readHeldLanes(request: ClaimRequest): Promise<LaneDocument[]> {
+    // Independent reads, so they share one round trip: unparking only has to finish before candidates are read.
+    const [held] = await Promise.all([
+      this.#state.lanes
+        .find({
+          owner: request.leaseOwner,
+          holder: this.#state.instanceId,
+          leaseExpiresAt: { $gt: request.now },
+        })
+        .toArray(),
+      this.#ordering.unparkNextDeliveries(request.handlers),
+    ]);
+    return held;
   }
 
   /** The deliveries still running in the held lanes, with their (handler, key) identities. */
