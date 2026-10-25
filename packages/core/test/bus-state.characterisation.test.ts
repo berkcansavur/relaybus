@@ -126,4 +126,15 @@ describe('RelayBus state machine (characterisation)', () => {
     expect(await outcome(() => bus.start())).toBe('resolved null');
     await bus.stop();
   });
+
+  it('with no store setup and no transport, start completes before it returns', async () => {
+    const { bus } = createTestBus({ setupStore: false, dispatcher: { enabled: false } });
+    const starting = bus.start();
+    expect(bus.isRunning).toBe(true);
+    expect(await outcome(() => bus.start())).toBe(
+      'rejected LifecycleError: Cannot start a relaybus that is running',
+    );
+    await starting;
+    await bus.stop();
+  });
 });
