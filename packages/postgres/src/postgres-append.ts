@@ -4,7 +4,7 @@ import {
   type AppendResult,
   type EventEnvelope,
 } from '@relaybus/core';
-import { schedule } from '@relaybus/core/internal';
+import { CompositeKey, schedule } from '@relaybus/core/internal';
 import type { PostgresRow } from './executor.js';
 import { type PostgresStoreState } from './postgres-store-state.js';
 import { readCount } from './row-mapping.js';
@@ -246,7 +246,7 @@ function planAppend(entries: readonly AppendEntry[]): AppendPlan {
       events.push(event);
     }
     for (const delivery of newDeliveries) {
-      const identity = `${event.id}\u0000${delivery.handler}`;
+      const identity = CompositeKey.of(event.id, delivery.handler);
       if (!seenDeliveries.has(identity)) {
         seenDeliveries.add(identity);
         deliveries.push({

@@ -2,7 +2,7 @@ import type { Clock } from './clock.js';
 import { CompletionBatcher } from './completion-batcher.js';
 import { DeliveryTimers } from './delivery-timers.js';
 import type { DispatchObservation } from './dispatch-observation.js';
-import { pendingKey, rejectOnAbort } from './dispatcher-support.js';
+import { rejectOnAbort } from './dispatcher-support.js';
 import {
   DispatcherStoppedError,
   HandlerTimeoutError,
@@ -15,6 +15,7 @@ import { validatePayload, type EventEnvelope } from './event.js';
 import type { ClaimedDelivery, EventStore } from './event-store.js';
 import { runInIsolatedScope } from './execution-scope.js';
 import { ShutdownDeadline } from './shutdown-deadline.js';
+import { DeliveryLeaseIdentity } from './values/delivery-lease-identity.js';
 import type { HandlerContext, HandlerRegistration, HandlerRegistry } from './handler-registry.js';
 import { startLeaseHeartbeat } from './lease-heartbeat.js';
 import type { Notifier } from './notifier.js';
@@ -360,7 +361,7 @@ export class Dispatcher {
       }
       try {
         const applied = await entry.settle();
-        this.#pending.delete(pendingKey(entry.delivery));
+        this.#pending.delete(pendingKeyOf(entry.delivery));
         if (applied) {
           entry.applied();
         } else {
@@ -376,7 +377,7 @@ export class Dispatcher {
     if (this.#abandoned) {
       return;
     }
-    this.#pending.set(pendingKey(entry.delivery), entry);
+    this.#pending.set(pendingKeyOf(entry.delivery), entry);
     this.#recoveryTimer ??= schedule(this.#dependencies.clock, {
       run: () => void this.#recoverSettlements(),
       delayMs: this.#dependencies.settings.pollIntervalMs,
@@ -618,7 +619,7 @@ export class Dispatcher {
     const registration = registry.get(delivery.handler)!;
     // A new claim of this delivery makes whatever was pending for its earlier claims moot.
     for (const key of [...this.#pending.keys()].filter((pending) =>
-      pending.startsWith(`${delivery.deliveryId}\u0000`),
+      pending.startsWith(DeliveryLeaseIdentity.prefixOf(delivery.deliveryId)),
     )) {
       this.#pending.delete(key);
     }
@@ -963,4 +964,9 @@ export class Dispatcher {
       notifier.notify('onLeaseLost', { delivery });
     }
   }
+}
+
+/** Settlements are pending per claim: an older claim of a delivery must never replace or remove the newer one's. */
+function pendingKeyOf(delivery: ClaimedDelivery): string {
+  return DeliveryLeaseIdentity.of(delivery.deliveryId, delivery.leaseToken);
 }

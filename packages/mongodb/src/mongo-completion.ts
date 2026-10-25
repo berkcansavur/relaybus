@@ -1,4 +1,5 @@
 import type { ErrorInfo, LeaseReference } from '@relaybus/core';
+import { DeliveryLeaseIdentity } from '@relaybus/core/internal';
 import type { ClientSession, Filter, UpdateFilter } from 'mongodb';
 import {
   toCompletedDeliveryDocument,
@@ -10,7 +11,6 @@ import { formatLeaseToken, parseLeaseToken, type LaneLease } from './lanes.js';
 import {
   assertInTransaction,
   atCount,
-  leaseKey,
   runInTransaction,
   type MongoStoreState,
 } from './mongo-store-state.js';
@@ -117,7 +117,9 @@ export class MongoCompletion {
   async #settle<T>(leases: readonly LeaseReference[], operation: () => Promise<T>): Promise<T> {
     const result = await operation();
     for (const lease of leases) {
-      this.#state.handedOut.delete(leaseKey(String(lease.deliveryId), String(lease.leaseToken)));
+      this.#state.handedOut.delete(
+        DeliveryLeaseIdentity.of(String(lease.deliveryId), String(lease.leaseToken)),
+      );
     }
     return result;
   }
@@ -383,5 +385,8 @@ function ofClaim(lease: IssuedLease): Filter<DeliveryDocument> {
 }
 
 function leaseIdentity(lease: IssuedLease): string {
-  return `${lease.deliveryId}\u0000${formatLeaseToken(lease.laneId, { epoch: lease.epoch, claims: lease.claims })}`;
+  return DeliveryLeaseIdentity.of(
+    lease.deliveryId,
+    formatLeaseToken(lease.laneId, { epoch: lease.epoch, claims: lease.claims }),
+  );
 }

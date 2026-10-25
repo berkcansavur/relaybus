@@ -6,6 +6,7 @@ import type {
   EventEnvelope,
   EventHeaders,
 } from '@relaybus/core';
+import { LaneLeaseTokenFormat, type LaneLeaseTokenParts } from '@relaybus/core/internal';
 import type { PostgresRow } from './executor.js';
 import { LANE_COUNT } from './names.js';
 
@@ -44,6 +45,13 @@ export function mapEventEnvelope(row: PostgresRow): EventEnvelope {
   };
 }
 
+/** Lease tokens of this store: epochs are bigint text of up to 18 digits. */
+const LEASE_TOKENS = new LaneLeaseTokenFormat({
+  laneCount: LANE_COUNT,
+  epochDigits: 18,
+  claimsDigits: 9,
+});
+
 /**
  * The fencing token of a claimed delivery names its lane and the lane's epoch,
  * so every state change can check the lane without reading the delivery first.
@@ -52,25 +60,19 @@ export function formatLeaseToken(
   lane: number,
   { epoch, claims }: { readonly epoch: string; readonly claims: number },
 ): string {
-  return `${lane}:${epoch}:${claims}`;
+  return LEASE_TOKENS.format(lane, { epoch, claims });
 }
 
-export interface LaneLease {
-  readonly lane: number;
-  readonly epoch: string;
-  /** How many claims of this delivery ended before this one; every end of a claim bumps it, so an old lease can never match a newer claim. */
-  readonly claims: number;
-}
-
-const LEASE_TOKEN_PATTERN = /^(\d{1,3}):(\d{1,18}):(\d{1,9})$/;
+/**
+ * A lane lease: lane, epoch and claim generation. `claims` counts the claims of this delivery
+ * that ended before this one; every end of a claim bumps it, so an old lease can never match a
+ * newer claim.
+ */
+export type LaneLease = LaneLeaseTokenParts;
 
 /** Splits a lease token; undefined when it was not issued by this store. */
 export function parseLeaseToken(token: string): LaneLease | undefined {
-  const match = LEASE_TOKEN_PATTERN.exec(token);
-  if (match === null || Number(match[1]) >= LANE_COUNT) {
-    return undefined;
-  }
-  return { lane: Number(match[1]), epoch: match[2]!, claims: Number(match[3]) };
+  return LEASE_TOKENS.parse(token);
 }
 
 export function mapClaimedDelivery(row: PostgresRow, leaseExpiresAt: Date): ClaimedDelivery {

@@ -1,7 +1,8 @@
 import { type ClaimRequest, type ClaimedDelivery } from '@relaybus/core';
+import { CompositeKey, DeliveryLeaseIdentity } from '@relaybus/core/internal';
 import { ReconcileFailedError } from './errors.js';
 import type { PostgresParameter, PostgresRow } from './executor.js';
-import { handedOutKey, type PostgresStoreState } from './postgres-store-state.js';
+import { type PostgresStoreState } from './postgres-store-state.js';
 import { mapClaimedDelivery, parseLeaseToken, readCount } from './row-mapping.js';
 
 /** Lanes a claim takes in its first round; every further round takes twice as many. */
@@ -257,7 +258,7 @@ export class PostgresClaims<TTransaction> {
   #handOut(rows: readonly PostgresRow[], leaseOwner: string): void {
     for (const row of rows) {
       const claim = mapClaimedDelivery(row, new Date(0));
-      this.#state.handedOut.set(handedOutKey(claim.deliveryId, claim.leaseToken), {
+      this.#state.handedOut.set(DeliveryLeaseIdentity.of(claim.deliveryId, claim.leaseToken), {
         owner: leaseOwner,
         deliveryId: claim.deliveryId,
         ...parseLeaseToken(claim.leaseToken)!,
@@ -357,7 +358,7 @@ export class PostgresClaims<TTransaction> {
           if (row['delivery_key'] === null) {
             return true;
           }
-          const group = `${row['handler'] as string}\u0000${row['delivery_key'] as string}`;
+          const group = CompositeKey.of(row['handler'] as string, row['delivery_key'] as string);
           return !seenKeys.has(group) && Boolean(seenKeys.add(group));
         });
       kept.sort(compareDue);

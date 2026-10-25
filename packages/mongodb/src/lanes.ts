@@ -1,3 +1,5 @@
+import { LaneLeaseTokenFormat } from '@relaybus/core/internal';
+
 /**
  * Number of lanes. Every delivery belongs to one of them, and workers lease
  * whole lanes instead of single deliveries. Same value as in the PostgreSQL store.
@@ -38,6 +40,13 @@ export interface LaneLease {
   readonly claims: number;
 }
 
+/** Lease tokens of this store: epochs and claim generations of up to 15 digits. */
+const LEASE_TOKENS = new LaneLeaseTokenFormat({
+  laneCount: LANE_COUNT,
+  epochDigits: 15,
+  claimsDigits: 15,
+});
+
 /**
  * The fencing token of a claimed delivery: `<laneId>:<epoch>:<claims>`. Every
  * state change checks the lane epoch and the delivery's claim generation.
@@ -46,16 +55,14 @@ export function formatLeaseToken(
   laneId: number,
   { epoch, claims }: { readonly epoch: number; readonly claims: number },
 ): string {
-  return `${laneId}:${epoch}:${claims}`;
+  return LEASE_TOKENS.format(laneId, { epoch, claims });
 }
-
-const LEASE_TOKEN_PATTERN = /^(\d{1,3}):(\d{1,15}):(\d{1,15})$/;
 
 /** Splits a lease token; undefined when this store cannot have issued it. */
 export function parseLeaseToken(token: string): LaneLease | undefined {
-  const match = LEASE_TOKEN_PATTERN.exec(token);
-  if (match === null || Number(match[1]) >= LANE_COUNT) {
+  const parts = LEASE_TOKENS.parse(token);
+  if (parts === undefined) {
     return undefined;
   }
-  return { laneId: Number(match[1]), epoch: Number(match[2]), claims: Number(match[3]) };
+  return { laneId: parts.lane, epoch: Number(parts.epoch), claims: parts.claims };
 }

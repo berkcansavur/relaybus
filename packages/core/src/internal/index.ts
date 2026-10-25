@@ -33,3 +33,10 @@ export {
   type PayloadOnlyMapping,
   type WireField,
 } from './json-envelope.js';
+export {
+  CompositeKey,
+  DeliveryLeaseIdentity,
+  LaneLeaseTokenFormat,
+  type LaneLeaseTokenLimits,
+  type LaneLeaseTokenParts,
+} from '../values/index.js';

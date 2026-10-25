@@ -14,10 +14,6 @@ interface HandedOutClaim extends LaneLease {
   readonly deliveryId: string;
 }
 
-export function handedOutKey(deliveryId: string, leaseToken: string): string {
-  return `${deliveryId}\u0000${leaseToken}`;
-}
-
 /** The connection, statements, settings and per-instance bookkeeping every part of {@link PostgresEventStore} shares. */
 export type PostgresStoreState<TTransaction> = {
   readonly executor: PostgresExecutor<TTransaction>;

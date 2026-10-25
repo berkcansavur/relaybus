@@ -121,11 +121,6 @@ async function runInTransactionWith<T>(
   }
 }
 
-/** Key of a handed-out claim: the delivery and the exact lease token it was handed out with. */
-export function leaseKey(deliveryId: string, leaseToken: string): string {
-  return `${deliveryId}\u0000${leaseToken}`;
-}
-
 export function assertInTransaction(session: ClientSession, operation: string): void {
   if (!session.inTransaction()) {
     throw new ConfigurationError(

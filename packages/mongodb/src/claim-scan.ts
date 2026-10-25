@@ -1,3 +1,5 @@
+import { CompositeKey } from '@relaybus/core/internal';
+
 /** What one claim call has learned about the deliveries of a single handler and key. */
 interface KeyKnowledge {
   /** Lowest sequence known to be unfinished. Every later delivery of the key must wait. */
@@ -70,5 +72,5 @@ export class ClaimScan {
 
 /** Identity of the ordering of a handler and key. */
 export function orderingIdentity(handler: string, key: string): string {
-  return `${handler}\u0000${key}`;
+  return CompositeKey.of(handler, key);
 }

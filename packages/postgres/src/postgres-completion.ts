@@ -1,6 +1,7 @@
 import { type ErrorInfo, type LeaseReference } from '@relaybus/core';
+import { DeliveryLeaseIdentity } from '@relaybus/core/internal';
 import type { PostgresParameter } from './executor.js';
-import { handedOutKey, type PostgresStoreState } from './postgres-store-state.js';
+import { type PostgresStoreState } from './postgres-store-state.js';
 import { parseLeaseToken, readCount, type LaneLease } from './row-mapping.js';
 
 /** completion */
@@ -101,7 +102,7 @@ export class PostgresCompletion<TTransaction> {
   /** Forgets a handed-out lease once the store answered about it (any answer: the claim is over or fenced out). */
   async #settled(lease: LeaseReference, work: Promise<boolean>): Promise<boolean> {
     const result = await work;
-    this.#state.handedOut.delete(handedOutKey(lease.deliveryId, lease.leaseToken));
+    this.#state.handedOut.delete(DeliveryLeaseIdentity.of(lease.deliveryId, lease.leaseToken));
     return result;
   }
 
@@ -133,7 +134,7 @@ export class PostgresCompletion<TTransaction> {
     const seen = new Set<string>();
     leases.forEach((lease, ord) => {
       const held = parseLeaseToken(lease.leaseToken);
-      const identity = `${lease.deliveryId}\u0000${lease.leaseToken}`;
+      const identity = DeliveryLeaseIdentity.of(lease.deliveryId, lease.leaseToken);
       if (held !== undefined && !seen.has(identity)) {
         seen.add(identity);
         issued.push({ ord, id: lease.deliveryId, ...held });
@@ -153,7 +154,7 @@ export class PostgresCompletion<TTransaction> {
     if (transaction === undefined) {
       // Inside the caller's transaction the completion is only provisional: it may roll back and retry.
       for (const lease of leases) {
-        this.#state.handedOut.delete(handedOutKey(lease.deliveryId, lease.leaseToken));
+        this.#state.handedOut.delete(DeliveryLeaseIdentity.of(lease.deliveryId, lease.leaseToken));
       }
     }
     return leases.map((_, ord) => completed.has(ord));

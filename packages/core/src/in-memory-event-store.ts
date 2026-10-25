@@ -17,6 +17,7 @@ import type {
 import type { EventEnvelope } from './event.js';
 import { createUuidV7, type IdentifierGenerator } from './identifier.js';
 import { InMemoryTransaction } from './in-memory-transaction.js';
+import { CompositeKey } from './values/composite-key.js';
 
 const DEFAULT_LIST_LIMIT = 100;
 
@@ -170,7 +171,7 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
   #newDeliveries(entry: AppendEntry, pendingDeliveryKeys: Set<string>): NewDelivery[] {
     const eventId = entry.event.id;
     return entry.deliveries.filter((delivery) => {
-      const deliveryKey = `${eventId}\u0000${delivery.handler}`;
+      const deliveryKey = CompositeKey.of(eventId, delivery.handler);
       if (
         pendingDeliveryKeys.has(deliveryKey) ||
         this.#events.get(eventId)?.handlers.has(delivery.handler) === true

@@ -1,16 +1,12 @@
 import type { ClaimRequest, ClaimedDelivery } from '@relaybus/core';
+import { CompositeKey, DeliveryLeaseIdentity } from '@relaybus/core/internal';
 import { ClaimScan, orderingIdentity } from './claim-scan.js';
 import type { DeliveryDocument, LaneDocument } from './documents.js';
 import { formatLeaseToken, parseLeaseToken } from './lanes.js';
 import type { MongoLaneLeases } from './mongo-lane-leases.js';
 import type { MongoOrdering } from './mongo-ordering.js';
 import type { MongoQueries } from './mongo-queries.js';
-import {
-  leaseKey,
-  runInTransaction,
-  type MongoStoreState,
-  type ScopeLane,
-} from './mongo-store-state.js';
+import { runInTransaction, type MongoStoreState, type ScopeLane } from './mongo-store-state.js';
 
 /** Deliveries that waited behind one unfinished predecessor before they are parked. */
 const PARK_BACKLOG_THRESHOLD = 32;
@@ -114,12 +110,15 @@ export class MongoClaims {
       const claimed = await this.#claimNow(request);
       for (const delivery of claimed) {
         const { laneId, epoch } = parseLeaseToken(delivery.leaseToken)!;
-        this.#state.handedOut.set(leaseKey(delivery.deliveryId, delivery.leaseToken), {
-          deliveryId: delivery.deliveryId,
-          owner: request.leaseOwner,
-          laneId,
-          epoch,
-        });
+        this.#state.handedOut.set(
+          DeliveryLeaseIdentity.of(delivery.deliveryId, delivery.leaseToken),
+          {
+            deliveryId: delivery.deliveryId,
+            owner: request.leaseOwner,
+            laneId,
+            epoch,
+          },
+        );
       }
       return claimed;
     } catch (error) {
@@ -163,7 +162,7 @@ export class MongoClaims {
       const unclaimed = held.map((lane) => ({
         lane,
         ids: lane.inFlight.filter((id) => {
-          const key = leaseKey(
+          const key = DeliveryLeaseIdentity.of(
             id,
             formatLeaseToken(lane._id, { epoch: lane.epoch, claims: claimsById.get(id) ?? 0 }),
           );
@@ -311,13 +310,13 @@ export class MongoClaims {
       held.flatMap((lane) =>
         lane.inFlight
           .filter((id) => !runningIds.has(id))
-          .map((id) => `${id}\u0000${lane._id}:${lane.epoch}`),
+          .map((id) => CompositeKey.of(id, `${lane._id}:${lane.epoch}`)),
       ),
     );
     for (const [key, entry] of this.#state.handedOut) {
       if (
         entry.owner === owner &&
-        gone.has(`${entry.deliveryId}\u0000${entry.laneId}:${entry.epoch}`)
+        gone.has(CompositeKey.of(entry.deliveryId, `${entry.laneId}:${entry.epoch}`))
       ) {
         this.#state.handedOut.delete(key);
       }
