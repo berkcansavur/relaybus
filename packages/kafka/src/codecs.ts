@@ -1,5 +1,9 @@
 import type { EventEnvelope } from '@relaybus/core';
-import { createJsonEnvelopeFormat, type JsonEnvelopeMapping } from '@relaybus/core/internal';
+import {
+  createJsonEnvelopeFormat,
+  type JsonEnvelopeFormat,
+  type JsonEnvelopeMapping,
+} from '@relaybus/core/internal';
 import {
   CONTENT_TYPE,
   decodeEnvelope,
@@ -14,6 +18,8 @@ import { UnencodableEventError } from './errors.js';
 import {
   decodeCloudEvent,
   readHeadersLeniently,
+  type DecodedEvent,
+  type KafkaInboundRecord,
   type KafkaMessageDecoder,
 } from './inbound-decoders.js';
 import type { KafkaOutgoingMessage } from './kafka-client.js';
@@ -105,36 +111,50 @@ export function jsonEnvelope(mapping: KafkaJsonEnvelopeMapping): KafkaCodec {
       ? { [CONTENT_TYPE]: contentType, [EVENT_ID_HEADER]: envelope.id }
       : { [CONTENT_TYPE]: contentType };
   return {
-    encode: (envelope) => {
-      assertRepresentable(envelope);
-      const { body, headers } = format.write(envelope);
-      const taken = [CONTENT_TYPE, EVENT_ID_HEADER].find((name) => Object.hasOwn(headers, name));
-      if (taken !== undefined) {
-        throw new UnencodableEventError(
-          `Event ${envelope.id} has a header '${taken}', which the codec writes itself`,
-        );
-      }
-      return {
-        key: envelope.key,
-        value: serializeJson(envelope, body),
-        headers: { ...headers, ...ownHeaders(envelope) },
-        ...(stampsTime ? { timestamp: recordTimestamp(envelope) } : {}),
-      };
-    },
-    decode: (record) => {
-      const { [EVENT_ID_HEADER]: eventId, ...headers } = withoutContentType(
-        readHeadersLeniently(record.headers),
-      );
-      const fields = format.read({ body: parsePayload(record.value), headers });
-      return {
-        ...fields,
-        id:
-          fields.id ??
-          (eventId === undefined || eventId === ''
-            ? `kafka:${record.topic}:${record.partition}:${record.offset}`
-            : eventId),
-      };
-    },
+    encode: (envelope) => encodeJson(envelope, { format, stampsTime, ownHeaders }),
+    decode: (record) => decodeJson(record, format),
+  };
+}
+
+/** How {@link jsonEnvelope} writes: by the format, with its own headers, and the time as timestamp when unmapped. */
+type JsonEncoding = {
+  readonly format: JsonEnvelopeFormat;
+  readonly stampsTime: boolean;
+  readonly ownHeaders: (envelope: EventEnvelope) => Record<string, string>;
+};
+
+function encodeJson(
+  envelope: EventEnvelope,
+  { format, stampsTime, ownHeaders }: JsonEncoding,
+): KafkaEncodedRecord {
+  assertRepresentable(envelope);
+  const { body, headers } = format.write(envelope);
+  const taken = [CONTENT_TYPE, EVENT_ID_HEADER].find((name) => Object.hasOwn(headers, name));
+  if (taken !== undefined) {
+    throw new UnencodableEventError(
+      `Event ${envelope.id} has a header '${taken}', which the codec writes itself`,
+    );
+  }
+  return {
+    key: envelope.key,
+    value: serializeJson(envelope, body),
+    headers: { ...headers, ...ownHeaders(envelope) },
+    ...(stampsTime ? { timestamp: recordTimestamp(envelope) } : {}),
+  };
+}
+
+function decodeJson(record: KafkaInboundRecord, format: JsonEnvelopeFormat): DecodedEvent {
+  const { [EVENT_ID_HEADER]: eventId, ...headers } = withoutContentType(
+    readHeadersLeniently(record.headers),
+  );
+  const fields = format.read({ body: parsePayload(record.value), headers });
+  return {
+    ...fields,
+    id:
+      fields.id ??
+      (eventId === undefined || eventId === ''
+        ? `kafka:${record.topic}:${record.partition}:${record.offset}`
+        : eventId),
   };
 }
 

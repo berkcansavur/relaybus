@@ -209,15 +209,7 @@ export function plainJsonDecoder(options: PlainJsonDecoderOptions): KafkaMessage
     ) {
       return decodeCloudEvent(record);
     }
-    const plain: PlainJsonRecord = {
-      topic: record.topic,
-      partition: record.partition,
-      offset: record.offset,
-      key: readKeyLeniently(record.key),
-      headers,
-      payload: parsePayload(record.value),
-      timestamp: record.timestamp,
-    };
+    const plain = plainRecordOf(record, headers);
     const type = KAFKA_EVENTS.text(options.type, { plain, name: 'type' });
     if (type === undefined) {
       throw invalid('Record has no event type: the type option found none');
@@ -239,6 +231,19 @@ export function plainJsonDecoder(options: PlainJsonDecoderOptions): KafkaMessage
       causationId: null,
       occurredAt: resolveOccurredAt(options.occurredAt, { plain, record }),
     };
+  };
+}
+
+/** A record as the extractor options of {@link plainJsonDecoder} see it. */
+function plainRecordOf(record: KafkaInboundRecord, headers: EventHeaders): PlainJsonRecord {
+  return {
+    topic: record.topic,
+    partition: record.partition,
+    offset: record.offset,
+    key: readKeyLeniently(record.key),
+    headers,
+    payload: parsePayload(record.value),
+    timestamp: record.timestamp,
   };
 }
 

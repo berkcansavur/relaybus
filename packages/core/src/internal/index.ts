@@ -48,6 +48,10 @@ export {
   type TextOption,
 } from '../transport-kit/decoded-event-reader.js';
 export {
+  SubscribingTransport,
+  type TransportSubscription,
+} from '../transport-kit/subscribing-transport.js';
+export {
   BoundedInteger,
   CompositeKey,
   DeliveryLeaseIdentity,
