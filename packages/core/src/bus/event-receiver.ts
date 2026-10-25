@@ -16,7 +16,7 @@ export type EventReceiverParts = {
   readonly observation: BusObservation | undefined;
   readonly createDelivery: (registration: HandlerRegistration, availableAt: Date) => NewDelivery;
   /** Wakes the dispatcher shortly after new deliveries were stored. */
-  readonly scheduleWake: () => void;
+  readonly scheduleWake: (committed: boolean) => void;
 };
 
 /**
@@ -60,7 +60,7 @@ export class EventReceiver {
     const status: ReceiveStatus = result.duplicateEventIds.length > 0 ? 'duplicate' : 'accepted';
     notifier.notify('onReceived', { envelope: normalized, status });
     if (result.appendedDeliveryCount > 0) {
-      scheduleWake();
+      scheduleWake(true);
     }
     return status;
   }

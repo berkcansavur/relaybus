@@ -143,25 +143,42 @@ how late other processes see it.
 ## Through Prisma, TypeORM, Drizzle, Knex or Kysely
 
 The adapters run relaybus' statements through your library, which sends every statement unprepared, so the
-database parses and plans each publish and claim again. In our measurements that cost about 0.3 ms per publish and
-1.3 ms per claim of 10 deliveries. Where you can, let the dispatcher use a store on a `pg` pool, which prepares, and
-keep the adapter for the publishing transactions that must share your library's transaction:
+database parses and plans each publish and claim again (about 0.3 ms per publish and 1.3 ms per claim of 10
+deliveries in our measurements), and a store on an adapter has no connection to `LISTEN` on. Give the store the
+`pg` pool your library's driver uses as well. Your transactions still go through the library; the statements the
+store sends outside them (the dispatcher's claims, completions and lease renewals) run on the pool as prepared
+statements, and the store listens for wake-ups:
 
 ```ts
-import { createKyselyExecutor } from '@relaybus/postgres/kysely';
+import { Pool } from 'pg';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { createPrismaExecutor } from '@relaybus/postgres/prisma';
 
-// API process: publishes in your Kysely transactions, dispatches nothing.
-const api = new RelayBus({
-  store: new PostgresEventStore({ executor: createKyselyExecutor(db) }),
-  source: 'orders',
-  dispatcher: { enabled: false },
-});
-// Worker process: dispatches through a pg pool on the same database, with prepared statements.
-const worker = new RelayBus({
-  store: new PostgresEventStore({ pool }),
+const pool = new Pool({ connectionString });
+const prisma = new PrismaClient({ adapter: new PrismaPg(pool) });
+const bus = new RelayBus({
+  store: new PostgresEventStore({ executor: createPrismaExecutor(prisma), pool }),
   source: 'orders',
 });
 ```
+
+The same works with Kysely (`new PostgresDialect({ pool })`), Drizzle (`drizzle(pool)`) and any other library on a
+`pg` pool; for Knex and TypeORM pass a `pg` pool on the same database. A warm dispatch batch (claim and complete)
+parses 2 statements without `pool` and none with it.
+
+## Wake-up after your transaction commits
+
+A delivery runs once its transaction has committed. How soon the dispatcher of the publishing process learns about
+the commit depends on who owns the transaction:
+
+| Transaction                                                                                               | Dispatcher woken                                                                                                                                                                                                                                |
+| --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| relaybus' own (`publish` without a transaction, `bus.receive`)                                            | right after the commit                                                                                                                                                                                                                          |
+| yours, PostgreSQL store with `pool`/`connectionString` (or `executor` plus `pool`) and `wakeUp: 'notify'` | at the commit: the publish statement sends `pg_notify` inside your transaction and PostgreSQL delivers it when the transaction commits, however long it takes. Measured: handler start a median of under 10 ms after a commit held back 200 ms. |
+| yours, any other store (MongoDB, `wakeUp: 'poll'`, an executor without `pool`)                            | 25, 100 and 250 ms after the latest publish, then at the next poll (`pollInterval`, default 1 s). Call `bus.wake()` right after your commit to claim at once.                                                                                   |
+
+`bus.transaction` and `@RelayBusTransaction()` count as your transaction here. `bus.wake()` is harmless when the
+dispatcher is not running, so it can sit in a shared "after commit" hook of your unit of work.
 
 ## MongoDB replica set
 

@@ -21,6 +21,7 @@ import type { PostgresExecutor } from './executor.js';
 import { resolvePostgresNames } from './names.js';
 import { NotificationListener } from './notification-listener.js';
 import { PgExecutor } from './pg-executor.js';
+import { withRootPool } from './root-pool-executor.js';
 import { PostgresAppend } from './postgres-append.js';
 import { PostgresClaims } from './postgres-claim.js';
 import { PostgresCompletion } from './postgres-completion.js';
@@ -370,7 +371,13 @@ function connect<TTransaction>(
   ownedPool: Pool | undefined;
 } {
   if (options.executor !== undefined) {
-    return { executor: options.executor, pool: undefined, ownedPool: undefined };
+    const { executor, pool } = options;
+    return {
+      executor:
+        pool === undefined ? executor : withRootPool(executor, new PgExecutor(pool, { logger })),
+      pool,
+      ownedPool: undefined,
+    };
   }
   const pool =
     options.pool ??

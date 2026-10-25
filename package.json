@@ -23,7 +23,7 @@
     "mutation": "stryker run",
     "release": "semantic-release",
     "release:dry-run": "semantic-release --dry-run --no-ci",
-    "prepare": "husky"
+    "prepare": "husky && node scripts/generate-test-prisma-client.mjs"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",

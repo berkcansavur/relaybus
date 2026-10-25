@@ -8,11 +8,11 @@ import {
   type MetricData,
 } from '@opentelemetry/sdk-metrics';
 import {
-  BasicTracerProvider,
+  TracerProvider,
   InMemorySpanExporter,
   SimpleSpanProcessor,
   type ReadableSpan,
-} from '@opentelemetry/sdk-trace-base';
+} from '@opentelemetry/sdk-trace';
 import { relayBusOpenTelemetry, type RelayBusOpenTelemetry } from '../src/index.js';
 
 /** One metric point: its attributes and value (a number, or a histogram's count and sum). */
@@ -23,9 +23,9 @@ export interface Point {
 
 export interface Telemetry {
   readonly otel: RelayBusOpenTelemetry;
-  readonly tracerProvider: BasicTracerProvider;
-  /** Spans ended so far, in the order they ended. */
-  spans(): ReadableSpan[];
+  readonly tracerProvider: TracerProvider;
+  /** Spans ended so far, in the order they ended (SDK 3 exports a span asynchronously, so this flushes first). */
+  spans(): Promise<ReadableSpan[]>;
   /** Every point of every metric collected now, by metric name. */
   collect(): Promise<Map<string, { metric: MetricData; points: Point[] }>>;
   shutdown(): Promise<void>;
@@ -46,8 +46,8 @@ export function enableContextPropagation(): () => void {
 /** relaybus OpenTelemetry on in-memory span and metric exporters. */
 export function createTelemetry(): Telemetry {
   const spanExporter = new InMemorySpanExporter();
-  const tracerProvider = new BasicTracerProvider({
-    spanProcessors: [new SimpleSpanProcessor(spanExporter)],
+  const tracerProvider = new TracerProvider({
+    spanProcessors: [new SimpleSpanProcessor({ exporter: spanExporter })],
   });
   const metricExporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
   const reader = new PeriodicExportingMetricReader({
@@ -59,7 +59,10 @@ export function createTelemetry(): Telemetry {
   return {
     otel: relayBusOpenTelemetry({ meterProvider, tracerProvider }),
     tracerProvider,
-    spans: () => spanExporter.getFinishedSpans(),
+    async spans() {
+      await tracerProvider.forceFlush();
+      return spanExporter.getFinishedSpans();
+    },
     async collect() {
       await reader.forceFlush();
       const latest = metricExporter.getMetrics().at(-1);

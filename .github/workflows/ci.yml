@@ -172,11 +172,58 @@ jobs:
       - name: Test packages/nestjs
         run: pnpm exec vitest run packages/nestjs
 
+  # Prisma 7 (latest) runs in the test job; this re-runs the Prisma tests on the previous major.
+  prisma-compat:
+    name: prisma compat (prisma ${{ matrix.prisma }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        prisma: ['6']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup workspace
+        uses: ./.github/actions/setup
+        with:
+          node-version: 24.x
+
+      # CI-only: re-resolve the Prisma dev dependencies of the postgres package to the matrix
+      # major. The modified package.json, lockfile and schema are never committed.
+      - name: Pin prisma to ${{ matrix.prisma }}
+        run: >
+          pnpm --filter @relaybus/postgres add --save-dev
+          prisma@${{ matrix.prisma }}
+          @prisma/client@${{ matrix.prisma }}
+          @prisma/adapter-pg@${{ matrix.prisma }}
+
+      # Prisma 6 still requires a url in the datasource block (Prisma 7 rejects it there).
+      - name: Generate the test client
+        run: |
+          sed -i 's/^  provider = "postgresql"$/  provider = "postgresql"\n  url      = env("DATABASE_URL")/' packages/postgres/test/prisma/schema.prisma
+          node scripts/generate-test-prisma-client.mjs
+          grep -rho '"clientVersion": "[^"]*"' packages/postgres/test/prisma/generated | head -1
+
+      - name: Verify Docker (Testcontainers)
+        run: docker version --format '{{.Server.Version}}'
+
+      - name: Test the Prisma adapter
+        run: >
+          pnpm exec vitest run
+          packages/postgres/test/adapters.integration.test.ts
+          packages/postgres/test/perf-design-orm-executors.integration.test.ts
+          packages/postgres/test/wake-after-commit.integration.test.ts
+          packages/postgres/test/prisma-executor.test.ts
+
   # Single required check for branch protection / rulesets.
   ci-pass:
     name: CI pass
     if: ${{ always() }}
-    needs: [quality, test, build, nestjs-compat]
+    needs: [quality, test, build, nestjs-compat, prisma-compat]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

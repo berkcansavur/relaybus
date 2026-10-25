@@ -102,15 +102,29 @@ Where the budget lives depends on who owns the pool:
 - **A pool or executor you pass in**: the budget is transaction-scoped (`SET LOCAL` semantics), set with `BEGIN` by
   `PgExecutor` and by its own statement for the other adapters. Session settings of your pool are never changed.
 
-**Prisma is not integration-tested yet.** The adapter is typed structurally (no Prisma dependency) and unit-tested
-against a fake client only. Prisma interactive transactions default to a 5 s timeout, so pass
-`createPrismaExecutor(prisma, { timeout, maxWait })` if handlers run longer.
+**Prisma** is integration-tested with a generated Prisma Client 7.10 (and 6.19 in CI) on the `@prisma/adapter-pg`
+driver adapter: the full event store contract, publishing in `prisma.$transaction`, rollback and concurrent
+transactions. The adapter is typed structurally, so the package has no Prisma dependency. Prisma interactive
+transactions default to a 5 s timeout, so pass `createPrismaExecutor(prisma, { timeout, maxWait })` if handlers run
+longer.
+
+**Give an ORM store the `pg` pool too.** ORMs send raw statements unprepared and offer no connection to `LISTEN` on.
+Pass the `pg` pool your ORM's driver uses as `pool` next to `executor`: the statements the store sends outside your
+transactions (the dispatcher's claims, completions and renewals) then run on it as prepared statements, and the
+store listens for wake-ups, so an event published in your ORM transaction is dispatched right after that
+transaction commits. Your transactions still go through the ORM, and the store never closes the pool.
+
+```ts
+const pool = new Pool({ connectionString });
+const prisma = new PrismaClient({ adapter: new PrismaPg(pool) });
+const store = new PostgresEventStore({ executor: createPrismaExecutor(prisma), pool });
+```
 
 ## Options
 
 | Option                                   | Default               | Meaning                                                                                                            |
 | ---------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `pool` / `connectionString` / `executor` | required, exactly one | How to reach the database.                                                                                         |
+| `pool` / `connectionString` / `executor` | required, exactly one | How to reach the database. With `executor`, `pool` may be given too (see above).                                   |
 | `poolConfig`                             | none                  | Extra `pg` pool settings when `connectionString` is used.                                                          |
 | `schema`                                 | `'public'`            | Schema of the tables. Created by `setup()` when it is not `public`.                                                |
 | `tablePrefix`                            | `'relaybus_'`         | Tables are `<prefix>events`, `<prefix>deliveries`, `<prefix>key_sequences`, `<prefix>lanes`.                       |
@@ -274,11 +288,16 @@ tool, run it as one transaction with the workers stopped. Running 0.1.0 and the 
   that channel (`<schema>.<prefix>deliveries`, hashed when longer than 63 characters) on one connection of its own,
   opened with the pool's settings outside the pool, so an event published by any process runs within milliseconds
   instead of at the next poll. A lost listening connection is replaced after a second; polling remains the safety
-  net, so a missed notification only costs latency. A store built on an `executor` cannot listen and relies on
-  polling (and on the wake-up of its own process after a publish). `wakeUp: 'poll'` sends and listens for nothing.
+  net, so a missed notification only costs latency. The notification of a publish in your own transaction is sent
+  by PostgreSQL at its commit, however late that is, so the handler starts within milliseconds of the commit
+  (`wake-after-commit.integration.test.ts`). A store built on an `executor` listens only when it is given `pool`
+  as well; without it, it relies on polling and on the wake-ups of its own process after a publish (see
+  `bus.wake()`). `wakeUp: 'poll'` sends and listens for nothing.
 - **Prepared statements.** With `preparedStatements: true` (the default) the publish, claim, completion and renewal
   statements are named prepared statements: each connection parses and plans them once. Only `PgExecutor` (the
-  default `pool` / `connectionString` path) prepares; the library adapters send every statement unprepared. See
+  default `pool` / `connectionString` path, and the `pool` given next to an `executor`) prepares; the library
+  adapters send the statements of your transactions unprepared (a dispatch batch on an ORM store parses 2 statements
+  without `pool`, 0 with it: `perf-design-orm-executors.integration.test.ts`). See
   `docs/performance/publish-path.md` for what that saves.
 - **Pooling.** Claim, complete, extend and purge need a free connection besides your transactions; size the pool for
   `dispatcher.concurrency` plus publishers; the listening connection comes on top of the pool's `max`. Listening and
@@ -310,12 +329,12 @@ tool, run it as one transaction with the workers stopped. Running 0.1.0 and the 
 ## Testing
 
 Integration tests use Testcontainers against `postgres:17-alpine` and `postgres:13-alpine` (override with
-`RELAYBUS_POSTGRES_IMAGES`). Every adapter except Prisma runs the full `@relaybus/testing` event store contract plus
-transaction tests against the real database.
+`RELAYBUS_POSTGRES_IMAGES`). Every adapter (Kysely, Knex, TypeORM, Drizzle, Prisma with and without `pool`) runs the
+full `@relaybus/testing` event store contract plus transaction tests against the real database.
 
 ## When to use @relaybus/postgres, and when not to
 
-Use it when your data lives in PostgreSQL 13 or newer and events must commit or roll back with it. It is not for MySQL or MongoDB (see `@relaybus/mongodb` for MongoDB), and the Prisma adapter is typed and unit-tested but not yet integration-tested.
+Use it when your data lives in PostgreSQL 13 or newer and events must commit or roll back with it. It is not for MySQL or MongoDB (see `@relaybus/mongodb` for MongoDB).
 
 Documentation: <https://berkcansavur.github.io/relaybus/packages/postgres>
 

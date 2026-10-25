@@ -13,3 +13,4 @@ docs-site/public
 docs-site/packages/*.md
 !docs-site/packages/index.md
 llms.txt
+packages/postgres/test/prisma/generated

@@ -50,7 +50,8 @@ export type EventPublisherParts<TTransaction> = {
   /** Logs or throws for an event no handler or route takes. */
   readonly reportUnrouted: (envelope: EventEnvelope) => void;
   /** Wakes the dispatcher shortly after new deliveries were stored. */
-  readonly scheduleWake: () => void;
+  /** Wakes the dispatcher for new deliveries; `committed` is false while the caller's transaction is open. */
+  readonly scheduleWake: (committed: boolean) => void;
 };
 
 /**
@@ -135,7 +136,7 @@ export class EventPublisher<TTransaction> {
       delayMs,
     }: { readonly context: PublishContext<TTransaction>; readonly delayMs: number },
   ): Promise<void> {
-    const result = await this.#appendInTransaction(entries, context);
+    const { result, committed } = await this.#appendInTransaction(entries, context);
     const appended = new Set(result.appendedEventIds);
     const published = entries
       .map((entry) => entry.event)
@@ -146,29 +147,33 @@ export class EventPublisher<TTransaction> {
         deliveries: result.appendedDeliveryCount,
       });
       if (delayMs === 0) {
-        this.#parts.scheduleWake();
+        this.#parts.scheduleWake(committed);
       }
     }
   }
 
+  /** Appends in the caller's transaction, else in one of the store's; `committed` tells which. */
   async #appendInTransaction(
     entries: readonly AppendEntry[],
     { options, scope, now }: PublishContext<TTransaction>,
-  ): Promise<AppendResult> {
+  ): Promise<{ readonly result: AppendResult; readonly committed: boolean }> {
     const { store, transactionMode, transactionResolver } = this.#parts;
     const transaction =
       options.transaction ??
       (scope?.transaction as TTransaction | undefined) ??
       transactionResolver?.();
     if (transaction !== undefined) {
-      return store.append(transaction, entries, now);
+      return { result: await store.append(transaction, entries, now), committed: false };
     }
     if (transactionMode === 'required') {
       throw new TransactionRequiredError(
         'publish found no transaction. Pass { transaction }, publish inside bus.transaction(), configure transactionResolver, or set transactionMode to optional',
       );
     }
-    return store.transaction((ownTransaction) => store.append(ownTransaction, entries, now));
+    const result = await store.transaction((ownTransaction) =>
+      store.append(ownTransaction, entries, now),
+    );
+    return { result, committed: true };
   }
 
   async #createEnvelope(input: CreateEnvelopeInput<TTransaction>): Promise<EventEnvelope> {

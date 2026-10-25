@@ -44,6 +44,7 @@ export default tseslint.config(
       '.stryker-tmp/**',
       'benchmarks/.cache/**',
       'docs-site/.vitepress/cache/**',
+      'packages/postgres/test/prisma/generated/**',
     ],
   },
   js.configs.recommended,

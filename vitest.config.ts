@@ -31,6 +31,8 @@ const serialIntegrationTests = [
   'packages/postgres/test/claim-concurrency.integration.test.ts',
   // Bounded shutdown: asserts how long stop takes on the wall clock.
   'packages/postgres/test/stop-deadline.integration.test.ts',
+  // Latency of the wake-up after a commit, against the wall clock.
+  'packages/postgres/test/wake-after-commit.integration.test.ts',
   // Ten dispatchers with their own pools or clients for about 20 s each.
   'packages/postgres/test/stress.integration.test.ts',
   'packages/mongodb/test/stress.integration.test.ts',

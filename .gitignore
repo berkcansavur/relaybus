@@ -23,3 +23,6 @@ docs-site/public/llms.txt
 docs-site/public/llms-full.txt
 stryker-setup-*.js
 stryker.log
+
+# Prisma Client generated for the integration tests (scripts/generate-test-prisma-client.mjs)
+packages/postgres/test/prisma/generated/

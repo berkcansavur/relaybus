@@ -1,0 +1,15 @@
+// Prisma schema of the integration tests: generated into ./generated (git-ignored) before the tests run.
+generator client {
+  provider = "prisma-client"
+  output   = "./generated"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Order {
+  id String @id
+
+  @@map("prisma_orders")
+}
