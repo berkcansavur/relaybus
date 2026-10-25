@@ -184,7 +184,25 @@ Same machine, same method and same database images as above (fingerprint `0c08a1
 | 32 publishers, 100 events per call                  |         69,580 |         68,493 |  0.98 |                         1.03 / 1.03 |
 | 8 publishers, 1 event per call, 1,000 distinct keys |          3,789 |          4,145 |  1.09 |                         4.03 / 4.02 |
 
-All intervals include 1.0, so none of these is a change. The publish cells that were not measured again after the fixes (8 publishers, five handlers, hot keys, the 4-process ceiling) came out at 0.79 to 1.02 in the full run with one sample each and 5 statements per event instead of 4; treat them as unmeasured for 0.3.0.
+All intervals include 1.0, so none of these is a change.
+
+A second targeted run (`2026-10-25T05-12-40-754Z`, candidate `13c2a13`, 2 samples per side) measured the remaining publish cells after the fixes:
+
+| Scenario                                                              | Ratio 0.3.0 / 0.2.0 |
+| --------------------------------------------------------------------- | ------------------: |
+| PostgreSQL, 8 publishers, 1 event per call                            |                1.00 |
+| PostgreSQL, 8 publishers, 100 events per call                         |                1.05 |
+| PostgreSQL, 4 processes x 8 publishers, 100 events per call (ceiling) |                0.97 |
+| PostgreSQL, 8 publishers, 1 event per call, 5 handlers                |                1.07 |
+| PostgreSQL, 8 publishers, 100 events per call, 5 handlers             |                1.02 |
+| PostgreSQL, 8 publishers, 1 event per call, 10 hot keys               |                0.98 |
+| PostgreSQL, 8 publishers, 1 event per call, 1 hot key                 |                1.09 |
+| MongoDB, 8 publishers, 1 event per call                               |                1.02 |
+| MongoDB, 8 publishers, 100 events per call                            |                0.94 |
+| MongoDB, 8 publishers, 100 events per call, 5 handlers                |                0.98 |
+| MongoDB, 8 publishers, 1 event per call, 10 hot keys                  |                1.06 |
+
+Every publish cell is now between 0.94 and 1.09 of 0.2.0, with two samples per side, so publishing is unchanged in 0.3.0.
 
 ### Dispatch on PostgreSQL (full run)
 

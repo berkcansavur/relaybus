@@ -65,6 +65,7 @@ Method: `pnpm bench:full --base v0.2.0`, interleaved on one machine (Apple M4, D
 | PostgreSQL mixed load, 5,000 per second, tuned    |            4,133 |            4,032 |         0.98 |         2 / 2         |
 | PostgreSQL routed keyed dispatch, 1,000 keys      |            3,267 |            5,827 |         1.78 |         1 / 1         |
 | PostgreSQL keyed dispatch, 1,000 keys, 4 workers  |            4,453 |            7,931 |         1.78 |         1 / 1         |
+| PostgreSQL and MongoDB publish, all other cells   |                - |                - | 0.94 to 1.09 |         2 / 2         |
 | PostgreSQL dispatch, all other cells              |                - |                - | 0.88 to 1.19 | 1 / 1, one cell 3 / 3 |
 | MongoDB dispatch, all cells                       |                - |                - | 0.98 to 1.06 | 1 / 1, one cell 3 / 3 |
 
