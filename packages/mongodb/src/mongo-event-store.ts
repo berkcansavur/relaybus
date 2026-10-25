@@ -16,7 +16,7 @@ import {
   type PurgeResult,
   type RelayBusLogger,
 } from '@relaybus/core';
-import { PositiveInteger } from '@relaybus/core/internal';
+import { HandedOutLedger, PositiveInteger } from '@relaybus/core/internal';
 import type { ClientSession, MongoClient, TransactionOptions } from 'mongodb';
 import { MongoAppend } from './mongo-append.js';
 import { MongoClaims } from './mongo-claim.js';
@@ -176,8 +176,7 @@ export class MongoEventStore implements EventStore<ClientSession> {
       purgeBatchSize,
       logger: options.logger ?? console,
       instanceId: createUuidV7(),
-      claimsInProgress: new Map(),
-      handedOut: new Map(),
+      handedOut: new HandedOutLedger(),
       unreconciledOwners: new Set(),
     };
     this.#state = state;
@@ -276,7 +275,8 @@ export class MongoEventStore implements EventStore<ClientSession> {
    */
   // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   extendLease(lease: LeaseReference, leaseExpiresAt: Date, _now?: Date): Promise<boolean> {
-    return this.#completion.extendLease(lease, leaseExpiresAt);
+    // A database answers with a promise; Promise.resolve returns it as it is.
+    return Promise.resolve(this.#completion.extendLease({ lease, leaseExpiresAt }));
   }
 
   /**
@@ -308,18 +308,27 @@ export class MongoEventStore implements EventStore<ClientSession> {
     error: ErrorInfo,
     now: Date,
   ): Promise<boolean> {
-    return this.#completion.reschedule(lease, { availableAt, error, now });
+    return Promise.resolve(
+      this.#completion.changeClaim({
+        lease,
+        change: { kind: 'reschedule', availableAt, error, now },
+      }),
+    );
   }
 
   /** Gives a running delivery back without counting the attempt: pending, due `now`. */
   release(lease: LeaseReference, now: Date): Promise<boolean> {
-    return this.#completion.release(lease, now);
+    return Promise.resolve(
+      this.#completion.changeClaim({ lease, change: { kind: 'release', now } }),
+    );
   }
 
   /** Moves a running delivery to dead and counts the attempt that ended. */
   // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   bury(lease: LeaseReference, error: ErrorInfo, now: Date): Promise<boolean> {
-    return this.#completion.bury(lease, { error, now });
+    return Promise.resolve(
+      this.#completion.changeClaim({ lease, change: { kind: 'bury', error, now } }),
+    );
   }
 
   /**

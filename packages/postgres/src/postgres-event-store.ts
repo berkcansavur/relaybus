@@ -16,7 +16,7 @@ import {
   type PurgeResult,
   type RelayBusLogger,
 } from '@relaybus/core';
-import { PositiveInteger } from '@relaybus/core/internal';
+import { HandedOutLedger, PositiveInteger } from '@relaybus/core/internal';
 import { Client, Pool, type PoolClient, type PoolConfig } from 'pg';
 import type { PostgresExecutor, PostgresQueryOptions } from './executor.js';
 import { resolvePostgresNames, type PostgresSchemaOptions } from './names.js';
@@ -168,10 +168,9 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       notifies: wakeUp === 'notify',
       query: ({ sql, parameters, transaction }) =>
         executor.query(sql, parameters, transaction, queryOptions),
-      handedOut: new Map(),
+      handedOut: new HandedOutLedger(),
       unreconciled: new Set(),
       generations: new Map(),
-      ownerQueues: new Map(),
       drainingOwners: new Set(),
       ownedPool,
       pool,
@@ -294,7 +293,8 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   }
 
   extendLease(lease: LeaseReference, leaseExpiresAt: Date): Promise<boolean> {
-    return this.#completion.extendLease(lease, leaseExpiresAt);
+    // A database answers with a promise; Promise.resolve returns it as it is.
+    return Promise.resolve(this.#completion.extendLease({ lease, leaseExpiresAt }));
   }
 
   // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
@@ -313,17 +313,26 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     error: ErrorInfo,
     now: Date,
   ): Promise<boolean> {
-    return this.#completion.reschedule(lease, { availableAt, error, now });
+    return Promise.resolve(
+      this.#completion.changeClaim({
+        lease,
+        change: { kind: 'reschedule', availableAt, error, now },
+      }),
+    );
   }
 
   // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   bury(lease: LeaseReference, error: ErrorInfo, now: Date): Promise<boolean> {
-    return this.#completion.bury(lease, { error, now });
+    return Promise.resolve(
+      this.#completion.changeClaim({ lease, change: { kind: 'bury', error, now } }),
+    );
   }
 
   /** Returns a leased delivery to pending, due now, without counting the attempt. */
   release(lease: LeaseReference, now: Date): Promise<boolean> {
-    return this.#completion.release(lease, now);
+    return Promise.resolve(
+      this.#completion.changeClaim({ lease, change: { kind: 'release', now } }),
+    );
   }
 
   /**

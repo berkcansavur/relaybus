@@ -52,17 +52,15 @@ export class InMemorySettlement extends LeaseSettlement<StoredDelivery> {
     return undefined;
   }
 
-  protected async writeChange(held: StoredDelivery, { change }: LeaseChange): Promise<boolean> {
+  protected writeChange(held: StoredDelivery, { change }: LeaseChange): boolean {
     applyTransition(held, change);
     return true;
   }
 
-  protected async writeExtension(
-    held: StoredDelivery,
-    { leaseExpiresAt, now }: LeaseExtension,
-  ): Promise<boolean> {
+  /** The in-memory store always passes `now`: its `extendLease` takes it from the port. */
+  protected writeExtension(held: StoredDelivery, { leaseExpiresAt, now }: LeaseExtension): boolean {
     held.leaseExpiresAt = leaseExpiresAt;
-    held.updatedAt = now;
+    held.updatedAt = now!;
     return true;
   }
 

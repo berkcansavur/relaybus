@@ -1,5 +1,9 @@
 import type { ClaimRequest, ClaimedDelivery } from '@relaybus/core';
-import { CompositeKey, DeliveryLeaseIdentity } from '@relaybus/core/internal';
+import {
+  CompositeKey,
+  DeliveryLeaseIdentity,
+  OwnerSerializedClaims,
+} from '@relaybus/core/internal';
 import { ClaimScan, orderingIdentity } from './claim-scan.js';
 import type { DeliveryDocument, LaneDocument } from './documents.js';
 import { formatLeaseToken, parseLeaseToken } from './lanes.js';
@@ -50,7 +54,7 @@ function scopeOf(held: readonly LaneDocument[]): Map<number, ScopeLane> {
 }
 
 /** Claims due deliveries for one owner at a time and reconciles the lanes after a failed claim. */
-export class MongoClaims {
+export class MongoClaims extends OwnerSerializedClaims {
   readonly #state: MongoStoreState;
   readonly #laneLeases: MongoLaneLeases;
   readonly #ordering: MongoOrdering;
@@ -64,30 +68,16 @@ export class MongoClaims {
       readonly queries: MongoQueries;
     },
   ) {
+    super();
     this.#state = state;
     this.#laneLeases = collaborators.laneLeases;
     this.#ordering = collaborators.ordering;
     this.#queries = collaborators.queries;
   }
 
-  /** Implements {@link MongoEventStore.claim}. */
-  async claim(request: ClaimRequest): Promise<ClaimedDelivery[]> {
-    if (request.handlers.length === 0 || request.limit <= 0) {
-      return [];
-    }
-    // Claims of one owner read the same held lanes and in-flight lists, so they must not overlap
-    // (bus.runOnce() next to a running dispatcher, for instance): they run one after the other.
-    const owner = request.leaseOwner;
-    const previous = this.#state.claimsInProgress.get(owner) ?? Promise.resolve();
-    const claimed = previous.then(() => this.#claimReconciled(request));
-    const settled = Promise.allSettled([claimed]);
-    this.#state.claimsInProgress.set(owner, settled);
-    void settled.then(() => {
-      if (this.#state.claimsInProgress.get(owner) === settled) {
-        this.#state.claimsInProgress.delete(owner);
-      }
-    });
-    return claimed;
+  /** Mongo claims nothing for a limit of 0 or below (a limit that is not a number is tried). */
+  protected override claimsNothing(request: ClaimRequest): boolean {
+    return request.handlers.length === 0 || request.limit <= 0;
   }
 
   /**
@@ -98,7 +88,7 @@ export class MongoClaims {
    * handed out and seen settled, is taken out of them, so nothing stays listed
    * as running that nobody runs.
    */
-  async #claimReconciled(request: ClaimRequest): Promise<ClaimedDelivery[]> {
+  protected async claimInTurn(request: ClaimRequest): Promise<ClaimedDelivery[]> {
     const owner = request.leaseOwner;
     if (this.#state.unreconciledOwners.has(owner)) {
       // An earlier reconciliation failed: a delivery may still be listed that nobody runs, and the
@@ -110,15 +100,12 @@ export class MongoClaims {
       const claimed = await this.#claimNow(request);
       for (const delivery of claimed) {
         const { laneId, epoch } = parseLeaseToken(delivery.leaseToken)!;
-        this.#state.handedOut.set(
-          DeliveryLeaseIdentity.of(delivery.deliveryId, delivery.leaseToken),
-          {
-            deliveryId: delivery.deliveryId,
-            owner: request.leaseOwner,
-            laneId,
-            epoch,
-          },
-        );
+        this.#state.handedOut.register(delivery, {
+          deliveryId: delivery.deliveryId,
+          owner: request.leaseOwner,
+          laneId,
+          epoch,
+        });
       }
       return claimed;
     } catch (error) {
@@ -170,11 +157,9 @@ export class MongoClaims {
           return !this.#state.handedOut.has(key);
         }),
       }));
-      for (const [key, entry] of this.#state.handedOut) {
-        if (entry.owner === owner && !current.has(key)) {
-          this.#state.handedOut.delete(key);
-        }
-      }
+      this.#state.handedOut.forgetWhere(
+        (entry, identity) => entry.owner === owner && !current.has(identity),
+      );
       if (held.length === 0) {
         return;
       }
@@ -313,14 +298,11 @@ export class MongoClaims {
           .map((id) => CompositeKey.of(id, `${lane._id}:${lane.epoch}`)),
       ),
     );
-    for (const [key, entry] of this.#state.handedOut) {
-      if (
+    this.#state.handedOut.forgetWhere(
+      (entry) =>
         entry.owner === owner &&
-        gone.has(CompositeKey.of(entry.deliveryId, `${entry.laneId}:${entry.epoch}`))
-      ) {
-        this.#state.handedOut.delete(key);
-      }
-    }
+        gone.has(CompositeKey.of(entry.deliveryId, `${entry.laneId}:${entry.epoch}`)),
+    );
   }
 
   /**

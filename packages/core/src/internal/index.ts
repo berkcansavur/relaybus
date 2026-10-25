@@ -33,6 +33,14 @@ export {
   type PayloadOnlyMapping,
   type WireField,
 } from './json-envelope.js';
+export { HandedOutLedger, type HandedOutEntry } from '../store-kit/handed-out-ledger.js';
+export {
+  LeaseSettlement,
+  type LeaseChange,
+  type LeaseExtension,
+  type SettlementChange,
+} from '../store-kit/lease-settlement.js';
+export { OwnerSerializedClaims } from '../store-kit/owner-serialized-claims.js';
 export {
   BoundedInteger,
   CompositeKey,

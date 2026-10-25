@@ -1,4 +1,5 @@
 import { type RelayBusLogger } from '@relaybus/core';
+import { type HandedOutLedger } from '@relaybus/core/internal';
 import { type Pool } from 'pg';
 import type {
   PostgresExecutor,
@@ -9,7 +10,7 @@ import type {
 import { type LaneLease } from './row-mapping.js';
 import { type PostgresStatements } from './statements.js';
 
-interface HandedOutClaim extends LaneLease {
+export interface HandedOutClaim extends LaneLease {
   readonly owner: string;
   readonly deliveryId: string;
 }
@@ -34,10 +35,9 @@ export type PostgresStoreState<TTransaction> = {
     readonly transaction?: TTransaction | undefined;
   }) => Promise<readonly PostgresRow[]>;
   /** Every claim handed to a caller and not settled yet, by delivery id and exact lease token. */
-  readonly handedOut: Map<string, HandedOutClaim>;
+  readonly handedOut: HandedOutLedger<HandedOutClaim>;
   readonly unreconciled: Set<string>;
   readonly generations: Map<string, bigint>;
-  readonly ownerQueues: Map<string, Promise<void>>;
   /** Owners whose last claim was filled from the lanes they held. */
   readonly drainingOwners: Set<string>;
   ownedPool: Pool | undefined;
