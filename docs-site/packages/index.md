@@ -1,11 +1,11 @@
 ---
 title: relaybus packages - core, NestJS, PostgreSQL, MongoDB, Kafka, RabbitMQ, testing
-description: The eight @relaybus npm packages - core, nestjs, postgres, mongodb, kafka, rabbitmq, testing and eslint-plugin - what each does and which ones to install together.
+description: The nine @relaybus npm packages - core, nestjs, postgres, mongodb, kafka, rabbitmq, testing, eslint-plugin and otel - what each does and which ones to install together.
 ---
 
 # Packages
 
-relaybus is published as eight npm packages under the `@relaybus` scope, released together with one shared version.
+relaybus is published as nine npm packages under the `@relaybus` scope, released together with one shared version.
 
 | Package                                              | Purpose                                                                                    |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------ |
@@ -17,6 +17,7 @@ relaybus is published as eight npm packages under the `@relaybus` scope, release
 | [`@relaybus/rabbitmq`](/packages/rabbitmq)           | RabbitMQ transport with publisher confirms, reconnects, quorum queues and dead letters.    |
 | [`@relaybus/testing`](/packages/testing)             | The store contract suite, a fake clock and an in-memory transport.                         |
 | [`@relaybus/eslint-plugin`](/packages/eslint-plugin) | ESLint rules: no calls to other services inside a transaction, no publish outside one.     |
+| [`@relaybus/otel`](/packages/otel)                   | OpenTelemetry metrics, backlog gauges and one trace across services.                       |
 
 ## Typical installs
 
@@ -34,6 +35,9 @@ pnpm add @relaybus/rabbitmq amqplib
 # tests and lint rules
 pnpm add -D @relaybus/testing vitest
 pnpm add -D @relaybus/eslint-plugin
+
+# metrics and traces
+pnpm add @relaybus/otel @opentelemetry/api
 ```
 
 Bring your own store: implement the `EventStore` interface and run the contract suite from `@relaybus/testing` against it.

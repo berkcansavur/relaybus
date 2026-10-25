@@ -33,6 +33,10 @@ export const packages = [
     name: 'eslint-plugin',
     blurb: 'ESLint rules: no external calls inside a transaction, no publish outside one.',
   },
+  {
+    name: 'otel',
+    blurb: 'OpenTelemetry metrics, backlog gauges and traces across services.',
+  },
 ];
 
 /** Ordered sections. `path` is the page path without extension, relative to the site root. */
@@ -100,6 +104,12 @@ export const sections = [
           'What happens to events that exhaust their retries, and how to inspect and requeue them.',
       },
       {
+        title: 'Observability',
+        path: 'concepts/observability',
+        description:
+          'OpenTelemetry metrics and traces for relaybus: the metrics, one trace across services, a collector and Prometheus setup, and alerts on backlog age and dead letters.',
+      },
+      {
         title: 'Error codes',
         path: 'concepts/error-codes',
         description:
@@ -114,7 +124,7 @@ export const sections = [
         title: 'All packages',
         path: 'packages/',
         description:
-          'The eight @relaybus packages: core, nestjs, postgres, mongodb, kafka, rabbitmq, testing and eslint-plugin.',
+          'The nine @relaybus packages: core, nestjs, postgres, mongodb, kafka, rabbitmq, testing, eslint-plugin and otel.',
       },
       ...packages.map((p) => ({
         title: `@relaybus/${p.name}`,

@@ -2,7 +2,7 @@
 
 > relaybus is a reliable, storage-agnostic event bus for NestJS and Node.js: a transactional outbox with per-handler retries, leases, dead letters and ordering keys for PostgreSQL and MongoDB, with Kafka and RabbitMQ transports.
 
-relaybus stores every event in the same database transaction as your business data (the transactional outbox pattern), then delivers it to each handler and broker with independent retries, leases and dead letters. Packages: @relaybus/core, @relaybus/nestjs, @relaybus/postgres, @relaybus/mongodb, @relaybus/kafka, @relaybus/rabbitmq, @relaybus/testing, @relaybus/eslint-plugin. Requires Node.js 22.12 or newer; NestJS 11 or 12 for the NestJS module.
+relaybus stores every event in the same database transaction as your business data (the transactional outbox pattern), then delivers it to each handler and broker with independent retries, leases and dead letters. Packages: @relaybus/core, @relaybus/nestjs, @relaybus/postgres, @relaybus/mongodb, @relaybus/kafka, @relaybus/rabbitmq, @relaybus/testing, @relaybus/eslint-plugin, @relaybus/otel. Requires Node.js 22.12 or newer; NestJS 11 or 12 for the NestJS module.
 
 ## Start here
 
@@ -18,11 +18,12 @@ relaybus stores every event in the same database transaction as your business da
 - [Ordering keys](https://berkcansavur.github.io/relaybus/concepts/ordering-keys.md): Per-key ordering in commit order: how the sequence is assigned and what it does and does not promise.
 - [Compile-time safety with event catalogs](https://berkcansavur.github.io/relaybus/concepts/event-catalogs.md): Group events in a catalog so the TypeScript compiler rejects a missing handler, a wrong payload or an event published to the wrong catalog, and a boot check catches the rest.
 - [Dead letters](https://berkcansavur.github.io/relaybus/concepts/dead-letters.md): What happens to events that exhaust their retries, and how to inspect and requeue them.
+- [Observability](https://berkcansavur.github.io/relaybus/concepts/observability.md): OpenTelemetry metrics and traces for relaybus: the metrics, one trace across services, a collector and Prometheus setup, and alerts on backlog age and dead letters.
 - [Error codes](https://berkcansavur.github.io/relaybus/concepts/error-codes.md): The stable, machine-readable code of every relaybus error, stored with dead letters and reported to observers.
 
 ## Packages
 
-- [All packages](https://berkcansavur.github.io/relaybus/packages/index.md): The eight @relaybus packages: core, nestjs, postgres, mongodb, kafka, rabbitmq, testing and eslint-plugin.
+- [All packages](https://berkcansavur.github.io/relaybus/packages/index.md): The nine @relaybus packages: core, nestjs, postgres, mongodb, kafka, rabbitmq, testing, eslint-plugin and otel.
 - [@relaybus/core](https://berkcansavur.github.io/relaybus/packages/core.md): Reliable event bus for Node.js: a transactional outbox with per-handler deliveries, retries with jitter, dead letters and per-key ordering on top of your own database.
 - [@relaybus/nestjs](https://berkcansavur.github.io/relaybus/packages/nestjs.md): NestJS event bus module for relaybus: @RelayBusConsumer handlers on a transactional outbox, with retries, dead letters and graceful shutdown, so events are never lost between your database and your handlers.
 - [@relaybus/postgres](https://berkcansavur.github.io/relaybus/packages/postgres.md): PostgreSQL event store for relaybus: a transactional outbox written in your own transaction (pg, Prisma, TypeORM, Drizzle, Knex, Kysely) with SKIP LOCKED leasing and per-key ordering.
@@ -31,6 +32,7 @@ relaybus stores every event in the same database transaction as your business da
 - [@relaybus/rabbitmq](https://berkcansavur.github.io/relaybus/packages/rabbitmq.md): RabbitMQ transport for relaybus: publisher-confirmed publishing from the transactional outbox and acknowledged, idempotent consumption with retry queues and dead-letter queues.
 - [@relaybus/testing](https://berkcansavur.github.io/relaybus/packages/testing.md): Testing utilities for relaybus: the EventStore contract suite, a FakeClock and an in-memory transport for deterministic tests of retries, delays and dead letters.
 - [@relaybus/eslint-plugin](https://berkcansavur.github.io/relaybus/packages/eslint-plugin.md): ESLint rules for relaybus: no calls to other services inside a transaction, and no publish outside a transaction, so outbox transactions stay short and events stay atomic with your writes.
+- [@relaybus/otel](https://berkcansavur.github.io/relaybus/packages/otel.md): OpenTelemetry for relaybus: messaging metrics after the semantic conventions, outbox backlog gauges, and one trace from publish in one service to the handler in another, with W3C trace context in event headers.
 
 ## Recipes
 

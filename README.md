@@ -115,6 +115,7 @@ database (an HTTP call can repeat; send an idempotency key), or global ordering.
 | [`@relaybus/rabbitmq`](packages/rabbitmq)           | RabbitMQ transport with publisher confirms, reconnects, quorum queues and dead letters.    |
 | [`@relaybus/testing`](packages/testing)             | The store contract suite, a fake clock and an in-memory transport.                         |
 | [`@relaybus/eslint-plugin`](packages/eslint-plugin) | ESLint rules: no calls to other services inside a transaction, no publish outside one.     |
+| [`@relaybus/otel`](packages/otel)                   | OpenTelemetry metrics, backlog gauges and one trace across services.                       |
 
 Bring your own store: implement the `EventStore` interface and run the contract
 suite from `@relaybus/testing` against it.
@@ -208,7 +209,10 @@ const stats = await bus.statistics(); // pending, processing, dead, oldestDueAt;
 ```
 
 Observers receive every lifecycle event (published, started, succeeded, retry
-scheduled, dead, lease lost, released, purged, failures) for logs and metrics.
+scheduled, dead, lease lost, released, purged, failures) and timed hooks (publish, claim,
+handler, send, receive, backlog) for logs and metrics. `@relaybus/otel` turns them into
+OpenTelemetry metrics and adds one trace from `publish` in one service to the handler in
+another; see [Observability](https://berkcansavur.github.io/relaybus/concepts/observability).
 
 ## Defaults
 

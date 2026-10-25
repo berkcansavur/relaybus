@@ -101,7 +101,9 @@ Use a database store in production: [`@relaybus/postgres`](../postgres) or
 | `retention.interval`                      | `'1h'`                                        | Cleanup cadence.                                                                                                                              |
 | `transports` / `routes` / `subscriptions` | —                                             | Broker integration, see below.                                                                                                                |
 | `setupStore`                              | `true`                                        | Create tables and indexes on `start`.                                                                                                         |
-| `observers`                               | `[]`                                          | Lifecycle hooks for logs, metrics and tracing.                                                                                                |
+| `observers`                               | `[]`                                          | Lifecycle hooks for logs, metrics and tracing (see Observability below).                                                                      |
+| `tracer`                                  | none                                          | Spans around publish, send and handler runs; writes `traceparent`/`tracestate` into published events. `@relaybus/otel` provides one.          |
+| `backlogInterval`                         | off                                           | Reads `statistics()` this often while running and reports it to `onBacklog`.                                                                  |
 | `logger`                                  | `console`                                     | `{ log, warn, error }`.                                                                                                                       |
 | `clock`, `generateIdentifier`, `random`   | system                                        | Replace in tests. A clock with `schedule` also runs the bus's timers.                                                                         |
 
@@ -329,6 +331,17 @@ const { graceful, abandonedDeliveries, durationMs } = await bus.stop({ timeout: 
 Abandoned deliveries keep their lease until it expires (`dispatcher.leaseDuration`), then another
 process runs them again: at-least-once still holds, so keep handlers idempotent. Kafka's
 `disconnect` has no forced variant; past the deadline the bus simply stops waiting for it.
+
+**Observability.** Besides the lifecycle hooks, observers can implement timed hooks:
+`onPublishFinished` (event types, duration, outcome), `onClaimFinished` (requested, claimed,
+lanes, duration), `onHandlerStarted` (end-to-end latency from `occurredAt`),
+`onHandlerFinished` (duration, outcome, error with its code), `onTransportSent` (transport,
+system, destination, duration, outcome), `onReceiveFinished` (transport, destination, source,
+trace context; `accepted`, `duplicate`, `ignored`, `invalid` or `error`) and `onBacklog`
+(pending deliveries and age of the oldest due one, every `backlogInterval`). A hook no observer
+implements costs nothing, not even a clock read. Hooks run synchronously and must not throw; a
+throwing hook is reported to `onFailure` with stage `observer`. `traceContextOf(event.headers)`
+returns the W3C trace context an event carries. `@relaybus/otel` maps all of it to OpenTelemetry.
 
 **Completed deliveries are deleted.** Completing a delivery removes its row instead
 of updating it, which is what keeps the write cost of a delivery constant (see
