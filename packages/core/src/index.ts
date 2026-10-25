@@ -23,15 +23,19 @@ export {
   type SubscribeCatalogOptions,
 } from './catalog.js';
 export {
+  AttemptsExhaustedError,
   ConfigurationError,
   DispatcherStoppedError,
+  DrainIncompleteError,
   EventValidationError,
   HandlerTimeoutError,
   InvalidEnvelopeError,
   LeaseLostError,
+  LifecycleError,
   NonRetryableError,
   RelayBusError,
   TransactionRequiredError,
+  TransactionTimeoutError,
   toErrorInfo,
   type ErrorInfo,
   type ValidationIssue,
@@ -40,11 +44,13 @@ export {
   assertEventType,
   defineEvent,
   validatePayload,
+  type DefineEventKeyOptions,
   type DefineEventOptions,
   type DomainEvent,
   type EventClass,
   type EventEnvelope,
   type EventHeaders,
+  type EventKeyFunction,
   type EventReference,
   type PayloadOf,
 } from './event.js';
@@ -54,11 +60,13 @@ export {
   type AppendResult,
   type ClaimRequest,
   type ClaimedDelivery,
+  type CloseOptions,
   type DeliveryQuery,
   type DeliveryRecord,
   type DeliveryStatus,
   type EventStore,
   type EventStoreStatistics,
+  type EventStoreTransactionOptions,
   type LeaseReference,
   type NewDelivery,
   type PurgeRequest,
@@ -71,12 +79,24 @@ export type {
   SubscribeOptions,
 } from './handler-registry.js';
 export { createUuidV7, type IdentifierGenerator } from './identifier.js';
-export {
-  InMemoryEventStore,
-  InMemoryTransaction,
-  type InMemoryEventStoreOptions,
-} from './in-memory-event-store.js';
-export type { FailureStage, RelayBusLogger, RelayBusObserver } from './observer.js';
+export { InMemoryEventStore, type InMemoryEventStoreOptions } from './in-memory-event-store.js';
+export { InMemoryTransaction } from './in-memory-transaction.js';
+export type {
+  BacklogEvent,
+  ClaimFinishedEvent,
+  DeliveryKind,
+  FailureStage,
+  HandlerFinishedEvent,
+  HandlerStartedEvent,
+  InvalidMessageEvent,
+  OperationOutcome,
+  PublishFinishedEvent,
+  ReceiveFinishedEvent,
+  ReceiveOutcome,
+  RelayBusLogger,
+  RelayBusObserver,
+  TransportSentEvent,
+} from './observer.js';
 export {
   RelayBus,
   type DispatcherOptions,
@@ -100,5 +120,22 @@ export {
   type RetryPolicy,
   type RetryPolicyOptions,
 } from './retry-policy.js';
+export type { StopOptions, StopResult } from './shutdown-deadline.js';
 export type { StandardSchemaV1 } from './standard-schema.js';
-export type { Transport, TransportMessageHandler } from './transport.js';
+export {
+  TRACEPARENT_HEADER,
+  TRACESTATE_HEADER,
+  traceContextOf,
+  type ProcessTraceInput,
+  type PublishTraceInput,
+  type RelayBusTracer,
+  type SendTraceInput,
+  type TraceContext,
+} from './tracing.js';
+export type {
+  InvalidTransportMessage,
+  Transport,
+  TransportMessage,
+  TransportMessageHandler,
+  TransportSubscriptionHooks,
+} from './transport.js';

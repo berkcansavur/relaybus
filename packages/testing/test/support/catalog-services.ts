@@ -95,6 +95,8 @@ export async function startServiceDatabases(): Promise<ServiceDatabases> {
 export interface ServiceRecord {
   readonly handled: string[];
   readonly received: ReceiveStatus[];
+  /** `<type>:<key>` of every event the broker handed in, in arrival order. */
+  readonly arrivals: string[];
 }
 
 /** The parts of a service bus the tests drive. */
@@ -154,7 +156,7 @@ export function createOrdersService(
     // The tests read completed deliveries back (to wait on them and replay them).
     completionHistory: true,
   });
-  const record: ServiceRecord = { handled: [], received: [] };
+  const record: ServiceRecord = { handled: [], received: [], arrivals: [] };
   const routes: RouteOptions[] = [
     {
       event: OrderPlaced,
@@ -181,7 +183,14 @@ export function createOrdersService(
     ],
     dispatcher: { pollInterval: '20ms' },
     retry: { initialDelay: '50ms', maxDelay: '200ms', jitter: 'none' },
-    observers: [{ onReceived: ({ status }) => void record.received.push(status) }],
+    observers: [
+      {
+        onReceived: ({ envelope, status }) => {
+          record.received.push(status);
+          record.arrivals.push(`${envelope.type}:${envelope.key}`);
+        },
+      },
+    ],
     logger: silentLogger,
   });
   if (options.withoutHandlers !== true) {
@@ -266,7 +275,7 @@ export function createShippingService(
   const shipments = databases.mongo
     .db(database)
     .collection<{ _id: string; status: string }>('shipments');
-  const record: ServiceRecord = { handled: [], received: [] };
+  const record: ServiceRecord = { handled: [], received: [], arrivals: [] };
   const bus = new RelayBus({
     store,
     source: 'shipping',
@@ -293,7 +302,14 @@ export function createShippingService(
     ],
     dispatcher: { pollInterval: '20ms' },
     retry: { initialDelay: '50ms', maxDelay: '200ms', jitter: 'none', attempts: 3 },
-    observers: [{ onReceived: ({ status }) => void record.received.push(status) }],
+    observers: [
+      {
+        onReceived: ({ envelope, status }) => {
+          record.received.push(status);
+          record.arrivals.push(`${envelope.type}:${envelope.key}`);
+        },
+      },
+    ],
     logger: silentLogger,
   });
   const shipped = bus.forCatalog(OrderEvents, { events: ['OrderShipped'] });

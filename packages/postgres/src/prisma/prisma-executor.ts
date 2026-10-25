@@ -33,6 +33,7 @@ export function createPrismaExecutor(
 ): PostgresExecutor<PrismaQueryable> {
   return {
     transaction: (work) => client.$transaction(work, transactionOptions),
+    // eslint-disable-next-line relaybus/max-two-params -- PostgresExecutor port signature
     async query(sql, parameters: readonly PostgresParameter[], transaction) {
       return (await (transaction ?? client).$queryRawUnsafe(sql, ...parameters)) as PostgresRow[];
     },

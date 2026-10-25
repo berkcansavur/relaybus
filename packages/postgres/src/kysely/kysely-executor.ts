@@ -21,6 +21,7 @@ export interface KyselyLike extends KyselyQueryable {
 export function createKyselyExecutor(database: KyselyLike): PostgresExecutor<KyselyQueryable> {
   return {
     transaction: (work) => database.transaction().execute(work),
+    // eslint-disable-next-line relaybus/max-two-params -- PostgresExecutor port signature
     async query(sql, parameters: readonly PostgresParameter[], transaction) {
       const result = await (transaction ?? database).executeQuery<PostgresRow>(
         CompiledQuery.raw(sql, [...parameters]),

@@ -1,8 +1,7 @@
 // One benchmark process: a publisher / loader or a dispatcher instance with its own pool and RelayBus.
 // It loads the packages of the side named by BENCH_SIDE_ROOT, so a base and a candidate checkout run the same worker code.
 import { monitorEventLoopDelay, type IntervalHistogram } from 'node:perf_hooks';
-import type { EventStore, RelayBus, RelayBusObserver } from '@relaybus/core';
-import type { Pool } from 'pg';
+import type { EventStore, RelayBus, RelayBusObserver, Transport } from '@relaybus/core';
 import type { MongoClient } from 'mongodb';
 import { loadSide } from './lib/deps.ts';
 import { Hist } from './lib/hist.ts';
@@ -28,6 +27,25 @@ class Bench extends side.core.defineEvent<Payload>('bench.order.placed.v1') {}
 
 const PAD = 'x'.repeat(160);
 
+/**
+ * Stands in for a broker: acks a send after a fixed delay and reports the send to the consumer side, which is what the
+ * exactness and per-key order checks read. Both releases accept it unchanged (`name`, `publish`, `close`).
+ */
+function fakeTransport(
+  ackMs: number,
+  report: ((w: number, n: number) => void) | undefined,
+): Transport {
+  return {
+    name: 'bench-fake',
+    publish: async (envelope) => {
+      const payload = envelope.payload as Payload;
+      report?.(payload.w, payload.n);
+      await sleep(ackMs);
+    },
+    close: async () => undefined,
+  };
+}
+
 /** The part of RelayBus the worker uses, independent of the store's transaction type. */
 interface BenchBus {
   start(): Promise<void>;
@@ -47,6 +65,8 @@ function adapt<TTransaction>(
       pollInterval?: number;
     };
     observer: RelayBusObserver;
+    /** Route every event to a fake transport instead of registering local handlers. */
+    transport?: Transport;
   },
 ): BenchBus {
   const silent = { log: () => undefined, warn: () => undefined, error: () => undefined };
@@ -57,10 +77,18 @@ function adapt<TTransaction>(
     retention: { completed: false, dead: false },
     observers: [options.observer],
     logger: silent,
+    ...(options.transport === undefined
+      ? {}
+      : {
+          transports: [options.transport],
+          routes: [{ event: Bench, transport: options.transport.name, destination: 'bench' }],
+        }),
   });
   return {
     start: () => bus.start(),
-    stop: () => bus.stop(),
+    stop: async () => {
+      await bus.stop();
+    },
     subscribe: (id, handler) => void bus.subscribe(Bench, handler, { id }),
     publishInTransaction: (events, key) =>
       bus.transaction(async (transaction) => {
@@ -77,7 +105,7 @@ function adapt<TTransaction>(
 
 let init: WorkerInit | undefined;
 let bus: BenchBus | undefined;
-let pool: Pool | undefined;
+let pgStore: { close(): Promise<void> } | undefined;
 let client: MongoClient | undefined;
 let loopDelay: IntervalHistogram | undefined;
 let stopping = false;
@@ -124,10 +152,27 @@ async function setup(message: WorkerInit): Promise<void> {
           pollInterval: message.cfg.pollMs,
         }
       : { enabled: false };
+  const trackHandled = message.role === 'dispatcher' && message.cfg.trackHandled;
+  const routed = cfg.routeAckMs !== undefined;
+  const transport = routed
+    ? fakeTransport(
+        cfg.routeAckMs ?? 0,
+        trackHandled ? (w, n) => void tracked.push([w, n * 16 + 1, nowMs()]) : undefined,
+      )
+    : undefined;
   if (backend === 'pg') {
-    pool = new side.pg.Pool({ connectionString: url, max: cfg.pool });
-    pool.on('error', () => undefined);
-    bus = adapt(new side.postgres.PostgresEventStore({ pool }), { dispatcher, observer });
+    // The store creates and owns its pool, the usual deployment: both releases accept these options.
+    const store = new side.postgres.PostgresEventStore({
+      connectionString: url,
+      poolConfig: { max: cfg.pool },
+      logger: { log: () => undefined, warn: () => undefined, error: () => undefined },
+    });
+    pgStore = store;
+    bus = adapt(store, {
+      dispatcher,
+      observer,
+      ...(transport === undefined ? {} : { transport }),
+    });
   } else {
     client = await new side.mongoDriver.MongoClient(url, {
       directConnection: true,
@@ -136,11 +181,11 @@ async function setup(message: WorkerInit): Promise<void> {
     bus = adapt(new side.mongoPackage.MongoEventStore({ client, database }), {
       dispatcher,
       observer,
+      ...(transport === undefined ? {} : { transport }),
     });
   }
-  // Publishers register the handlers too, so that the store writes one delivery per handler.
-  const trackHandled = message.role === 'dispatcher' && message.cfg.trackHandled;
-  for (let handlerNumber = 1; handlerNumber <= cfg.handlers; handlerNumber += 1) {
+  // Publishers register the handlers too, so that the store writes one delivery per handler (a route replaces them).
+  for (let handlerNumber = 1; !routed && handlerNumber <= cfg.handlers; handlerNumber += 1) {
     bus.subscribe(`h${handlerNumber}`, (event) => {
       if (trackHandled)
         tracked.push([event.payload.w, event.payload.n * 16 + handlerNumber, nowMs()]);
@@ -151,7 +196,7 @@ async function setup(message: WorkerInit): Promise<void> {
 }
 
 async function closeClients(): Promise<void> {
-  await pool?.end().catch(() => undefined);
+  await pgStore?.close().catch(() => undefined);
   await client?.close().catch(() => undefined);
 }
 

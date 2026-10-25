@@ -96,7 +96,9 @@ describe('ConnectionSupervisor', () => {
       expect.stringContaining('[ConnectionSupervisor](start) Broker unreachable'),
     );
     expect(logger.log).toHaveBeenCalledWith(
-      expect.stringContaining('[ConnectionSupervisor](reconnect) Reconnected | attempt=2'),
+      expect.stringContaining(
+        '[ConnectionSupervisor](reconnectUntilConnected) Reconnected | attempt=2',
+      ),
     );
     await supervisor.close(async () => undefined);
   });

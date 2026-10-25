@@ -3,7 +3,7 @@
 // dispatch and mixed sample, and publish samples check that the database holds exactly the rows that were published.
 import type { Backend } from './backends.ts';
 import type { Cell, DispatchCell, MixedCell, PublishCell, TemplateDefinition } from './cells.ts';
-import { NO_KEYS } from './cells.ts';
+import { NO_KEYS, ROUTED_ACK_MS } from './cells.ts';
 import { counterMetrics } from './db-metrics.ts';
 import type { SideModules } from './deps.ts';
 import { Fleet, nowMs, sleep, sleepUntil } from './fleet.ts';
@@ -52,7 +52,7 @@ function publisherInits(
   cell: Pick<
     PublishCell,
     'procs' | 'loops' | 'batch' | 'handlers' | 'keys' | 'pool' | 'warmupMs' | 'durationMs'
-  >,
+  > & { readonly routed?: boolean },
   maxEvents?: number,
 ): WorkerInit[] {
   const connection = context.backend.connection(database);
@@ -66,6 +66,7 @@ function publisherInits(
       batch: cell.batch,
       handlers: cell.handlers,
       keys: cell.keys,
+      ...(cell.routed === true ? { routeAckMs: ROUTED_ACK_MS } : {}),
       pool: cell.pool,
       warmupMs: cell.warmupMs,
       durationMs: cell.durationMs,
@@ -228,6 +229,7 @@ function dispatcherInits(
   database: string,
   cell: DispatchCell | MixedCell,
   handlers: number,
+  routed = false,
 ): WorkerInit[] {
   const connection = context.backend.connection(database);
   return Array.from({ length: cell.instances }, () => ({
@@ -241,6 +243,7 @@ function dispatcherInits(
       pollMs: cell.pollMs,
       pool: cell.pool,
       trackHandled: true,
+      ...(routed ? { routeAckMs: ROUTED_ACK_MS } : {}),
     },
   }));
 }
@@ -260,7 +263,7 @@ async function measureDispatch(
   const handledAll: HandledItem[] = [];
   const fleet = new Fleet(
     context.roots[side],
-    dispatcherInits(context, database, cell, cell.handlers),
+    dispatcherInits(context, database, cell, cell.handlers, cell.routed === true),
     (message: FromWorker) => {
       if (message.t === 'handled') for (const item of message.items) handledAll.push(item);
     },
@@ -291,6 +294,7 @@ async function measureDispatch(
       data: await backend.validationData(database),
       drained,
       leaseLost: results.reduce((total, result) => total + result.leaseLost, 0),
+      routed: cell.routed === true,
     });
     const reasons = [...validation.reasons];
     if (seconds < 1)

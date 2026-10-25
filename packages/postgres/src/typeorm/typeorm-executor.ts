@@ -21,6 +21,7 @@ export function createTypeOrmExecutor(
 ): PostgresExecutor<TypeOrmQueryable> {
   return {
     transaction: (work) => dataSource.transaction(work),
+    // eslint-disable-next-line relaybus/max-two-params -- PostgresExecutor port signature
     async query(sql, parameters: readonly PostgresParameter[], transaction) {
       return (await (transaction ?? dataSource).query(sql, [...parameters])) as PostgresRow[];
     },

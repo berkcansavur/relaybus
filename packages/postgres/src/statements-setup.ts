@@ -1,0 +1,40 @@
+import type { PostgresNames } from './names.js';
+
+/** Statements of `setup`: the setup lock and the schema check. */
+export class SetupStatements {
+  readonly #names: PostgresNames;
+
+  constructor(names: PostgresNames) {
+    this.#names = names;
+  }
+
+  /**
+   * Lock advisory key text for {@link setupLock}. It is derived from the schema
+   * name only, so stores with different table prefixes in one schema also
+   * serialize their `CREATE SCHEMA IF NOT EXISTS`, which is not race-free.
+   */
+  get setupLockKey(): string {
+    return `relaybus:${this.#names.schema}`;
+  }
+
+  /**
+   * Whether the lane table carries `marker` as its comment, that is whether the schema statements
+   * that produce that marker already ran. Takes no table lock. Parameters: `[marker]`.
+   */
+  get schemaCurrent(): string {
+    // Reads the catalogs with the statement's snapshot. `to_regclass` and `obj_description` would go
+    // through the backend's catalog caches, which keep "no such table" until the session processes
+    // invalidations; a setup that waited for the setup lock would then miss a schema created meanwhile.
+    return `SELECT EXISTS (
+  SELECT 1 FROM pg_catalog.pg_class AS c
+  JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+  JOIN pg_catalog.pg_description AS d
+    ON d.objoid = c.oid AND d.classoid = 'pg_catalog.pg_class'::regclass AND d.objsubid = 0
+  WHERE n.nspname = '${this.#names.schema}' AND c.relname = '${this.#names.lanesTableName}' AND d.description = $1::text
+) AS current`;
+  }
+
+  get setupLock(): string {
+    return 'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))';
+  }
+}

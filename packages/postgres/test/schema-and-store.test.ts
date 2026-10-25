@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import { ConfigurationError } from '@relaybus/core';
 import type { Pool, PoolClient } from 'pg';
@@ -191,7 +192,10 @@ describe('PostgresEventStore options', () => {
 
 describe('PgExecutor', () => {
   function createPool(clientQuery: (sql: string) => Promise<unknown>) {
-    const client = { query: vi.fn(clientQuery), release: vi.fn() };
+    const client = Object.assign(new EventEmitter(), {
+      query: vi.fn(clientQuery),
+      release: vi.fn(),
+    });
     const pool = { connect: vi.fn(async () => client), query: vi.fn() };
     return { client, pool, executor: new PgExecutor(pool as unknown as Pool) };
   }
@@ -201,6 +205,42 @@ describe('PgExecutor', () => {
     await expect(executor.transaction(async () => 'done')).resolves.toBe('done');
     expect(client.query.mock.calls.map(([sql]) => sql)).toEqual(['BEGIN', 'COMMIT']);
     expect(client.release).toHaveBeenCalledWith();
+  });
+
+  it('survives the server ending the session of an open transaction', async () => {
+    const warn = vi.fn();
+    const client = Object.assign(new EventEmitter(), {
+      query: vi.fn(async (_sql: string) => ({ rows: [] as unknown[] })),
+      release: vi.fn(),
+    });
+    const pool = { connect: vi.fn(async () => client), query: vi.fn() };
+    const executor = new PgExecutor(pool as unknown as Pool, {
+      logger: { log: vi.fn(), warn, error: vi.fn() },
+    });
+    expect(executor.sessionTimeouts).toBe(true);
+
+    client.query.mockImplementation(async (sql: string) => {
+      if (sql === 'COMMIT' && client.release.mock.calls.length > 0) {
+        throw new Error('Client was closed and is not queryable');
+      }
+      return { rows: [] };
+    });
+    await expect(
+      executor.transaction(async () => {
+        client.emit(
+          'error',
+          new Error('terminating connection due to idle-in-transaction timeout'),
+        );
+        // The dead connection went back to the pool at once, destroyed.
+        expect(client.release).toHaveBeenCalledWith(true);
+      }),
+    ).rejects.toThrow('Client was closed and is not queryable');
+    expect(client.release).toHaveBeenCalledTimes(1);
+
+    expect(warn).toHaveBeenCalledWith(
+      '[PgExecutor](transaction) The server ended the session of an open transaction, the transaction fails | error=terminating connection due to idle-in-transaction timeout',
+    );
+    expect(client.listenerCount('error')).toBe(0);
   });
 
   it('rolls back and reuses the client when the work fails', async () => {
@@ -442,9 +482,7 @@ describe('wake-up notifications', () => {
       await failing.append(new Date(0));
       await vi.advanceTimersByTimeAsync(10);
       expect(failing.logger.error).toHaveBeenCalledWith(
-        expect.stringContaining(
-          '[PostgresEventStore](wakeAfterCommit) Waking the dispatchers failed',
-        ),
+        expect.stringContaining('[PostgresAppend](wakeAfterCommit) Waking the dispatchers failed'),
       );
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
       const failingText = appendingStore(() => Promise.reject('text'));
@@ -493,14 +531,14 @@ describe('wake-up notifications', () => {
   it('sends no wake-up once the pool passed in is ending', async () => {
     vi.useFakeTimers();
     try {
-      const client = {
+      const client = Object.assign(new EventEmitter(), {
         query: vi.fn(async (statement: string | { text: string }) =>
           typeof statement === 'string'
             ? { rows: [] }
             : { rows: [{ id: 'e', inserted: true, sequence: null, deliveries: 1 }] },
         ),
         release: vi.fn(),
-      };
+      });
       const pool = {
         on: vi.fn(),
         connect: vi.fn(async () => client),

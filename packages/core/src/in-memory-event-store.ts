@@ -1,5 +1,4 @@
 import { ConfigurationError, type ErrorInfo } from './errors.js';
-import type { EventEnvelope } from './event.js';
 import type {
   AppendEntry,
   AppendResult,
@@ -11,10 +10,15 @@ import type {
   EventStore,
   EventStoreStatistics,
   LeaseReference,
+  NewDelivery,
   PurgeRequest,
   PurgeResult,
 } from './event-store.js';
+import type { EventEnvelope } from './event.js';
 import { createUuidV7, type IdentifierGenerator } from './identifier.js';
+import { InMemoryTransaction } from './in-memory-transaction.js';
+
+const DEFAULT_LIST_LIMIT = 100;
 
 export interface InMemoryEventStoreOptions {
   /** Allow use when `NODE_ENV` is `production`. Data is lost on restart. Default false. */
@@ -26,48 +30,6 @@ export interface InMemoryEventStoreOptions {
    * is deleted, like in the database stores.
    */
   readonly retainCompleted?: boolean;
-}
-
-/** Transaction handle of {@link InMemoryEventStore}. Writes apply on commit only. */
-export class InMemoryTransaction {
-  readonly #operations: Array<() => void> = [];
-  readonly #finishers: Array<() => void> = [];
-  #state: 'open' | 'committed' | 'rolled-back' = 'open';
-
-  get state(): 'open' | 'committed' | 'rolled-back' {
-    return this.#state;
-  }
-
-  enqueue(operation: () => void): void {
-    if (this.#state !== 'open') {
-      throw new ConfigurationError(`Cannot write through a ${this.#state} in-memory transaction`);
-    }
-    this.#operations.push(operation);
-  }
-
-  /** Runs `finisher` once the transaction commits or rolls back, like a lock release. */
-  onFinish(finisher: () => void): void {
-    this.#finishers.push(finisher);
-  }
-
-  commit(): void {
-    this.#state = 'committed';
-    for (const operation of this.#operations) {
-      operation();
-    }
-    this.#finish();
-  }
-
-  rollback(): void {
-    this.#state = 'rolled-back';
-    this.#finish();
-  }
-
-  #finish(): void {
-    for (const finisher of this.#finishers.splice(0)) {
-      finisher();
-    }
-  }
 }
 
 interface HeldLock {
@@ -88,6 +50,15 @@ interface StoredEvent {
   /** When a delivery of this event last completed. Retention of completed deliveries is measured from here, not from creation. */
   completedAt: Date | null;
 }
+
+/** One entry of an append, applied when its transaction commits. */
+type ApplyAppendInput = {
+  readonly eventId: string;
+  readonly serialized: SerializedEnvelope;
+  readonly isDuplicate: boolean;
+  readonly newDeliveries: readonly NewDelivery[];
+  readonly now: Date;
+};
 
 interface SerializedEnvelope extends Omit<EventEnvelope, 'occurredAt'> {
   readonly occurredAt: string;
@@ -152,6 +123,7 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
     }
   }
 
+  // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   async append(
     transaction: InMemoryTransaction,
     entries: readonly AppendEntry[],
@@ -182,52 +154,67 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
         appendedEventIds.push(eventId);
         pendingEventIds.add(eventId);
       }
-      const newDeliveries = entry.deliveries.filter((delivery) => {
-        const deliveryKey = `${eventId}\u0000${delivery.handler}`;
-        if (
-          pendingDeliveryKeys.has(deliveryKey) ||
-          this.#events.get(eventId)?.handlers.has(delivery.handler) === true
-        ) {
-          return false;
-        }
-        pendingDeliveryKeys.add(deliveryKey);
-        return true;
-      });
+      const newDeliveries = this.#newDeliveries(entry, pendingDeliveryKeys);
       appendedDeliveryCount += newDeliveries.length;
       transaction.enqueue(() => {
-        if (!isDuplicate) {
-          this.#events.set(eventId, {
-            envelope: serialized,
-            sequence: this.#nextSequence(serialized.key),
-            createdAt: now,
-            handlers: new Set(),
-            completedAt: null,
-          });
-        }
-        const stored = this.#events.get(eventId)!;
-        for (const delivery of newDeliveries) {
-          stored.handlers.add(delivery.handler);
-          this.#deliveries.set(delivery.id, {
-            id: delivery.id,
-            eventId,
-            handler: delivery.handler,
-            key: stored.envelope.key,
-            sequence: stored.sequence,
-            status: 'pending',
-            attempts: 0,
-            availableAt: delivery.availableAt,
-            leaseOwner: null,
-            leaseToken: null,
-            leaseExpiresAt: null,
-            lastError: null,
-            createdAt: now,
-            updatedAt: now,
-            completedAt: null,
-          });
-        }
+        this.#applyAppend({ eventId, serialized, isDuplicate, newDeliveries, now });
       });
     }
     return { appendedEventIds, duplicateEventIds, appendedDeliveryCount };
+  }
+
+  /**
+   * The deliveries of `entry` whose handler the event neither has nor gets earlier in the
+   * transaction; remembers them in `pendingDeliveryKeys`.
+   */
+  #newDeliveries(entry: AppendEntry, pendingDeliveryKeys: Set<string>): NewDelivery[] {
+    const eventId = entry.event.id;
+    return entry.deliveries.filter((delivery) => {
+      const deliveryKey = `${eventId}\u0000${delivery.handler}`;
+      if (
+        pendingDeliveryKeys.has(deliveryKey) ||
+        this.#events.get(eventId)?.handlers.has(delivery.handler) === true
+      ) {
+        return false;
+      }
+      pendingDeliveryKeys.add(deliveryKey);
+      return true;
+    });
+  }
+
+  /** Applies one entry of an append when its transaction commits. */
+  #applyAppend(input: ApplyAppendInput): void {
+    const { eventId, serialized, isDuplicate, newDeliveries, now } = input;
+    if (!isDuplicate) {
+      this.#events.set(eventId, {
+        envelope: serialized,
+        sequence: this.#nextSequence(serialized.key),
+        createdAt: now,
+        handlers: new Set(),
+        completedAt: null,
+      });
+    }
+    const stored = this.#events.get(eventId)!;
+    for (const delivery of newDeliveries) {
+      stored.handlers.add(delivery.handler);
+      this.#deliveries.set(delivery.id, {
+        id: delivery.id,
+        eventId,
+        handler: delivery.handler,
+        key: stored.envelope.key,
+        sequence: stored.sequence,
+        status: 'pending',
+        attempts: 0,
+        availableAt: delivery.availableAt,
+        leaseOwner: null,
+        leaseToken: null,
+        leaseExpiresAt: null,
+        lastError: null,
+        createdAt: now,
+        updatedAt: now,
+        completedAt: null,
+      });
+    }
   }
 
   async claim(request: ClaimRequest): Promise<ClaimedDelivery[]> {
@@ -261,6 +248,7 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
     return claimed;
   }
 
+  // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   async extendLease(lease: LeaseReference, leaseExpiresAt: Date, now: Date): Promise<boolean> {
     return this.#updateLeased(lease, (delivery) => {
       delivery.leaseExpiresAt = leaseExpiresAt;
@@ -268,6 +256,7 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
     });
   }
 
+  // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   async complete(
     lease: LeaseReference,
     now: Date,
@@ -292,6 +281,7 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
     return Promise.all(leases.map((lease) => this.complete(lease, now)));
   }
 
+  // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   async reschedule(
     lease: LeaseReference,
     availableAt: Date,
@@ -317,6 +307,7 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
     });
   }
 
+  // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   async bury(lease: LeaseReference, error: ErrorInfo, now: Date): Promise<boolean> {
     return this.#updateLeased(lease, (delivery) => {
       delivery.status = 'dead';
@@ -327,9 +318,11 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
   }
 
   async listDeliveries(query: DeliveryQuery): Promise<DeliveryRecord[]> {
-    const limit = query.limit ?? 100;
+    const limit = query.limit ?? DEFAULT_LIST_LIMIT;
     return [...this.#deliveries.values()]
-      .filter((delivery) => matchesQuery(delivery, this.#events.get(delivery.eventId)!, query))
+      .filter((delivery) =>
+        matchesQuery(delivery, { event: this.#events.get(delivery.eventId)!, query }),
+      )
       .sort(
         (left, right) =>
           left.createdAt.getTime() - right.createdAt.getTime() || compareIds(left.id, right.id),
@@ -377,17 +370,15 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
         deletedDeliveries += 1;
       }
     }
+    return { deletedDeliveries, deletedEvents: this.#purgeEvents(request, touchedEventIds) };
+  }
+
+  /** Deletes the events no delivery references whose retention ran out; returns how many. */
+  #purgeEvents(request: PurgeRequest, touchedEventIds: ReadonlySet<string>): number {
     const referencedEventIds = new Set(
       [...this.#deliveries.values()].map((delivery) => delivery.eventId),
     );
-    // Events no delivery references go once their retention ran out. An event that had a delivery
-    // complete is measured from that completion and only by the completed cutoff; any other
-    // (dead-lettered or never delivered) from its creation and by the earliest cutoff.
-    const cutoffs = [request.completedBefore, request.deadBefore]
-      .filter((cutoff) => cutoff !== undefined)
-      .map((cutoff) => cutoff.getTime());
-    const orphanCutoff = cutoffs.length === 0 ? Number.NEGATIVE_INFINITY : Math.min(...cutoffs);
-    const completedCutoff = request.completedBefore?.getTime() ?? Number.NEGATIVE_INFINITY;
+    const { orphanCutoff, completedCutoff } = eventCutoffs(request);
     let deletedEvents = 0;
     for (const [eventId, event] of [...this.#events]) {
       // An open append transaction holds the event (like a row lock): it is about to attach a delivery.
@@ -403,7 +394,7 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
         deletedEvents += 1;
       }
     }
-    return { deletedDeliveries, deletedEvents };
+    return deletedEvents;
   }
 
   async statistics(now: Date): Promise<EventStoreStatistics> {
@@ -483,14 +474,7 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
       return false;
     }
     for (const other of this.#deliveries.values()) {
-      if (other === delivery || other.handler !== delivery.handler || other.key !== delivery.key) {
-        continue;
-      }
-      const unfinishedPredecessor =
-        other.sequence! < delivery.sequence! &&
-        (other.status === 'pending' || other.status === 'processing');
-      const runningUnderLiveLease = other.status === 'processing' && other.leaseExpiresAt! > now;
-      if (unfinishedPredecessor || runningUnderLiveLease) {
+      if (blocksKey(other, { delivery, now })) {
         return true;
       }
     }
@@ -537,6 +521,36 @@ export class InMemoryEventStore implements EventStore<InMemoryTransaction> {
   }
 }
 
+/** Whether `other`, another delivery of the same handler and key, holds `delivery` back. */
+function blocksKey(
+  other: StoredDelivery,
+  { delivery, now }: { readonly delivery: StoredDelivery; readonly now: Date },
+): boolean {
+  if (other === delivery || other.handler !== delivery.handler || other.key !== delivery.key) {
+    return false;
+  }
+  const unfinishedPredecessor =
+    other.sequence! < delivery.sequence! &&
+    (other.status === 'pending' || other.status === 'processing');
+  const runningUnderLiveLease = other.status === 'processing' && other.leaseExpiresAt! > now;
+  return unfinishedPredecessor || runningUnderLiveLease;
+}
+
+/**
+ * The cutoffs of events no delivery references. An event that had a delivery complete is measured
+ * from that completion and only by the completed cutoff; any other (dead-lettered or never
+ * delivered) from its creation and by the earliest cutoff.
+ */
+function eventCutoffs(request: PurgeRequest): { orphanCutoff: number; completedCutoff: number } {
+  const cutoffs = [request.completedBefore, request.deadBefore]
+    .filter((cutoff) => cutoff !== undefined)
+    .map((cutoff) => cutoff.getTime());
+  return {
+    orphanCutoff: cutoffs.length === 0 ? Number.NEGATIVE_INFINITY : Math.min(...cutoffs),
+    completedCutoff: request.completedBefore?.getTime() ?? Number.NEGATIVE_INFINITY,
+  };
+}
+
 function serializeEnvelope(envelope: EventEnvelope): SerializedEnvelope {
   return JSON.parse(JSON.stringify(envelope)) as SerializedEnvelope;
 }
@@ -567,7 +581,10 @@ function clearLease(delivery: StoredDelivery): void {
   delivery.leaseExpiresAt = null;
 }
 
-function matchesQuery(delivery: StoredDelivery, event: StoredEvent, query: DeliveryQuery): boolean {
+function matchesQuery(
+  delivery: StoredDelivery,
+  { event, query }: { readonly event: StoredEvent; readonly query: DeliveryQuery },
+): boolean {
   return (
     (query.status === undefined || delivery.status === query.status) &&
     (query.handler === undefined || delivery.handler === query.handler) &&

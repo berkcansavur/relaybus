@@ -150,6 +150,22 @@ describe('RelayBus.publish', () => {
     );
   });
 
+  it('reports the transaction publish would join', async () => {
+    const store = new InMemoryEventStore();
+    let resolved: Parameters<Parameters<typeof store.transaction>[0]>[0] | undefined;
+    const { bus } = createTestBus({ store, transactionResolver: () => resolved });
+    expect(bus.currentTransaction()).toBeUndefined();
+    const seen = await bus.transaction(async (transaction) => [
+      transaction,
+      bus.currentTransaction(),
+    ]);
+    expect(seen[1]).toBe(seen[0]);
+    await store.transaction(async (transaction) => {
+      resolved = transaction;
+      expect(bus.currentTransaction()).toBe(transaction);
+    });
+  });
+
   it('opens its own transaction in optional mode', async () => {
     const { bus } = createTestBus({ transactionMode: 'optional' });
     bus.subscribe(OrderPlaced, () => undefined, { id: 'h' });
@@ -224,7 +240,7 @@ describe('RelayBus.publish', () => {
     const envelope = await bus.publish(new OrderPlaced({ orderId: '1' }));
     expect(envelope.type).toBe('order.placed.v1');
     expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining('[RelayBus](publish) No handler or route for event type'),
+      expect.stringContaining('[RelayBus](reportUnrouted) No handler or route for event type'),
     );
     expect(observer.onPublished).not.toHaveBeenCalled();
     expect(await bus.listDeliveries()).toEqual([]);

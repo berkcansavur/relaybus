@@ -7,6 +7,8 @@ description: Group events in a catalog so the TypeScript compiler rejects a miss
 
 An event with no handler is the quietest failure in an event-driven system: the publish succeeds, nothing runs, and nobody notices until a customer asks why the shipping email never arrived. A **catalog** groups the events of one domain so that the compiler, and then the application boot, tell you before production does.
 
+Catalogs are **optional, stricter checking** on top of the default style. Method-level `@RelayBusConsumer(Event)` handlers already have their parameter type checked against the event at compile time, need no class-level setup, and can mix events of any domain in one class; start there. Add a catalog when a team wants the compiler and the boot to prove that every event of a shared contract has a handler or a route.
+
 Compiler output below is abridged: `OrderEvents` stands for the expanded type of the catalog that TypeScript prints.
 
 ## Before: nothing connects events and handlers
@@ -17,7 +19,7 @@ class OrderShipped extends defineEvent<{ orderId: string; carrier: string }>('or
 
 @Injectable()
 class ShippingHandlers {
-  @Subscribe(OrderPlaced)
+  @RelayBusConsumer(OrderPlaced)
   onOrderPlaced(event: EventEnvelope<{ orderId: string }>) {}
   // OrderShipped is forgotten. Everything compiles, the app boots, shipments are silently ignored.
 }
@@ -29,7 +31,7 @@ class ShippingHandlers {
 export const OrderEvents = defineCatalog({ OrderPlaced, OrderShipped }, { name: 'OrderEvents' });
 
 @Injectable()
-@EventConsumer(OrderEvents)
+@RelayBusCatalogConsumer(OrderEvents)
 class ShippingHandlers implements HandlersOf<typeof OrderEvents> {
   onOrderPlaced(event: EventOf<typeof OrderPlaced>) {}
 }
@@ -104,6 +106,10 @@ ConfigurationError: Catalog events without a handler or route:
 
 The check runs before the store is set up or any transport connects, so a failed check has no side effects and the NestJS application simply does not boot.
 
+## NestJS: module contracts
+
+In NestJS the recommended form is a contract per feature module: `RelayBusModule.forFeature({ consumes: [OrderEvents], produces: [produce(BillingEvents)] })` in the module's `imports`. At boot every consumed event needs a method-level `@RelayBusConsumer` handler among the providers of that module (free method names, any number of classes), and every produced event a route; otherwise the application fails to start naming the module and each missing event. See [@relaybus/nestjs](/packages/nestjs#module-contracts-relaybusmodule-forfeature).
+
 ## Microservices: shared catalogs
 
 Between services, a catalog is a contract: it lives in a shared package, one service produces an event and another consumes it. Each service only covers its part, so instead of a bare catalog (every event needs a handler or route here) it declares its role per event.
@@ -147,7 +153,10 @@ await orders.publish(new OrderPlaced({ orderId, total }), { transaction, key: or
 
 ```ts
 @Injectable()
-@EventConsumer(OrderEvents, { events: ['OrderPlaced', 'OrderCancelled'], transactional: true })
+@RelayBusCatalogConsumer(OrderEvents, {
+  events: ['OrderPlaced', 'OrderCancelled'],
+  transactional: true,
+})
 export class ShippingHandlers {
   onOrderPlaced(event: EventOf<typeof OrderPlaced>, context: HandlerContext<ClientSession>) {}
   onOrderCancelled(event: EventOf<typeof OrderCancelled>, context: HandlerContext<ClientSession>) {}
@@ -185,7 +194,7 @@ error TS2345: Argument of type '{ onOrderPlaced: () => undefined; }' is not assi
 // publishing an event the view does not produce
 error TS2345: Argument of type 'OrderPlaced' is not assignable to parameter of type 'OrderShipped'.
 
-// @EventConsumer(OrderEvents, { events: ['OrderPlaced', 'OrderShipped'] }) on a class without onOrderShipped
+// @RelayBusCatalogConsumer(OrderEvents, { events: ['OrderPlaced', 'OrderShipped'] }) on a class without onOrderShipped
 error TS1238: Unable to resolve signature of class decorator when called as an expression.
 ```
 
@@ -199,7 +208,7 @@ ConfigurationError: Catalog events this service does not cover:
 
 On the consuming side, events arrive through the transport (`bus.receive`). They are matched to the catalog handlers by event type, stored once per event id (a broker redelivery is a no-op) and validated against the event's schema before the handler runs; a payload that fails validation is dead-lettered.
 
-Ordering holds per handler and event type: events of one type and key reach the consumer's handler in publish order when the broker keeps them in order (Kafka: same partition, which the key decides; RabbitMQ: `ordered: true`). Events of different types under one key go through separate routes and handlers, so they can interleave; put a version or timestamp in the payload when one handler depends on another's effect.
+Every route to one destination shares one queue per key, so events of one key reach the broker in publish order whatever their types, even when a send is retried; the consumer receives them in that order when the broker keeps it (Kafka: same partition, which the key decides; RabbitMQ: `ordered: true`). On the consuming side, order holds per handler: the handlers of two event types run independently and can interleave; put a version or timestamp in the payload when one handler depends on another's effect.
 
 ## Related
 

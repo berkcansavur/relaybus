@@ -1,23 +1,7 @@
-import {
-  NonRetryableError,
-  RelayBusError,
-  assertEventType,
-  type EventEnvelope,
-} from '@relaybus/core';
+import { assertEventType, type EventEnvelope } from '@relaybus/core';
+import { writeStructuredCloudEvent } from '@relaybus/core/internal';
+import { InvalidKafkaMessageError, UnencodableEventError } from './errors.js';
 import type { KafkaBytes, KafkaIncomingHeaders, KafkaOutgoingHeaders } from './kafka-client.js';
-
-/** A Kafka record that cannot be turned into an {@link EventEnvelope}. Never retried. */
-export class InvalidKafkaMessageError extends RelayBusError {}
-
-/**
- * An event that cannot be written to Kafka: its payload is not representable as
- * JSON (`undefined`, a function, a symbol, a `BigInt`, a circular structure) or
- * its `occurredAt` is not an RFC 3339 instant (invalid date, year outside 0..9999).
- * Retrying cannot help, so it is a {@link NonRetryableError}.
- */
-export class UnencodableEventError extends NonRetryableError {
-  override name = 'UnencodableEventError';
-}
 
 /** The wire form of one event: a Kafka record in CloudEvents binary content mode. */
 export interface EncodedMessage {
@@ -39,6 +23,7 @@ const SPEC_VERSION = '1.0';
 /** Name of the Kafka header that carries the media type of the record value. */
 export const CONTENT_TYPE = 'content-type';
 const JSON_MEDIA_TYPE = 'application/json';
+const STRUCTURED_MEDIA_TYPE = 'application/cloudevents+json';
 const CLOUDEVENTS_PREFIX = 'ce_';
 const ESCAPE_PREFIX = 'x-relaybus-h-';
 const RESERVED_PREFIXES = [CLOUDEVENTS_PREFIX, 'x-relaybus-'];
@@ -56,6 +41,8 @@ const HEADER = {
 
 const PROTOCOL_HEADERS: ReadonlySet<string> = new Set([...Object.values(HEADER), CONTENT_TYPE]);
 
+/** RFC 3339 years have four digits. */
+const MAXIMUM_RFC3339_YEAR = 9999;
 const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/i;
 
 const strictUtf8 = new TextDecoder('utf-8', { fatal: true });
@@ -95,26 +82,51 @@ export function encodeEnvelope(envelope: EventEnvelope): EncodedMessage {
   return { key: envelope.key, value, headers: Object.fromEntries(entries) };
 }
 
-function serializePayload(envelope: EventEnvelope): string {
-  let value: string | undefined;
+/**
+ * Encodes an envelope as a CloudEvents Kafka structured-mode record: the value
+ * is one JSON document with the attributes and `data` (the payload), the
+ * content type is `application/cloudevents+json`, the record key is the event
+ * key. Event headers travel as record headers, escaped as in binary mode.
+ */
+export function encodeStructuredEnvelope(envelope: EventEnvelope): EncodedMessage {
+  const value = writeStructuredCloudEvent(envelope, {
+    time: formatTime(envelope),
+    data: serializePayload(envelope),
+  });
+  const entries: [string, string][] = Object.entries(envelope.headers).map(
+    ([name, headerValue]) => [escapeUserHeaderName(name), headerValue],
+  );
+  entries.push([CONTENT_TYPE, STRUCTURED_MEDIA_TYPE]);
+  return { key: envelope.key, value, headers: Object.fromEntries(entries) };
+}
+
+/** The payload as JSON text; refuses a payload JSON cannot represent. */
+export function serializePayload(envelope: EventEnvelope): string {
+  return serializeJson(envelope, envelope.payload);
+}
+
+/** `value` (the payload or a body holding it) as JSON text, refusing what JSON cannot represent. */
+export function serializeJson(envelope: EventEnvelope, value: unknown): string {
+  let text: string | undefined;
   try {
-    value = JSON.stringify(envelope.payload);
+    text = JSON.stringify(value);
   } catch (error) {
     throw new UnencodableEventError(
       `Event ${envelope.id} has a payload that JSON cannot represent: ${(error as Error).message}`,
     );
   }
-  if (value === undefined) {
+  if (text === undefined) {
     throw new UnencodableEventError(
       `Event ${envelope.id} has a payload that JSON cannot represent (undefined, a function or a symbol)`,
     );
   }
-  return value;
+  return text;
 }
 
-function formatTime(envelope: EventEnvelope): string {
+/** The occurredAt as RFC 3339 text; refuses an invalid date or a year outside 0..9999. */
+export function formatTime(envelope: EventEnvelope): string {
   const year = envelope.occurredAt.getUTCFullYear();
-  if (Number.isNaN(year) || year < 0 || year > 9999) {
+  if (Number.isNaN(year) || year < 0 || year > MAXIMUM_RFC3339_YEAR) {
     throw new UnencodableEventError(
       `Event ${envelope.id} has an occurredAt that is not an RFC 3339 instant (invalid date or year outside 0..9999)`,
     );
@@ -177,13 +189,19 @@ export function readHeaders(incoming: KafkaIncomingHeaders | undefined): Map<str
     if (typeof raw !== 'string' && !(raw instanceof Uint8Array)) {
       throw invalid(`Header '${name}' is repeated`);
     }
-    headers.set(name, decodeText(raw, PROTOCOL_HEADERS.has(name), `Header '${name}'`));
+    headers.set(
+      name,
+      decodeText(raw, { strict: PROTOCOL_HEADERS.has(name), label: `Header '${name}'` }),
+    );
   }
   return headers;
 }
 
 /** Decodes header or value bytes as UTF-8; `strict` rejects invalid sequences. */
-export function decodeText(raw: KafkaBytes | string, strict: boolean, label: string): string {
+export function decodeText(
+  raw: KafkaBytes | string,
+  { strict, label }: { readonly strict: boolean; readonly label: string },
+): string {
   if (typeof raw === 'string') {
     return raw;
   }
@@ -242,7 +260,7 @@ export function parsePayload(value: KafkaBytes | null): unknown {
   if (value === null) {
     throw invalid('Message has no value');
   }
-  const text = decodeText(value, true, 'Message value');
+  const text = decodeText(value, { strict: true, label: 'Message value' });
   try {
     return JSON.parse(text) as unknown;
   } catch {
@@ -260,7 +278,7 @@ function resolveKey(subject: string | undefined, recordKey: KafkaBytes | null): 
 
 /** The record key as UTF-8 text, or null when the record has none. Invalid UTF-8 is invalid. */
 export function readRecordKey(recordKey: KafkaBytes | null): string | null {
-  return recordKey === null ? null : decodeText(recordKey, true, 'Message key');
+  return recordKey === null ? null : decodeText(recordKey, { strict: true, label: 'Message key' });
 }
 
 /** Headers that are not CloudEvents attributes, with escaped names restored. */

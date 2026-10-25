@@ -1,5 +1,6 @@
 import { toTimerMilliseconds, type Duration } from './duration.js';
 import { ConfigurationError } from './errors.js';
+import { assertPositiveInteger } from './internal/validation.js';
 import type { EventEnvelope } from './event.js';
 import { createRetryPolicy, type RetryPolicy, type RetryPolicyOptions } from './retry-policy.js';
 import type { StandardSchemaV1 } from './standard-schema.js';
@@ -63,7 +64,14 @@ export interface HandlerDescriptor {
   readonly forwardsToTransport: boolean;
 }
 
-export interface HandlerRegistration extends HandlerDescriptor {
+export interface HandlerRegistration extends Omit<HandlerDescriptor, 'eventType'> {
+  /** Event types it handles: one for a handler, every type routed to the destination for a route. */
+  readonly eventTypes: readonly string[];
+  /**
+   * Handler ids whose deliveries it runs: its id, then for a route the per-type ids that 0.2.0
+   * stored its deliveries under.
+   */
+  readonly claimIds: readonly string[];
   readonly schema: StandardSchemaV1 | undefined;
   readonly handle: EventHandler;
 }
@@ -76,7 +84,9 @@ export interface RegistrationDefaults {
 const HANDLER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$/;
 
 export interface RegistrationInput {
-  readonly eventType: string;
+  readonly eventTypes: readonly string[];
+  /** Further ids of earlier versions whose stored deliveries this registration runs. */
+  readonly legacyIds?: readonly string[];
   readonly schema: StandardSchemaV1 | undefined;
   readonly handle: EventHandler;
   readonly options: SubscribeOptions;
@@ -85,6 +95,7 @@ export interface RegistrationInput {
 
 export class HandlerRegistry {
   readonly #byId = new Map<string, HandlerRegistration>();
+  readonly #byClaimId = new Map<string, HandlerRegistration>();
   readonly #byEventType = new Map<string, HandlerRegistration[]>();
 
   register(input: RegistrationInput, defaults: RegistrationDefaults): HandlerRegistration {
@@ -94,37 +105,53 @@ export class HandlerRegistry {
         `Handler id '${options.id}' must be 1-255 characters of letters, digits, '.', '_', ':', '/' or '-'`,
       );
     }
-    if (this.#byId.has(options.id)) {
-      throw new ConfigurationError(`Handler id '${options.id}' is already registered`);
-    }
-    if (
-      options.concurrency !== undefined &&
-      (!Number.isInteger(options.concurrency) || options.concurrency < 1)
-    ) {
-      throw new ConfigurationError(
-        `Concurrency of handler '${options.id}' must be a positive integer, received ${options.concurrency}`,
-      );
+    const claimIds = [options.id, ...(input.legacyIds ?? [])];
+    this.#assertUnregistered(claimIds);
+    if (options.concurrency !== undefined) {
+      assertPositiveInteger(options.concurrency, `Concurrency of handler '${options.id}'`);
     }
     const registration: HandlerRegistration = {
       id: options.id,
-      eventType: input.eventType,
+      eventTypes: input.eventTypes,
+      claimIds,
       schema: input.schema,
       handle: input.handle,
       retry: createRetryPolicy(options.retry, defaults.retry),
-      timeoutMs: resolveTimeout(options.timeout, defaults.timeoutMs, options.id),
+      timeoutMs: resolveTimeout(options.timeout, {
+        fallback: defaults.timeoutMs,
+        handlerId: options.id,
+      }),
       concurrency: options.concurrency ?? null,
       transactional: options.transactional ?? false,
       forwardsToTransport: input.forwardsToTransport,
     };
-    this.#byId.set(registration.id, registration);
-    const forType = this.#byEventType.get(registration.eventType) ?? [];
-    forType.push(registration);
-    this.#byEventType.set(registration.eventType, forType);
+    this.#index(registration);
     return registration;
   }
 
+  #assertUnregistered(claimIds: readonly string[]): void {
+    for (const id of claimIds) {
+      if (this.#byClaimId.has(id)) {
+        throw new ConfigurationError(`Handler id '${id}' is already registered`);
+      }
+    }
+  }
+
+  #index(registration: HandlerRegistration): void {
+    this.#byId.set(registration.id, registration);
+    for (const id of registration.claimIds) {
+      this.#byClaimId.set(id, registration);
+    }
+    for (const eventType of registration.eventTypes) {
+      const forType = this.#byEventType.get(eventType) ?? [];
+      forType.push(registration);
+      this.#byEventType.set(eventType, forType);
+    }
+  }
+
+  /** The registration that runs deliveries stored under `id`, its own id or a legacy one. */
   get(id: string): HandlerRegistration | undefined {
-    return this.#byId.get(id);
+    return this.#byClaimId.get(id);
   }
 
   forEventType(eventType: string): readonly HandlerRegistration[] {
@@ -138,8 +165,7 @@ export class HandlerRegistry {
 
 function resolveTimeout(
   timeout: Duration | false | undefined,
-  fallback: number | null,
-  handlerId: string,
+  { fallback, handlerId }: { readonly fallback: number | null; readonly handlerId: string },
 ): number | null {
   if (timeout === undefined) {
     return fallback;

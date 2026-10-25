@@ -30,7 +30,27 @@ export interface PostgresQueryOptions {
  * - `options` are hints ({@link PostgresQueryOptions}); ignoring them is correct, only slower.
  */
 export interface PostgresExecutor<TTransaction> {
+  /**
+   * True when the process keeps running if the server ends the session of an open transaction
+   * (an `error` listener is on the connection while the transaction runs). The store then holds
+   * `bus.transaction` to its budget with `idle_in_transaction_session_timeout` and, on PostgreSQL
+   * 17+, `transaction_timeout` as well as `statement_timeout`. Without it only `statement_timeout`
+   * is set: a `pg` client checked out by another library without an `error` listener would crash
+   * the process with an unhandled `error` event when the server ends its session. `PgExecutor`
+   * sets it.
+   */
+  readonly sessionTimeouts?: boolean;
   transaction<T>(work: (transaction: TTransaction) => Promise<T>): Promise<T>;
+  /**
+   * Optional. Opens a transaction like {@link PostgresExecutor.transaction} that the server holds to
+   * `timeoutMs` (`statement_timeout`, plus the session timeouts when {@link sessionTimeouts} is set),
+   * set in the round trip of its `BEGIN`. Without it the store sets the budget with a statement of
+   * its own, one round trip more per `bus.transaction`. `PgExecutor` implements it.
+   */
+  transactionWithBudget?<T>(
+    work: (transaction: TTransaction) => Promise<T>,
+    timeoutMs: number,
+  ): Promise<T>;
   query(
     sql: string,
     parameters: readonly PostgresParameter[],

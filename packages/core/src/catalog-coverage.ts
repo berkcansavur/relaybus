@@ -54,7 +54,7 @@ const declarations = new WeakSet<object>();
  * Declares that this service consumes events of a catalog, typically one
  * shared between services through a contracts package. `start()` fails unless
  * every declared event has a local handler (`subscribeCatalog`, `subscribe`,
- * `@EventConsumer`, `@Subscribe`); a route to a transport does not count.
+ * `@RelayBusCatalogConsumer`, `@RelayBusConsumer`); a route to a transport does not count.
  * Without `events`, every event of the catalog is declared. Unknown names do
  * not compile and are rejected at runtime with a {@link ConfigurationError}.
  *
@@ -69,7 +69,7 @@ export function consume<
   catalog: TCatalog,
   options: CatalogEventSelection<TName> = {},
 ): CatalogDeclaration<TCatalog, TName> {
-  return declare(catalog, 'consume', options);
+  return declare(catalog, { role: 'consume', options });
 }
 
 /**
@@ -95,13 +95,12 @@ export function produce<
   catalog: TCatalog,
   options: CatalogEventSelection<TName> = {},
 ): CatalogDeclaration<TCatalog, TName> {
-  return declare(catalog, 'produce', options);
+  return declare(catalog, { role: 'produce', options });
 }
 
 function declare<TCatalog extends Catalog, TName extends keyof TCatalog>(
   catalog: TCatalog,
-  role: CatalogRole,
-  options: CatalogEventSelection<TName>,
+  { role, options }: { readonly role: CatalogRole; readonly options: CatalogEventSelection<TName> },
 ): CatalogDeclaration<TCatalog, TName> {
   const entries = selectCatalogEntries(catalog, options.events);
   const declaration = Object.freeze({
@@ -146,7 +145,7 @@ export function assertCatalogsCovered(
   let onlyBareCatalogs = true;
   for (const { catalogName, entries, need } of requirements) {
     for (const entry of entries) {
-      const problem = describeGap(entry, need, registrationsOf(entry.type));
+      const problem = describeGap(entry, { need, registrations: registrationsOf(entry.type) });
       if (problem !== undefined) {
         problems.add(`${catalogName === undefined ? '' : `${catalogName}.`}${problem}`);
         onlyBareCatalogs &&= need === 'handler-or-route';
@@ -165,8 +164,10 @@ export function assertCatalogsCovered(
 
 function describeGap(
   entry: CatalogEntry,
-  need: CoverageNeed,
-  { handlers, routes }: EventTypeRegistrations,
+  {
+    need,
+    registrations: { handlers, routes },
+  }: { readonly need: CoverageNeed; readonly registrations: EventTypeRegistrations },
 ): string | undefined {
   const subject = `${entry.name} (${entry.type})`;
   if (need === 'handler-or-route') {

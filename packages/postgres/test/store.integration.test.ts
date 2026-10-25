@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createUuidV7, type EventEnvelope } from '@relaybus/core';
+import { LeaseLostError, createUuidV7, toErrorInfo, type EventEnvelope } from '@relaybus/core';
 import { createPostgresSchemaSql, PgExecutor, PostgresEventStore } from '../src/index.js';
 import {
   createTestPool,
@@ -498,7 +498,9 @@ describe('claims of an owner draining its held lanes', () => {
     expect(third).toHaveLength(1);
     expect(state).toMatchObject({ fullClaims: 3, heldClaims: 1 });
     expect(errors).toEqual([
-      expect.stringContaining('[PostgresEventStore](claim) Claiming from free lanes failed'),
+      expect.stringContaining(
+        '[PostgresClaims](claimFreeLanesAfterHeld) Claiming from free lanes failed',
+      ),
     ]);
     expect(await store.complete(third[0]!, NOW)).toBe(true);
     // Short of the limit, so not draining; the next claim fills from the held lane and is again.
@@ -527,5 +529,40 @@ describe('claims of an owner draining its held lanes', () => {
     expect(await claim(1)).toEqual([]);
     expect(state.heldClaims).toBe(before);
     await pool.end();
+  });
+});
+
+describe('dead deliveries', () => {
+  it('keeps the error code of a relaybus error', async () => {
+    const store = new PostgresEventStore({ pool: database.pool, schema: uniqueSchema() });
+    await store.setup();
+    await store.transaction((transaction) =>
+      store.append(
+        transaction,
+        [
+          {
+            event: envelope(),
+            deliveries: [{ id: createUuidV7(), handler: 'h', availableAt: NOW }],
+          },
+        ],
+        NOW,
+      ),
+    );
+    const [delivery] = await store.claim({
+      handlers: ['h'],
+      limit: 1,
+      leaseOwner: 'w',
+      leaseExpiresAt: new Date(NOW.getTime() + 60_000),
+      now: NOW,
+    });
+    const error = toErrorInfo(new LeaseLostError('gone'));
+    await store.bury(delivery!, error, NOW);
+    const [record] = await store.listDeliveries({ status: 'dead' });
+    expect(record!.lastError).toEqual({
+      name: 'LeaseLostError',
+      message: 'gone',
+      stack: error.stack,
+      code: 'RELAYBUS_LEASE_LOST',
+    });
   });
 });

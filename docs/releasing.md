@@ -17,7 +17,7 @@ The baseline is the git tag `v0.0.0` (see [bootstrap](#bootstrap-one-time)). sem
 
 Examples: from `v0.0.0`, a `feat` gives `0.1.0`, only `fix` gives `0.0.1`, a breaking change gives `0.1.0` (not `1.0.0`). From `v0.3.2`, a breaking change gives `0.4.0`. Only `docs`/`chore`/... commits produce no release and the workflow ends successfully.
 
-Allowed scopes (commitlint and PR title check): `core`, `nestjs`, `postgres`, `mongodb`, `kafka`, `rabbitmq`, `testing`, `repo`, `ci`, `deps`, `release`. Scopes do not influence the version because all packages release together; they only group the release notes.
+Allowed scopes (commitlint and PR title check): `core`, `nestjs`, `postgres`, `mongodb`, `kafka`, `rabbitmq`, `testing`, `eslint-plugin`, `otel`, `repo`, `ci`, `deps`, `release`. Scopes do not influence the version because all packages release together; they only group the release notes.
 
 Because the packages are in lockstep, `peerDependencies` on `@relaybus/core` are published as `^<version>`. In the 0.x range `^0.1.0` means `>=0.1.0 <0.2.0`, so consumers upgrade the adapters together with core on every minor.
 
@@ -80,8 +80,22 @@ npm only allows attaching a Trusted Publisher to a package that already exists, 
    ```
 
 4. Create the GitHub environment `npm-publish` (Settings, Environments).
-5. For each package (`core`, `nestjs`, `postgres`, `mongodb`, `kafka`, `rabbitmq`, `testing`) open npmjs.com, Settings, Trusted Publisher, GitHub Actions, and enter organization or user `berkcansavur`, repository `relaybus`, workflow filename `release.yml`, environment `npm-publish`. Do this **within two days of the first CI publish at the latest**; until it is configured the CI publish fails with an authentication error (the run can be repeated, see below).
+5. For each package (`core`, `nestjs`, `postgres`, `mongodb`, `kafka`, `rabbitmq`, `testing`, `eslint-plugin`, `otel`) open npmjs.com, Settings, Trusted Publisher, GitHub Actions, and enter organization or user `berkcansavur`, repository `relaybus`, workflow filename `release.yml`, environment `npm-publish`. Do this **within two days of the first CI publish at the latest**; until it is configured the CI publish fails with an authentication error (the run can be repeated, see below).
 6. After OIDC publishing works, optionally set "Require two-factor authentication and disallow tokens" on each package.
+
+### Adding a package later
+
+A package that is new on npm cannot be published by CI until it exists and trusts the workflow. For
+`@relaybus/eslint-plugin` and `@relaybus/otel` (both added in 0.3.0), before the release that first ships it:
+
+1. `npm login` (with 2FA), then `scripts/bootstrap-npm.sh`. It publishes each new package at `0.0.0`
+   and skips every package that already exists.
+2. `scripts/trust-packages.sh` (or npmjs.com, Settings, Trusted Publisher for each new package with
+   the values of step 5 above).
+3. Optionally `scripts/harden-npm.sh` to require 2FA and deprecate the `0.0.0` placeholder.
+
+`scripts/set-version.mjs` and `scripts/publish-packages.mjs` find every `packages/*` directory, so
+the new package already releases in lockstep with the others.
 
 ## Troubleshooting
 

@@ -7,9 +7,10 @@ import {
 import { abortableSleep } from './abortable-sleep.js';
 import type { AmqpConnection } from './amqp-types.js';
 import { RabbitMqUnavailableError } from './errors.js';
+import type { ConnectOptions } from './options.js';
 
 export interface ConnectionSupervisorSettings {
-  readonly connect: () => Promise<AmqpConnection>;
+  readonly connect: (options: ConnectOptions) => Promise<AmqpConnection>;
   /** Backoff between attempts, or undefined to never reconnect. */
   readonly reconnect: RetryPolicy | undefined;
   /** Creates channels and topology on a fresh connection. A rejection discards the connection. */
@@ -29,7 +30,17 @@ export interface ConnectionSupervisorSettings {
 export class ConnectionSupervisor {
   readonly #settings: ConnectionSupervisorSettings;
   readonly #stop = new AbortController();
+  /** Aborted by `forceClose`: destroys a socket that is still connecting. */
+  readonly #force = new AbortController();
+  /** Resolves on `forceClose`: closing stops waiting for the broker. */
+  readonly #forcing = new Promise<void>((resolve) => {
+    this.#force.signal.addEventListener('abort', () => resolve(), { once: true });
+  });
   #current: AmqpConnection | undefined;
+  /** Connections being closed, until their closing handshake finishes. */
+  readonly #closing = new Set<AmqpConnection>();
+  /** Set by `forceClose`: connections are cut instead of closed. */
+  #forced = false;
   #ready = false;
   #started = false;
   #closed = false;
@@ -80,7 +91,7 @@ export class ConnectionSupervisor {
       return;
     }
     this.#handleLoss(connection, reason);
-    connection.close().catch(() => undefined);
+    void this.#closeConnection(connection);
   }
 
   /**
@@ -90,24 +101,60 @@ export class ConnectionSupervisor {
   async close(beforeDisconnect: () => Promise<void>): Promise<void> {
     this.#closed = true;
     this.#stop.abort();
-    await this.#reconnecting;
+    // Once forced, nothing waits for the broker: draining and the closing handshake are cut short.
+    await Promise.race([this.#reconnecting, this.#forcing]);
     try {
-      await beforeDisconnect();
+      await Promise.race([beforeDisconnect(), this.#forcing]);
     } finally {
       const connection = this.#current;
       this.#current = undefined;
       this.#ready = false;
-      await connection?.close().catch(() => undefined);
+      if (connection !== undefined) {
+        await this.#closeConnection(connection);
+      }
     }
   }
 
+  /**
+   * Stops reconnecting and cuts every connection, open or closing, without the closing handshake. A
+   * connection that finishes opening afterwards is cut at once.
+   */
+  forceClose(): void {
+    this.#closed = true;
+    this.#forced = true;
+    this.#stop.abort();
+    this.#force.abort();
+    for (const connection of [this.#current, ...this.#closing]) {
+      if (connection !== undefined) {
+        destroySocket(connection);
+      }
+    }
+  }
+
+  /** Closes a connection, which `forceClose` can cut until the broker answered; cuts it once forced. */
+  async #closeConnection(connection: AmqpConnection): Promise<void> {
+    if (this.#forced) {
+      destroySocket(connection);
+      return;
+    }
+    this.#closing.add(connection);
+    await connection.close().catch(() => undefined);
+    this.#closing.delete(connection);
+  }
+
   async #establish(): Promise<void> {
-    const connection = await this.#settings.connect();
+    const connection = await this.#settings.connect({ signal: this.#force.signal });
+    // Before anything can cut it: an 'error' nobody listens to would crash the process.
     connection.on('error', (error: Error) => {
       this.#settings.logger.warn(
         `[ConnectionSupervisor](establish) Connection error | error=${error.message}`,
       );
     });
+    if (this.#closed) {
+      // Opened after the transport closed: nobody would use or close it.
+      await this.#closeConnection(connection);
+      throw new RabbitMqUnavailableError('[ConnectionSupervisor](establish) Transport is closed');
+    }
     connection.on('close', (error?: Error) => {
       this.#handleLoss(connection, error?.message ?? 'closed by peer');
     });
@@ -131,7 +178,7 @@ export class ConnectionSupervisor {
       this.#current = undefined;
     }
     this.#settings.onDisconnected();
-    await connection.close().catch(() => undefined);
+    await this.#closeConnection(connection);
   }
 
   #handleLoss(connection: AmqpConnection, reason: string): void {
@@ -166,7 +213,7 @@ export class ConnectionSupervisor {
     for (let attempt = 1; !this.#closed; attempt += 1) {
       const delayMs = computeRetryDelay(policy, attempt, this.#settings.random);
       this.#settings.logger.log(
-        `[ConnectionSupervisor](reconnect) Reconnecting | attempt=${attempt} delayMs=${delayMs}`,
+        `[ConnectionSupervisor](reconnectUntilConnected) Reconnecting | attempt=${attempt} delayMs=${delayMs}`,
       );
       await abortableSleep(delayMs, this.#stop.signal);
       if (this.#closed) {
@@ -175,14 +222,28 @@ export class ConnectionSupervisor {
       try {
         await this.#establish();
         this.#settings.logger.log(
-          `[ConnectionSupervisor](reconnect) Reconnected | attempt=${attempt}`,
+          `[ConnectionSupervisor](reconnectUntilConnected) Reconnected | attempt=${attempt}`,
         );
         return;
       } catch (error) {
         this.#settings.logger.warn(
-          `[ConnectionSupervisor](reconnect) Attempt failed | attempt=${attempt} error=${toErrorInfo(error).message}`,
+          `[ConnectionSupervisor](reconnectUntilConnected) Attempt failed | attempt=${attempt} error=${toErrorInfo(error).message}`,
         );
       }
     }
   }
+}
+
+/**
+ * Destroys the socket under an amqplib connection (the channel model keeps it in fields its types
+ * omit). With an error, so amqplib sees a socket error and runs its terminal cleanup: it stops
+ * heartbeating, fails pending channel operations and emits `close`.
+ */
+function destroySocket(connection: AmqpConnection): void {
+  const model = connection as {
+    readonly connection?: { readonly stream?: { destroy(error: Error): void } };
+  };
+  model.connection?.stream?.destroy(
+    new RabbitMqUnavailableError('Connection cut: the shutdown deadline passed'),
+  );
 }

@@ -8,7 +8,7 @@ description: relaybus retries each handler with capped exponential backoff and f
 Every handler delivery is retried on failure with **capped exponential backoff and full jitter**. The defaults are 10 attempts, a 1 second initial delay, a factor of 2 and a 10 minute cap.
 
 ```ts
-@Subscribe(OrderPlaced, {
+@RelayBusConsumer(OrderPlaced, {
   retry: { attempts: 5, initialDelay: '2s', maxDelay: '5m' },
   timeout: '30s',
 })

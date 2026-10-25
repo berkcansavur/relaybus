@@ -1,7 +1,14 @@
 import { assertEventType, type EventEnvelope, type EventHeaders } from '@relaybus/core';
+import { createCloudEventReaders, isJsonObject, mediaTypeOf } from '@relaybus/core/internal';
 import type { AmqpMessage, AmqpMessageProperties } from './amqp-types.js';
 import { MalformedMessageError } from './errors.js';
 import { RFC3339_PATTERN, decodeEnvelope } from './wire-format.js';
+
+/** AMQP `timestamp` properties count seconds. */
+const MILLISECONDS_PER_SECOND = 1_000;
+
+const { optionalAttribute, requiredAttribute, assertValidType, assertJsonDataContentType } =
+  createCloudEventReaders((reason) => new MalformedMessageError(reason));
 
 /**
  * The event a decoder extracted from a message. `id`, `type` and `payload` are
@@ -184,12 +191,13 @@ export function plainJsonDecoder(options: PlainJsonDecoderOptions): RabbitMqMess
       headers: readForeignHeaders(properties),
       payload: parseJsonBody(message.content),
     };
-    const type = resolveText(options.type, plain, 'type');
+    const type = resolveText(options.type, { message: plain, name: 'type' });
     if (type === undefined) {
       throw new MalformedMessageError('Message has no event type: the type option found none');
     }
     assertValidType(type, 'The event type');
-    const id = resolveText(options.id, plain, 'id') ?? nonEmptyText(properties.messageId);
+    const id =
+      resolveText(options.id, { message: plain, name: 'id' }) ?? nonEmptyText(properties.messageId);
     if (id === undefined) {
       throw new MalformedMessageError(
         'Message has no id: set the messageId property on the producer or configure the id option',
@@ -198,8 +206,9 @@ export function plainJsonDecoder(options: PlainJsonDecoderOptions): RabbitMqMess
     return {
       id,
       type,
-      source: resolveText(options.source, plain, 'source') ?? defaultSource(message),
-      key: resolveText(options.key, plain, 'key') ?? null,
+      source:
+        resolveText(options.source, { message: plain, name: 'source' }) ?? defaultSource(message),
+      key: resolveText(options.key, { message: plain, name: 'key' }) ?? null,
       payload: plain.payload,
       headers: plain.headers,
       correlationId: null,
@@ -236,7 +245,7 @@ export function completeDecodedEvent(decoded: unknown, message: AmqpMessage): Ev
 }
 
 /** Parses the body as UTF-8 JSON, refusing invalid UTF-8 instead of replacing it. */
-function parseJsonBody(content: Buffer): unknown {
+export function parseJsonBody(content: Buffer): unknown {
   let text: string;
   try {
     text = strictUtf8.decode(content);
@@ -250,60 +259,12 @@ function parseJsonBody(content: Buffer): unknown {
   }
 }
 
-function mediaTypeOf(contentType: unknown): string | undefined {
-  return typeof contentType === 'string'
-    ? contentType.split(';')[0]!.trim().toLowerCase()
-    : undefined;
-}
-
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function nonEmptyText(value: unknown): string | undefined {
+export function nonEmptyText(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
 function defaultSource(message: AmqpMessage): string {
   return nonEmptyText(message.properties.appId) ?? message.fields.routingKey;
-}
-
-function optionalAttribute(body: Record<string, unknown>, name: string): string | undefined {
-  const value = body[name];
-  if (value !== undefined && typeof value !== 'string') {
-    throw new MalformedMessageError(`Attribute '${name}' must be a string`);
-  }
-  return value;
-}
-
-function requiredAttribute(body: Record<string, unknown>, name: string): string {
-  const value = optionalAttribute(body, name);
-  if (value === undefined || value.length === 0) {
-    throw new MalformedMessageError(`Attribute '${name}' is missing or empty`);
-  }
-  return value;
-}
-
-function assertValidType(type: string, label: string): void {
-  try {
-    assertEventType(type);
-  } catch (error) {
-    throw new MalformedMessageError(
-      `${label} is not a valid event type: ${(error as Error).message}`,
-    );
-  }
-}
-
-function assertJsonDataContentType(dataContentType: string | undefined): void {
-  const mediaType = mediaTypeOf(dataContentType);
-  if (
-    mediaType !== undefined &&
-    mediaType !== 'application/json' &&
-    mediaType !== 'text/json' &&
-    !mediaType.endsWith('+json')
-  ) {
-    throw new MalformedMessageError(`datacontenttype must be JSON, received '${dataContentType}'`);
-  }
 }
 
 function parseTime(text: string): Date {
@@ -318,7 +279,7 @@ function parseTime(text: string): Date {
 function propertyTimeOrNow(properties: AmqpMessageProperties): Date {
   const { timestamp } = properties;
   return typeof timestamp === 'number' && Number.isFinite(timestamp)
-    ? new Date(timestamp * 1_000)
+    ? new Date(timestamp * MILLISECONDS_PER_SECOND)
     : new Date();
 }
 
@@ -331,7 +292,7 @@ function extensionAttributes(body: Record<string, unknown>): Record<string, stri
   );
 }
 
-function readForeignHeaders(properties: AmqpMessageProperties): Record<string, string> {
+export function readForeignHeaders(properties: AmqpMessageProperties): Record<string, string> {
   return Object.fromEntries(
     Object.entries(properties.headers ?? {}).filter(
       (entry): entry is [string, string] =>
@@ -343,8 +304,7 @@ function readForeignHeaders(properties: AmqpMessageProperties): Record<string, s
 
 function resolveText<TValue extends string | null>(
   option: TValue | ((message: PlainJsonMessage) => TValue | undefined) | undefined,
-  message: PlainJsonMessage,
-  name: string,
+  { message, name }: { readonly message: PlainJsonMessage; readonly name: string },
 ): string | undefined {
   const value: unknown = typeof option === 'function' ? option(message) : option;
   if (value === undefined || value === null) {

@@ -6,11 +6,14 @@ import {
   type RelayBusLogger,
   type RetryPolicy,
   type TransportMessageHandler,
+  type TransportSubscriptionHooks,
 } from '@relaybus/core';
 import { abortableSleep } from './abortable-sleep.js';
 import type { AmqpChannel, AmqpMessage, AmqpPublishOptions } from './amqp-types.js';
 import { RabbitMqUnavailableError } from './errors.js';
 import {
+  DEAD_LETTER_ERROR_CODE_HEADER,
+  DEAD_LETTER_ERROR_NAME_HEADER,
   DEAD_LETTER_REASON_HEADER,
   FIRST_FAILURE_HEADER,
   ORIGINAL_ROUTING_KEY_HEADER,
@@ -25,10 +28,8 @@ import { retryQueueName } from './topology.js';
 
 /** Publishes a message and resolves only after the broker confirmed it was routed to a queue. */
 export type ConfirmedRepublish = (
-  exchange: string,
-  routingKey: string,
-  content: Buffer,
-  options: AmqpPublishOptions,
+  destination: { readonly exchange: string; readonly routingKey: string },
+  copy: { readonly content: Buffer; readonly options: AmqpPublishOptions },
 ) => Promise<void>;
 
 export interface QueueConsumerSettings {
@@ -46,6 +47,8 @@ export interface QueueConsumerSettings {
   readonly deadLetterExchange: string;
   readonly shutdownTimeoutMs: number;
   readonly onMessage: TransportMessageHandler;
+  /** Told of each message `decode` rejected; undefined when nobody observes them. */
+  readonly onInvalidMessage?: TransportSubscriptionHooks['onInvalidMessage'];
   /** Turns a message into an envelope; anything it throws dead-letters the message as malformed. */
   readonly decode: (message: AmqpMessage) => EventEnvelope;
   /** The consumer's channel closed or the broker cancelled the consumer. */
@@ -57,6 +60,30 @@ export interface QueueConsumerSettings {
 }
 
 type Settlement = 'ack' | 'requeue' | 'dead-letter';
+
+/** A message being processed, with the redelivery state its retries carry. */
+type ProcessedMessage = {
+  readonly channel: AmqpChannel;
+  readonly message: AmqpMessage;
+  readonly envelope: EventEnvelope;
+  redeliveries: number;
+  firstFailureAt: number | undefined;
+};
+
+/** A message to park in a retry queue, with the retry state its copy carries. */
+type RedeliverLaterInput = {
+  readonly message: AmqpMessage;
+  readonly delayMs: number;
+  readonly redeliveries: number;
+  readonly firstFailureAt: number;
+};
+
+/** A message to move to the dead-letter queue and the error that sent it there. */
+type DeadLetterInput = {
+  readonly message: AmqpMessage;
+  readonly reason: string;
+  readonly error: unknown;
+};
 
 /**
  * Consumes one queue with manual acknowledgements.
@@ -180,75 +207,129 @@ export class QueueConsumer {
   }
 
   async #process(channel: AmqpChannel, message: AmqpMessage): Promise<void> {
-    const { queue, handlerRetry } = this.#settings;
-    let envelope: EventEnvelope;
-    try {
-      envelope = this.#settings.decode(withOriginalRoutingKey(message));
-    } catch (error) {
-      this.#settings.logger.error(
-        `[QueueConsumer](process) Dead-lettering malformed message | queue=${queue} routingKey=${message.fields.routingKey} error=${toErrorInfo(error).message}`,
-      );
-      await this.#deadLetter(channel, message, 'malformed message');
+    const decoded = await this.#decodeOrDeadLetter(channel, message);
+    if (decoded === undefined) {
       return;
     }
-    let redeliveries = readCounterHeader(message, REDELIVERIES_HEADER) ?? 0;
-    let firstFailureAt = readCounterHeader(message, FIRST_FAILURE_HEADER);
+    const { envelope } = decoded;
+    const delivery: ProcessedMessage = {
+      channel,
+      message,
+      envelope,
+      redeliveries: readCounterHeader(message, REDELIVERIES_HEADER) ?? 0,
+      firstFailureAt: readCounterHeader(message, FIRST_FAILURE_HEADER),
+    };
     for (let attempt = 1; ; attempt += 1) {
       try {
-        await this.#settings.onMessage(envelope);
-        this.#settle(channel, message, 'ack');
+        await this.#settings.onMessage(envelope, { destination: message.fields.routingKey });
+        this.#settle(channel, { message, settlement: 'ack' });
         return;
       } catch (error) {
-        const failure = `queue=${queue} eventId=${envelope.id} attempt=${attempt} error=${toErrorInfo(error).message}`;
-        if (!isRetryableError(handlerRetry, error)) {
-          this.#settings.logger.error(
-            `[QueueConsumer](process) Dead-lettering message the handler cannot process | ${failure}`,
-          );
-          await this.#deadLetter(channel, message, 'non-retryable handler error');
-          return;
-        }
-        if (attempt < handlerRetry.attempts) {
-          const delayMs = computeRetryDelay(handlerRetry, attempt, this.#settings.random);
-          this.#settings.logger.warn(
-            `[QueueConsumer](process) Handler failed, retrying | ${failure} delayMs=${delayMs}`,
-          );
-          if (await this.#interrupted(delayMs)) {
-            this.#settle(channel, message, 'requeue');
-            return;
-          }
-          continue;
-        }
-        redeliveries += 1;
-        const now = Date.now();
-        firstFailureAt ??= now;
-        const delayMs = this.#redeliveryDelay(redeliveries);
-        if (now + delayMs - firstFailureAt > this.#settings.redeliveryMaxAgeMs) {
-          this.#settings.logger.error(
-            `[QueueConsumer](process) Dead-lettering message that kept failing | ${failure} redeliveries=${redeliveries - 1} failingForMs=${now - firstFailureAt} maxAgeMs=${this.#settings.redeliveryMaxAgeMs}`,
-          );
-          await this.#deadLetter(channel, message, 'redelivery window exhausted');
-          return;
-        }
-        this.#settings.logger.warn(
-          `[QueueConsumer](process) Handler attempts spent, retrying later | ${failure} redeliveries=${redeliveries} delayMs=${delayMs}`,
-        );
-        if (!this.#settings.ordered) {
-          await this.#redeliverLater(channel, message, delayMs, redeliveries, firstFailureAt);
-          return;
-        }
-        if (await this.#interrupted(delayMs)) {
-          this.#settle(channel, message, 'requeue');
+        if ((await this.#afterFailure(delivery, { attempt, error })) === 'settled') {
           return;
         }
       }
     }
   }
 
+  /** The event of `message`, or undefined after dead-lettering a message that is not one. */
+  async #decodeOrDeadLetter(
+    channel: AmqpChannel,
+    message: AmqpMessage,
+  ): Promise<{ readonly envelope: EventEnvelope } | undefined> {
+    try {
+      return { envelope: this.#settings.decode(withOriginalRoutingKey(message)) };
+    } catch (error) {
+      this.#settings.logger.error(
+        `[QueueConsumer](decodeOrDeadLetter) Dead-lettering malformed message | queue=${this.#settings.queue} routingKey=${message.fields.routingKey} ${describeError(error)}`,
+      );
+      this.#settings.onInvalidMessage?.({ destination: message.fields.routingKey, error });
+      await this.#deadLetter(channel, { message, reason: 'malformed message', error });
+      return undefined;
+    }
+  }
+
+  /**
+   * Decides what follows a failed attempt: dead-letter a non-retryable error, retry on the same
+   * delivery while local attempts remain, else redeliver later. `retry` runs the handler again.
+   */
+  async #afterFailure(
+    delivery: ProcessedMessage,
+    { attempt, error }: { readonly attempt: number; readonly error: unknown },
+  ): Promise<'retry' | 'settled'> {
+    const { channel, message, envelope } = delivery;
+    const { queue, handlerRetry } = this.#settings;
+    const failure = `queue=${queue} eventId=${envelope.id} attempt=${attempt} ${describeError(error)}`;
+    if (!isRetryableError(handlerRetry, error)) {
+      this.#settings.logger.error(
+        `[QueueConsumer](afterFailure) Dead-lettering message the handler cannot process | ${failure}`,
+      );
+      await this.#deadLetter(channel, {
+        message,
+        reason: 'non-retryable handler error',
+        error,
+      });
+      return 'settled';
+    }
+    if (attempt < handlerRetry.attempts) {
+      const delayMs = computeRetryDelay(handlerRetry, attempt, this.#settings.random);
+      this.#settings.logger.warn(
+        `[QueueConsumer](afterFailure) Handler failed, retrying | ${failure} delayMs=${delayMs}`,
+      );
+      return this.#waitOrRequeue(delivery, delayMs);
+    }
+    return this.#afterSpentAttempts(delivery, { failure, error });
+  }
+
+  /**
+   * The local attempts are spent: dead-letter a message that kept failing past `redeliveryMaxAgeMs`,
+   * else park it in a retry queue, or, when ordered, wait and retry it in place.
+   */
+  async #afterSpentAttempts(
+    delivery: ProcessedMessage,
+    { failure, error }: { readonly failure: string; readonly error: unknown },
+  ): Promise<'retry' | 'settled'> {
+    const { channel, message } = delivery;
+    delivery.redeliveries += 1;
+    const now = Date.now();
+    delivery.firstFailureAt ??= now;
+    const { redeliveries, firstFailureAt } = delivery;
+    const delayMs = this.#redeliveryDelay(redeliveries);
+    if (now + delayMs - firstFailureAt > this.#settings.redeliveryMaxAgeMs) {
+      this.#settings.logger.error(
+        `[QueueConsumer](afterSpentAttempts) Dead-lettering message that kept failing | ${failure} redeliveries=${redeliveries - 1} failingForMs=${now - firstFailureAt} maxAgeMs=${this.#settings.redeliveryMaxAgeMs}`,
+      );
+      await this.#deadLetter(channel, {
+        message,
+        reason: 'redelivery window exhausted',
+        error,
+      });
+      return 'settled';
+    }
+    this.#settings.logger.warn(
+      `[QueueConsumer](afterSpentAttempts) Handler attempts spent, retrying later | ${failure} redeliveries=${redeliveries} delayMs=${delayMs}`,
+    );
+    if (!this.#settings.ordered) {
+      await this.#redeliverLater(channel, { message, delayMs, redeliveries, firstFailureAt });
+      return 'settled';
+    }
+    return this.#waitOrRequeue(delivery, delayMs);
+  }
+
+  /** Waits `delayMs` before the next attempt; requeues instead when the consumer stops meanwhile. */
+  async #waitOrRequeue(delivery: ProcessedMessage, delayMs: number): Promise<'retry' | 'settled'> {
+    if (await this.#interrupted(delayMs)) {
+      this.#settle(delivery.channel, { message: delivery.message, settlement: 'requeue' });
+      return 'settled';
+    }
+    return 'retry';
+  }
+
   /** The backoff before the next delayed redelivery: a retry queue's TTL, or an exact wait when ordered. */
   #redeliveryDelay(redeliveries: number): number {
     const { redelivery, retryLadder, ordered, random } = this.#settings;
     const delayMs = computeRetryDelay(redelivery, redeliveries, random);
-    return ordered ? delayMs : chooseRetryTier(retryLadder, delayMs, random);
+    return ordered ? delayMs : chooseRetryTier(retryLadder, { delayMs, random });
   }
 
   /** Sleeps; true when the consumer is stopping, so the caller must give the message back. */
@@ -263,13 +344,8 @@ export class QueueConsumer {
    * the original is requeued after the same delay, so it is neither lost nor
    * hot-looped.
    */
-  async #redeliverLater(
-    channel: AmqpChannel,
-    message: AmqpMessage,
-    delayMs: number,
-    redeliveries: number,
-    firstFailureAt: number,
-  ): Promise<void> {
+  async #redeliverLater(channel: AmqpChannel, input: RedeliverLaterInput): Promise<void> {
+    const { message, delayMs, redeliveries, firstFailureAt } = input;
     const { content, options } = copyForRepublish(message, {
       [REDELIVERIES_HEADER]: String(redeliveries),
       [FIRST_FAILURE_HEADER]: String(firstFailureAt),
@@ -277,20 +353,18 @@ export class QueueConsumer {
     });
     try {
       await this.#settings.republish(
-        '',
-        retryQueueName(this.#settings.queue, delayMs),
-        content,
-        options,
+        { exchange: '', routingKey: retryQueueName(this.#settings.queue, delayMs) },
+        { content, options },
       );
     } catch (error) {
       this.#settings.logger.warn(
         `[QueueConsumer](redeliverLater) Could not park the message in the retry queue, requeueing it | queue=${this.#settings.queue} delayMs=${delayMs} error=${toErrorInfo(error).message}`,
       );
       await this.#interrupted(delayMs);
-      this.#settle(channel, message, 'requeue');
+      this.#settle(channel, { message, settlement: 'requeue' });
       return;
     }
-    this.#settle(channel, message, 'ack');
+    this.#settle(channel, { message, settlement: 'ack' });
   }
 
   /**
@@ -299,28 +373,33 @@ export class QueueConsumer {
    * message is rejected without requeue, which makes the broker dead-letter it
    * (at-least-once), so it still ends up in the dead-letter queue.
    */
-  async #deadLetter(channel: AmqpChannel, message: AmqpMessage, reason: string): Promise<void> {
+  async #deadLetter(channel: AmqpChannel, input: DeadLetterInput): Promise<void> {
+    const { message, reason, error } = input;
+    const { name, code } = toErrorInfo(error);
     const { content, options } = copyForRepublish(message, {
       [DEAD_LETTER_REASON_HEADER]: reason,
+      [DEAD_LETTER_ERROR_NAME_HEADER]: name,
+      ...(code === undefined ? {} : { [DEAD_LETTER_ERROR_CODE_HEADER]: code }),
     });
     try {
       await this.#settings.republish(
-        this.#settings.deadLetterExchange,
-        this.#settings.queue,
-        content,
-        options,
+        { exchange: this.#settings.deadLetterExchange, routingKey: this.#settings.queue },
+        { content, options },
       );
     } catch (error) {
       this.#settings.logger.warn(
         `[QueueConsumer](deadLetter) Could not publish to the dead-letter exchange, leaving it to the broker | queue=${this.#settings.queue} error=${toErrorInfo(error).message}`,
       );
-      this.#settle(channel, message, 'dead-letter');
+      this.#settle(channel, { message, settlement: 'dead-letter' });
       return;
     }
-    this.#settle(channel, message, 'ack');
+    this.#settle(channel, { message, settlement: 'ack' });
   }
 
-  #settle(channel: AmqpChannel, message: AmqpMessage, settlement: Settlement): void {
+  #settle(
+    channel: AmqpChannel,
+    { message, settlement }: { readonly message: AmqpMessage; readonly settlement: Settlement },
+  ): void {
     try {
       if (settlement === 'ack') {
         channel.ack(message);
@@ -334,4 +413,10 @@ export class QueueConsumer {
       );
     }
   }
+}
+
+/** Log fields of an error: its message, class name and, for relaybus errors, its code. */
+function describeError(error: unknown): string {
+  const { message, name, code } = toErrorInfo(error);
+  return `error=${message} errorName=${name}${code === undefined ? '' : ` code=${code}`}`;
 }

@@ -127,9 +127,12 @@ export function resolvePostgresNames(options: PostgresSchemaOptions = {}): Postg
   };
 }
 
+/** Hex digits of the hash that names a channel whose readable name is too long. */
+const CHANNEL_HASH_DIGITS = 32;
+
 /** PostgreSQL truncates names longer than 63 bytes, which could merge channels: those are hashed instead. */
 function channelName(readable: string): string {
   return readable.length <= MAXIMUM_CHANNEL_LENGTH
     ? readable
-    : `relaybus_${createHash('sha256').update(readable).digest('hex').slice(0, 32)}`;
+    : `relaybus_${createHash('sha256').update(readable).digest('hex').slice(0, CHANNEL_HASH_DIGITS)}`;
 }

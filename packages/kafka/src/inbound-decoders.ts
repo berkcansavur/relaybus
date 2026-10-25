@@ -1,4 +1,5 @@
 import { assertEventType, type EventEnvelope, type EventHeaders } from '@relaybus/core';
+import { createCloudEventReaders, isJsonObject, mediaTypeOf } from '@relaybus/core/internal';
 import {
   CONTENT_TYPE,
   collectUserHeaders,
@@ -12,6 +13,9 @@ import {
   type DecodableMessage,
 } from './cloudevents-codec.js';
 import type { KafkaBytes, KafkaIncomingHeaders } from './kafka-client.js';
+
+const { optionalAttribute, requiredAttribute, assertValidType, assertJsonDataContentType } =
+  createCloudEventReaders(invalid);
 
 /** A consumed record as handed to a {@link KafkaMessageDecoder}. */
 export interface KafkaInboundRecord extends DecodableMessage {
@@ -208,23 +212,26 @@ export function plainJsonDecoder(options: PlainJsonDecoderOptions): KafkaMessage
       payload: parsePayload(record.value),
       timestamp: record.timestamp,
     };
-    const type = resolveText(options.type, plain, 'type');
+    const type = resolveText(options.type, { record: plain, name: 'type' });
     if (type === undefined) {
       throw invalid('Record has no event type: the type option found none');
     }
     assertValidType(type, 'The event type');
     return {
       id:
-        resolveText(options.id, plain, 'id') ??
+        resolveText(options.id, { record: plain, name: 'id' }) ??
         `kafka:${record.topic}:${record.partition}:${record.offset}`,
       type,
-      source: resolveText(options.source, plain, 'source') ?? record.topic,
-      key: options.key === undefined ? plain.key : (resolveText(options.key, plain, 'key') ?? null),
+      source: resolveText(options.source, { record: plain, name: 'source' }) ?? record.topic,
+      key:
+        options.key === undefined
+          ? plain.key
+          : (resolveText(options.key, { record: plain, name: 'key' }) ?? null),
       payload: plain.payload,
       headers,
       correlationId: null,
       causationId: null,
-      occurredAt: resolveOccurredAt(options.occurredAt, plain, record),
+      occurredAt: resolveOccurredAt(options.occurredAt, { plain, record }),
     };
   };
 }
@@ -256,50 +263,6 @@ export function completeDecodedEvent(decoded: unknown, record: KafkaInboundRecor
   };
 }
 
-function mediaTypeOf(contentType: string | undefined): string | undefined {
-  return contentType?.split(';')[0]?.trim().toLowerCase();
-}
-
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function optionalAttribute(body: Record<string, unknown>, name: string): string | undefined {
-  const value = body[name];
-  if (value !== undefined && typeof value !== 'string') {
-    throw invalid(`Attribute '${name}' must be a string`);
-  }
-  return value;
-}
-
-function requiredAttribute(body: Record<string, unknown>, name: string): string {
-  const value = optionalAttribute(body, name);
-  if (value === undefined || value.length === 0) {
-    throw invalid(`Attribute '${name}' is missing or empty`);
-  }
-  return value;
-}
-
-function assertValidType(type: string, label: string): void {
-  try {
-    assertEventType(type);
-  } catch (error) {
-    throw invalid(`${label} is not a valid event type: ${(error as Error).message}`);
-  }
-}
-
-function assertJsonDataContentType(dataContentType: string | undefined): void {
-  const mediaType = mediaTypeOf(dataContentType);
-  if (
-    mediaType !== undefined &&
-    mediaType !== 'application/json' &&
-    mediaType !== 'text/json' &&
-    !mediaType.endsWith('+json')
-  ) {
-    throw invalid(`datacontenttype must be JSON, received '${dataContentType}'`);
-  }
-}
-
 function extensionAttributes(body: Record<string, unknown>): Record<string, string> {
   return Object.fromEntries(
     Object.entries(body).filter(
@@ -322,7 +285,7 @@ function requireRecordTimestamp(record: DecodableMessage): Date {
  * header wins, and a value that is not valid UTF-8 is left out, because
  * replacing its bytes could make two different ids or types look equal.
  */
-function readHeadersLeniently(incoming: KafkaIncomingHeaders | undefined): EventHeaders {
+export function readHeadersLeniently(incoming: KafkaIncomingHeaders | undefined): EventHeaders {
   const entries: [string, string][] = [];
   for (const [name, raw] of Object.entries(incoming ?? {})) {
     const value = Array.isArray(raw)
@@ -360,8 +323,7 @@ function readKeyLeniently(key: KafkaBytes | null): string | null {
 
 function resolveText<TValue extends string | null>(
   option: TValue | ((record: PlainJsonRecord) => TValue | undefined) | undefined,
-  record: PlainJsonRecord,
-  name: string,
+  { record, name }: { readonly record: PlainJsonRecord; readonly name: string },
 ): string | undefined {
   const value: unknown = typeof option === 'function' ? option(record) : option;
   if (value === undefined || value === null) {
@@ -376,8 +338,7 @@ function resolveText<TValue extends string | null>(
 
 function resolveOccurredAt(
   option: PlainJsonDecoderOptions['occurredAt'],
-  plain: PlainJsonRecord,
-  record: KafkaInboundRecord,
+  { plain, record }: { readonly plain: PlainJsonRecord; readonly record: KafkaInboundRecord },
 ): Date {
   const value: unknown = option?.(plain);
   if (value === undefined) {

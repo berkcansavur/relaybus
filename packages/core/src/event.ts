@@ -32,11 +32,21 @@ export interface DomainEvent<TPayload = unknown> {
   readonly payload: TPayload;
 }
 
+/**
+ * Derives the ordering key of an event from its validated payload. Declared bivariantly so an
+ * event class stays assignable wherever its payload type is widened.
+ */
+export type EventKeyFunction<TPayload> = {
+  bivarianceHack(payload: TPayload): string;
+}['bivarianceHack'];
+
 /** A class created with {@link defineEvent}. */
 export interface EventClass<TPayload = unknown> {
   new (payload: TPayload): DomainEvent<TPayload>;
   readonly type: string;
   readonly schema: StandardSchemaV1<unknown, TPayload> | undefined;
+  /** The `key` given to {@link defineEvent}; undefined for events without one. */
+  readonly key?: EventKeyFunction<TPayload> | undefined;
 }
 
 /** Payload type of an event class: `PayloadOf<typeof OrderPlaced>`. */
@@ -48,6 +58,18 @@ export type EventReference = { readonly type: string } | string;
 export interface DefineEventOptions<TSchema extends StandardSchemaV1> {
   /** Validates the payload on publish and before every handler call. */
   readonly schema: TSchema;
+  /** Ordering key of every event of this type, from its validated payload. See {@link DefineEventKeyOptions}. */
+  readonly key?: (payload: StandardSchemaV1.InferOutput<TSchema>) => string;
+}
+
+export interface DefineEventKeyOptions<TPayload> {
+  /**
+   * Ordering key of every event of this type, from its payload: `(payload) => payload.orderId`.
+   * Typed from the payload, so a missing field or a non-string fails to compile. `publish` uses it
+   * when it is given no `key`; an explicit `key` option wins (for `publishAll`, the one key of the
+   * call applies to every event). It must return a non-empty string.
+   */
+  readonly key: (payload: TPayload) => string;
 }
 
 const EVENT_TYPE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$/;
@@ -66,28 +88,41 @@ export function assertEventType(type: string): void {
  * ```ts
  * export class OrderPlaced extends defineEvent<{ orderId: string }>('order.placed.v1') {}
  * export class OrderShipped extends defineEvent('order.shipped.v1', { schema: orderShippedSchema }) {}
+ * export class OrderPaid extends defineEvent('order.paid.v1', {
+ *   schema: orderPaidSchema,
+ *   key: (payload) => payload.orderId,
+ * }) {}
+ * export class OrderCancelled extends defineEvent<{ orderId: string }>('order.cancelled.v1', {
+ *   key: (payload) => payload.orderId,
+ * }) {}
  * ```
  */
 export function defineEvent<TSchema extends StandardSchemaV1>(
   type: string,
   options: DefineEventOptions<TSchema>,
 ): EventClass<StandardSchemaV1.InferOutput<TSchema>>;
-export function defineEvent<TPayload>(type: string): EventClass<TPayload>;
+export function defineEvent<TPayload>(
+  type: string,
+  options?: DefineEventKeyOptions<TPayload>,
+): EventClass<TPayload>;
 export function defineEvent(
   type: string,
-  options?: DefineEventOptions<StandardSchemaV1>,
+  options?: Partial<DefineEventOptions<StandardSchemaV1>>,
 ): EventClass<unknown> {
   assertEventType(type);
   const schema = options?.schema;
+  const key = options?.key;
   return class DefinedEvent implements DomainEvent<unknown> {
     static readonly type = type;
     static readonly schema = schema;
+    static readonly key = key;
     readonly type = type;
     constructor(readonly payload: unknown) {}
   };
 }
 
 /** Runs a Standard Schema and returns its output, or throws {@link EventValidationError}. */
+// eslint-disable-next-line relaybus/max-two-params -- exported API validatePayload keeps its public signature
 export async function validatePayload<TPayload>(
   type: string,
   schema: StandardSchemaV1<unknown, TPayload> | undefined,
@@ -108,4 +143,24 @@ export async function validatePayload<TPayload>(
     );
   }
   return result.value;
+}
+
+/**
+ * The ordering key an event of `event`'s class takes from its definition, or null when the class
+ * defines no key.
+ *
+ * @throws ConfigurationError when the key function returns an empty string or no string.
+ */
+export function keyFromDefinition(event: DomainEvent, payload: unknown): string | null {
+  const keyOf = (event.constructor as Partial<EventClass>).key;
+  if (keyOf === undefined) {
+    return null;
+  }
+  const key: unknown = keyOf(payload);
+  if (typeof key !== 'string' || key.length === 0) {
+    throw new ConfigurationError(
+      `The key function of '${event.type}' must return a non-empty string | returned=${typeof key === 'string' ? "''" : typeof key}`,
+    );
+  }
+  return key;
 }

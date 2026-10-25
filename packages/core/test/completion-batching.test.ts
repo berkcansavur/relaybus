@@ -181,7 +181,7 @@ describe('dispatcher wake-up', () => {
     const registry = new HandlerRegistry();
     registry.register(
       {
-        eventType: 'order.placed.v1',
+        eventTypes: ['order.placed.v1'],
         schema: undefined,
         handle: () => undefined,
         options: { id: 'h' },

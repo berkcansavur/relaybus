@@ -78,7 +78,7 @@ function createCountingBus(options: { pollInterval?: Duration } = {}) {
 const BATCH_SIZE = 10;
 
 /** Stops the bus while fake timers keep moving, so its waits end. */
-async function stopBus(bus: { stop(): Promise<void> }): Promise<void> {
+async function stopBus(bus: { stop(): Promise<unknown> }): Promise<void> {
   let stopped = false;
   const stopping = bus.stop().then(() => {
     stopped = true;

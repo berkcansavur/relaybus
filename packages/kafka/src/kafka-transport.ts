@@ -1,7 +1,7 @@
 import {
   ConfigurationError,
+  systemClock,
   NonRetryableError,
-  RelayBusError,
   toErrorInfo,
   toMilliseconds,
   type Duration,
@@ -9,13 +9,18 @@ import {
   type RelayBusLogger,
   type Transport,
   type TransportMessageHandler,
+  type TransportSubscriptionHooks,
 } from '@relaybus/core';
+import { assertPositiveInteger, schedule, type CancelTimer } from '@relaybus/core/internal';
+import { decodeEnvelope, encodeEnvelope, toOutgoingHeaders } from './cloudevents-codec.js';
+import { cloudEventsBinary, type KafkaCodec } from './codecs.js';
 import {
+  GroupJoinTimeoutError,
+  HandlerFailedError,
   InvalidKafkaMessageError,
-  decodeEnvelope,
-  encodeEnvelope,
-  toOutgoingHeaders,
-} from './cloudevents-codec.js';
+  PublishTimeoutError,
+  TransportClosedError,
+} from './errors.js';
 import { completeDecodedEvent, type KafkaMessageDecoder } from './inbound-decoders.js';
 import type {
   KafkaClientLike,
@@ -58,16 +63,6 @@ export type InvalidMessagePolicy =
   | 'skip'
   | ((message: InvalidKafkaMessage) => void | Promise<void>)
   | { readonly deadLetterTopic: string | ((sourceTopic: string) => string) };
-
-/** `publish` did not get a broker ack within `publishTimeout`. The outbox retries it. */
-export class PublishTimeoutError extends RelayBusError {
-  override name = 'PublishTimeoutError';
-}
-
-/** A handler failure re-thrown to the Kafka client, stripped of anything that could make it fatal. */
-export class HandlerFailedError extends RelayBusError {
-  override name = 'HandlerFailedError';
-}
 
 /** Bounded in-process retries around the inbound handler (the bus's `receive`). */
 export interface KafkaProcessingOptions {
@@ -116,14 +111,22 @@ export interface KafkaTransportOptions {
   /** Handling of records that cannot be processed for good. Default `'dead-letter'`. */
   readonly onInvalidMessage?: InvalidMessagePolicy;
   /**
-   * How consumed records become events. Default: strict CloudEvents binary
-   * mode ({@link decodeEnvelope}), which is what relaybus producers write; any
-   * other record is malformed and goes to `onInvalidMessage`. Set it to read
-   * topics written by services that do not use relaybus:
-   * {@link decodeCloudEvent} also accepts structured mode, {@link plainJsonDecoder}
-   * maps plain JSON records, and a function of your own can do anything else
-   * (switch on `record.topic` to decode topics differently). Whatever a custom
-   * decoder throws marks the record as malformed, never crashes the consumer.
+   * The wire format, both ways: how events become records and consumed records
+   * become events. Default {@link cloudEventsBinary}: CloudEvents binary mode,
+   * strict on read, so any other record is malformed and goes to
+   * `onInvalidMessage`. {@link cloudEventsStructured} writes structured mode
+   * and reads both, {@link jsonEnvelope} maps a JSON format of your own (an
+   * envelope with the payload inside, or the bare payload), and an object with
+   * `encode` and `decode` can do anything else. Whatever a non-default codec's
+   * `decode` throws marks the record as malformed, never crashes the consumer.
+   */
+  readonly codec?: KafkaCodec;
+  /**
+   * How consumed records become events; events are still written in
+   * CloudEvents binary mode.
+   *
+   * @deprecated Use `codec`: `decode: fn` is `codec: { encode: encodeEnvelope, decode: fn }`.
+   * Giving both `decode` and `codec` is a configuration error.
    */
   readonly decode?: KafkaMessageDecoder;
   /** Default `console`. */
@@ -159,8 +162,8 @@ interface Settings {
 /**
  * Kafka {@link Transport}. Events travel as CloudEvents binary-mode records
  * (`ce_*` headers, JSON value), so any CloudEvents-aware consumer can read them.
- * Records from producers that do not use relaybus are read through the
- * `decode` option.
+ * The `codec` option changes the wire format, for example to read and write
+ * the JSON format of services that do not use relaybus.
  *
  * Publishing: idempotent producer, `acks=-1`, resolves after the broker ack and
  * rejects with {@link PublishTimeoutError} after `publishTimeout`. A timed-out
@@ -181,6 +184,7 @@ interface Settings {
  */
 export class KafkaTransport implements Transport {
   readonly name: string;
+  readonly system = 'kafka';
   readonly #kafka: KafkaClientLike;
   readonly #groupId: string | undefined;
   readonly #fromBeginning: boolean;
@@ -188,7 +192,7 @@ export class KafkaTransport implements Transport {
   readonly #producerConfig: object;
   readonly #consumerConfig: object;
   readonly #invalidPolicy: InvalidMessagePolicy;
-  readonly #decode: KafkaMessageDecoder | undefined;
+  readonly #codec: KafkaCodec;
   readonly #logger: RelayBusLogger;
   readonly #settings: Settings;
   readonly #sleepers = new Set<() => void>();
@@ -208,20 +212,13 @@ export class KafkaTransport implements Transport {
     this.#kafka = options.kafka;
     this.#groupId = options.groupId;
     this.#fromBeginning = options.fromBeginning ?? true;
-    this.#maxInFlightRequests = options.maxInFlightRequests ?? DEFAULTS.maxInFlightRequests;
-    if (
-      !Number.isInteger(this.#maxInFlightRequests) ||
-      this.#maxInFlightRequests < 1 ||
-      this.#maxInFlightRequests > 5
-    ) {
-      throw new ConfigurationError(
-        `maxInFlightRequests must be an integer from 1 to 5, received ${this.#maxInFlightRequests}`,
-      );
-    }
+    this.#maxInFlightRequests = assertMaxInFlightRequests(
+      options.maxInFlightRequests ?? DEFAULTS.maxInFlightRequests,
+    );
     this.#producerConfig = options.producerConfig ?? {};
     this.#consumerConfig = options.consumerConfig ?? {};
     this.#invalidPolicy = options.onInvalidMessage ?? 'dead-letter';
-    this.#decode = options.decode;
+    this.#codec = resolveCodec(options);
     this.#logger = options.logger ?? console;
     this.#settings = resolveSettings(options);
   }
@@ -255,11 +252,10 @@ export class KafkaTransport implements Transport {
 
   async publish(envelope: EventEnvelope, destination: string): Promise<void> {
     const producer = await this.#connectedProducer();
-    const { key, value, headers } = encodeEnvelope(envelope);
     await this.#send(producer, {
       topic: destination,
       acks: -1,
-      messages: [{ key, value, headers }],
+      messages: [this.#codec.encode(envelope)],
     });
   }
 
@@ -270,16 +266,19 @@ export class KafkaTransport implements Transport {
    * @throws ConfigurationError when `groupId` is missing, `destinations` is empty
    * or the transport already subscribed (create one transport per subscription).
    */
+  // eslint-disable-next-line relaybus/max-two-params -- the Transport.subscribe signature
   async subscribe(
     destinations: readonly string[],
     onMessage: TransportMessageHandler,
+    hooks?: TransportSubscriptionHooks,
   ): Promise<void> {
     this.#assertCanSubscribe(destinations);
     this.#state = 'subscribed';
     const consumer = this.#kafka.consumer({ ...this.#consumerConfig, groupId: this.#groupId! });
     this.#consumer = consumer;
     this.#observeConsumer(consumer);
-    const start = (): Promise<void> => this.#startConsumer(consumer, [...destinations], onMessage);
+    const start = (): Promise<void> =>
+      this.#startConsumer(consumer, { destinations: [...destinations], onMessage, hooks });
     this.#startConsuming = start;
     try {
       await start();
@@ -299,14 +298,23 @@ export class KafkaTransport implements Transport {
 
   async #startConsumer(
     consumer: KafkaConsumerLike,
-    destinations: string[],
-    onMessage: TransportMessageHandler,
+    {
+      destinations,
+      onMessage,
+      hooks,
+    }: {
+      readonly destinations: string[];
+      readonly onMessage: TransportMessageHandler;
+      readonly hooks: TransportSubscriptionHooks | undefined;
+    },
   ): Promise<void> {
     await consumer.connect();
     await consumer.subscribe({ topics: destinations, fromBeginning: this.#fromBeginning });
     const joined = this.#waitForGroupJoin(consumer);
     try {
-      await consumer.run({ eachMessage: (payload) => this.#handleMessage(payload, onMessage) });
+      await consumer.run({
+        eachMessage: (payload) => this.#handleMessage(payload, { onMessage, hooks }),
+      });
       await joined.promise;
     } finally {
       joined.dispose();
@@ -325,7 +333,7 @@ export class KafkaTransport implements Transport {
     for (const wake of this.#sleepers) {
       wake();
     }
-    this.#joinWaiter?.reject(new RelayBusError(`Transport '${this.name}' is closed`));
+    this.#joinWaiter?.reject(new TransportClosedError(`Transport '${this.name}' is closed`));
     await this.#restartLoop;
     const producer = await pendingProducer?.catch(() => undefined);
     const results = await Promise.allSettled([
@@ -340,7 +348,7 @@ export class KafkaTransport implements Transport {
 
   #assertCanSubscribe(destinations: readonly string[]): void {
     if (this.#state === 'closed') {
-      throw new RelayBusError(`Transport '${this.name}' is closed`);
+      throw new TransportClosedError(`Transport '${this.name}' is closed`);
     }
     if (this.#state === 'subscribed') {
       throw new ConfigurationError(
@@ -378,28 +386,31 @@ export class KafkaTransport implements Transport {
 
   /** Sends with the publish timeout; the late outcome of a timed-out send is ignored. */
   async #send(producer: KafkaProducerLike, record: KafkaProducerRecord): Promise<void> {
-    let timer: NodeJS.Timeout | undefined;
+    let cancel: CancelTimer | undefined;
     const timeout = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => {
-        reject(
-          new PublishTimeoutError(
-            `Transport '${this.name}' got no broker ack for topic '${record.topic}' within ${this.#settings.publishTimeoutMs}ms`,
-          ),
-        );
-      }, this.#settings.publishTimeoutMs);
+      cancel = schedule(systemClock, {
+        run: () => {
+          reject(
+            new PublishTimeoutError(
+              `Transport '${this.name}' got no broker ack for topic '${record.topic}' within ${this.#settings.publishTimeoutMs}ms`,
+            ),
+          );
+        },
+        delayMs: this.#settings.publishTimeoutMs,
+      });
     });
     const sending = producer.send(record);
     sending.catch(() => undefined);
     try {
       await Promise.race([sending, timeout]);
     } finally {
-      clearTimeout(timer);
+      cancel?.();
     }
   }
 
   #connectedProducer(): Promise<KafkaProducerLike> {
     if (this.#state === 'closed') {
-      return Promise.reject(new RelayBusError(`Transport '${this.name}' is closed`));
+      return Promise.reject(new TransportClosedError(`Transport '${this.name}' is closed`));
     }
     this.#producer ??= this.#openProducer();
     return this.#producer;
@@ -423,35 +434,47 @@ export class KafkaTransport implements Transport {
 
   async #handleMessage(
     payload: KafkaEachMessagePayload,
-    onMessage: TransportMessageHandler,
+    {
+      onMessage,
+      hooks,
+    }: {
+      onMessage: TransportMessageHandler;
+      hooks: TransportSubscriptionHooks | undefined;
+    },
   ): Promise<void> {
     let envelope: EventEnvelope;
     try {
       envelope = this.#decodeRecord(payload);
     } catch (error) {
-      // The default decoder throws only InvalidKafkaMessageError for bad input; anything else is a bug.
-      if (this.#decode === undefined && !(error instanceof InvalidKafkaMessageError)) {
+      // The default codec throws only InvalidKafkaMessageError for bad input; anything else is a bug.
+      if (this.#codec === cloudEventsBinary && !(error instanceof InvalidKafkaMessageError)) {
         throw toHandlerFailure(error);
       }
-      const reason = toErrorInfo(error).message;
-      await this.#withRetries(payload, 'handleInvalid', () => this.#handleInvalid(payload, reason));
+      hooks?.onInvalidMessage({ destination: payload.topic, error });
+      await this.#withRetries(payload, {
+        method: 'handleInvalid',
+        operation: () => this.#handleInvalid(payload, error),
+      });
       return;
     }
-    await this.#withRetries(payload, 'deliver', async () => {
-      try {
-        await onMessage(envelope);
-      } catch (error) {
-        // The bus rejected the event for good; redelivering it would block the partition forever.
-        if (!(error instanceof NonRetryableError)) {
-          throw error;
+    await this.#withRetries(payload, {
+      method: 'deliver',
+      operation: async () => {
+        try {
+          await onMessage(envelope, { destination: payload.topic });
+        } catch (error) {
+          // The bus rejected the event for good; redelivering it would block the partition forever.
+          if (!(error instanceof NonRetryableError)) {
+            throw error;
+          }
+          await this.#handleInvalid(payload, error);
         }
-        await this.#handleInvalid(payload, error.message);
-      }
+      },
     });
   }
 
   #decodeRecord({ topic, partition, message }: KafkaEachMessagePayload): EventEnvelope {
-    if (this.#decode === undefined) {
+    if (this.#codec === cloudEventsBinary) {
       return decodeEnvelope(message);
     }
     const record = {
@@ -463,17 +486,19 @@ export class KafkaTransport implements Transport {
       headers: message.headers,
       timestamp: message.timestamp,
     };
-    return completeDecodedEvent(this.#decode(record), record);
+    return completeDecodedEvent(this.#codec.decode(record), record);
   }
 
-  async #handleInvalid(payload: KafkaEachMessagePayload, reason: string): Promise<void> {
+  async #handleInvalid(payload: KafkaEachMessagePayload, error: unknown): Promise<void> {
     const { topic, partition, message } = payload;
+    const { message: reason, name, code } = toErrorInfo(error);
     const location = `topic=${topic} partition=${partition} offset=${message.offset}`;
+    const errorFields = `errorName=${name}${code === undefined ? '' : ` code=${code}`}`;
     const policy = this.#invalidPolicy;
     const deadLetterTopic = this.#deadLetterTopicFor(topic);
     if (policy === 'skip') {
       this.#logger.error(
-        `[KafkaTransport](handleInvalid) Skipping malformed message | ${location} reason=${reason}`,
+        `[KafkaTransport](handleInvalid) Skipping malformed message | ${location} reason=${reason} ${errorFields}`,
       );
     } else if (typeof policy === 'function') {
       await policy({
@@ -485,6 +510,19 @@ export class KafkaTransport implements Transport {
         value: message.value,
       });
     } else {
+      const headers: Record<string, Buffer | string | (Buffer | string)[]> = {
+        ...toOutgoingHeaders(message.headers),
+        'relaybus-invalid-reason': reason,
+        'relaybus-source-topic': topic,
+        'relaybus-source-partition': String(partition),
+        'relaybus-source-offset': message.offset,
+        'relaybus-error-name': name,
+      };
+      if (code === undefined) {
+        delete headers['relaybus-error-code'];
+      } else {
+        headers['relaybus-error-code'] = code;
+      }
       const producer = await this.#connectedProducer();
       await this.#send(producer, {
         topic: deadLetterTopic!,
@@ -493,18 +531,12 @@ export class KafkaTransport implements Transport {
           {
             key: message.key === null ? null : Buffer.from(message.key),
             value: message.value === null ? null : Buffer.from(message.value),
-            headers: {
-              ...toOutgoingHeaders(message.headers),
-              'relaybus-invalid-reason': reason,
-              'relaybus-source-topic': topic,
-              'relaybus-source-partition': String(partition),
-              'relaybus-source-offset': message.offset,
-            },
+            headers,
           },
         ],
       });
       this.#logger.error(
-        `[KafkaTransport](handleInvalid) Dead-lettered malformed message | ${location} deadLetterTopic=${deadLetterTopic} reason=${reason}`,
+        `[KafkaTransport](handleInvalid) Dead-lettered malformed message | ${location} deadLetterTopic=${deadLetterTopic} reason=${reason} ${errorFields}`,
       );
     }
   }
@@ -516,8 +548,7 @@ export class KafkaTransport implements Transport {
    */
   async #withRetries(
     payload: KafkaEachMessagePayload,
-    method: string,
-    operation: () => Promise<void>,
+    { method, operation }: { readonly method: string; readonly operation: () => Promise<void> },
   ): Promise<void> {
     const { maxAttempts, initialBackoffMs, maxBackoffMs } = this.#settings;
     const location = `topic=${payload.topic} partition=${payload.partition} offset=${payload.message.offset}`;
@@ -532,12 +563,12 @@ export class KafkaTransport implements Transport {
         if (attempt >= maxAttempts || this.#state === 'closed') {
           this.#stalledPartitions.add(partitionKey);
           this.#logger.error(
-            `[KafkaTransport](${method}) Giving up for now, the record stays uncommitted and will be redelivered | ${location} attempts=${attempt} error=${reason}`,
+            `[KafkaTransport](withRetries) Giving up for now, the record stays uncommitted and will be redelivered | operation=${method} ${location} attempts=${attempt} error=${reason}`,
           );
           throw toHandlerFailure(error);
         }
         this.#logger.warn(
-          `[KafkaTransport](${method}) Attempt failed, retrying | ${location} attempt=${attempt} error=${reason}`,
+          `[KafkaTransport](withRetries) Attempt failed, retrying | operation=${method} ${location} attempt=${attempt} error=${reason}`,
         );
         await this.#sleepWithHeartbeats(
           Math.min(initialBackoffMs * 2 ** (attempt - 1), maxBackoffMs),
@@ -564,11 +595,11 @@ export class KafkaTransport implements Transport {
   #sleep(milliseconds: number): Promise<void> {
     return new Promise((resolve) => {
       const wake = (): void => {
-        clearTimeout(timer);
+        cancel();
         this.#sleepers.delete(wake);
         resolve();
       };
-      const timer = setTimeout(wake, milliseconds);
+      const cancel = schedule(systemClock, { run: wake, delayMs: milliseconds });
       this.#sleepers.add(wake);
     });
   }
@@ -659,44 +690,57 @@ export class KafkaTransport implements Transport {
     if (!this.#tracksMembership(consumer)) {
       return { promise: Promise.resolve(), dispose: () => undefined };
     }
-    let timer: NodeJS.Timeout | undefined;
+    let cancel: CancelTimer | undefined;
     const promise = new Promise<void>((resolve, reject) => {
       this.#joinWaiter = { resolve, reject };
-      timer = setTimeout(() => {
-        reject(
-          new RelayBusError(
-            `Consumer of transport '${this.name}' did not join group '${this.#groupId}' within ${this.#settings.startupTimeoutMs}ms`,
-          ),
-        );
-      }, this.#settings.startupTimeoutMs);
+      cancel = schedule(systemClock, {
+        run: () => {
+          reject(
+            new GroupJoinTimeoutError(
+              `Consumer of transport '${this.name}' did not join group '${this.#groupId}' within ${this.#settings.startupTimeoutMs}ms`,
+            ),
+          );
+        },
+        delayMs: this.#settings.startupTimeoutMs,
+      });
     });
     // The rejection may land while `run` is still pending; the caller awaits it afterwards.
     promise.catch(() => undefined);
     return {
       promise,
       dispose: () => {
-        clearTimeout(timer);
+        cancel?.();
         this.#joinWaiter = undefined;
       },
     };
   }
 }
 
-function resolveSettings(options: KafkaTransportOptions): Settings {
-  const maxAttempts = options.processing?.maxAttempts ?? DEFAULTS.maxAttempts;
-  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
-    throw new ConfigurationError(
-      `processing.maxAttempts must be a positive integer, received ${maxAttempts}`,
-    );
+/** The codec of the options; the deprecated `decode` pairs with the default encoding. */
+function resolveCodec({ codec, decode }: KafkaTransportOptions): KafkaCodec {
+  if (decode === undefined) {
+    return codec ?? cloudEventsBinary;
   }
+  if (codec !== undefined) {
+    throw new ConfigurationError("Give 'codec' or the deprecated 'decode', not both");
+  }
+  return { encode: encodeEnvelope, decode };
+}
+
+function resolveSettings(options: KafkaTransportOptions): Settings {
+  const processing: KafkaProcessingOptions = options.processing ?? {};
+  const maxAttempts = assertPositiveInteger(
+    processing.maxAttempts ?? DEFAULTS.maxAttempts,
+    'processing.maxAttempts',
+  );
   return {
     maxAttempts,
     initialBackoffMs: toMilliseconds(
-      options.processing?.initialBackoff ?? DEFAULTS.initialBackoff,
+      processing.initialBackoff ?? DEFAULTS.initialBackoff,
       'processing.initialBackoff',
     ),
     maxBackoffMs: toMilliseconds(
-      options.processing?.maxBackoff ?? DEFAULTS.maxBackoff,
+      processing.maxBackoff ?? DEFAULTS.maxBackoff,
       'processing.maxBackoff',
     ),
     startupTimeoutMs: toMilliseconds(
@@ -710,19 +754,40 @@ function resolveSettings(options: KafkaTransportOptions): Settings {
     heartbeatIntervalMs: Math.max(
       1,
       toMilliseconds(
-        options.processing?.heartbeatInterval ?? DEFAULTS.heartbeatInterval,
+        processing.heartbeatInterval ?? DEFAULTS.heartbeatInterval,
         'processing.heartbeatInterval',
       ),
     ),
+    ...resolveRestartSettings(options.restart ?? {}),
+  };
+}
+
+function resolveRestartSettings(
+  restart: KafkaRestartOptions,
+): Pick<Settings, 'restartInitialBackoffMs' | 'restartMaxBackoffMs'> {
+  return {
     restartInitialBackoffMs: toMilliseconds(
-      options.restart?.initialBackoff ?? DEFAULTS.restartInitialBackoff,
+      restart.initialBackoff ?? DEFAULTS.restartInitialBackoff,
       'restart.initialBackoff',
     ),
     restartMaxBackoffMs: toMilliseconds(
-      options.restart?.maxBackoff ?? DEFAULTS.restartMaxBackoff,
+      restart.maxBackoff ?? DEFAULTS.restartMaxBackoff,
       'restart.maxBackoff',
     ),
   };
+}
+
+/** Largest `maxInFlightRequests`. */
+const MAXIMUM_IN_FLIGHT_REQUESTS = 5;
+
+/** Returns `value` when it is an integer from 1 to 5. */
+function assertMaxInFlightRequests(value: number): number {
+  if (!Number.isInteger(value) || value < 1 || value > MAXIMUM_IN_FLIGHT_REQUESTS) {
+    throw new ConfigurationError(
+      `maxInFlightRequests must be an integer from 1 to 5, received ${value}`,
+    );
+  }
+  return value;
 }
 
 /**

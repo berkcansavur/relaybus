@@ -6,7 +6,7 @@ import {
   type EventEnvelope,
   type Transport,
 } from '@relaybus/core';
-import { InMemoryTransport } from '@relaybus/testing';
+import { FakeClock, InMemoryTransport } from '@relaybus/testing';
 import { OrderPlaced, createTestBus, deferred, waitFor } from './helpers.js';
 
 function remoteEnvelope(overrides: Partial<EventEnvelope> = {}): EventEnvelope {
@@ -45,13 +45,17 @@ describe('lifecycle', () => {
     expect(setup).toHaveBeenCalledTimes(1);
     expect(transport.connected).toBe(true);
     expect(logger.log).toHaveBeenCalledWith(
-      '[RelayBus](start) relaybus started | handlers=1 dispatcher=true',
+      '[RelayBus](startComponents) relaybus started | handlers=1 dispatcher=true',
     );
     await bus.publish(new OrderPlaced({ orderId: '1' }));
     await waitFor(() => handled.mock.calls.length === 1);
     await transport.deliver('orders', remoteEnvelope());
     await waitFor(() => handled.mock.calls.length === 2);
     await expect(bus.start()).rejects.toThrow('Cannot start a relaybus that is running');
+    await expect(bus.start()).rejects.toMatchObject({
+      name: 'LifecycleError',
+      code: 'RELAYBUS_LIFECYCLE',
+    });
     await bus.stop();
     await bus.stop();
     expect(bus.isRunning).toBe(false);
@@ -226,6 +230,10 @@ describe('drain', () => {
     expect(await bus.drain()).toBe(0);
     await bus.publish(new OrderPlaced({ orderId: '1' }));
     await expect(bus.drain(3)).rejects.toThrow(RelayBusError);
+    await expect(bus.drain(3)).rejects.toMatchObject({
+      name: 'DrainIncompleteError',
+      code: 'RELAYBUS_DRAIN_INCOMPLETE',
+    });
   });
 });
 
@@ -257,8 +265,8 @@ describe('transports', () => {
       ]),
     );
     expect(bus.handlers().map((registration) => registration.id)).toEqual([
-      'relaybus.transport:broker:order.placed.v1:order.placed.v1',
-      'relaybus.transport:broker:audit:order.placed.v1',
+      'relaybus.transport:broker:order.placed.v1',
+      'relaybus.transport:broker:audit',
     ]);
   });
 
@@ -353,6 +361,25 @@ describe('administration', () => {
     expect(observer.onPurged).toHaveBeenCalledTimes(2);
   });
 
+  it('runs the retention purge on the clock, so a test clock controls it', async () => {
+    const clock = new FakeClock(0, { controlTimers: true });
+    const { bus, store } = createTestBus({
+      clock,
+      transactionMode: 'optional',
+      retention: { completed: '1h', interval: '10m' },
+      dispatcher: { enabled: false },
+    });
+    const purge = vi.spyOn(store, 'purge');
+    await bus.start();
+    expect(purge).not.toHaveBeenCalled();
+    clock.advance(10 * 60_000);
+    await waitFor(() => purge.mock.calls.length === 1);
+    clock.advance(10 * 60_000);
+    await waitFor(() => purge.mock.calls.length === 2);
+    await bus.stop();
+    expect(clock.pendingTimers).toBe(0);
+  });
+
   it('keeps everything when retention is disabled', async () => {
     const { bus, store } = createTestBus({ retention: { completed: false } });
     const purge = vi.spyOn(store, 'purge');
@@ -403,12 +430,12 @@ describe('observers', () => {
       error: expect.objectContaining({ message: 'metrics backend down' }),
     });
     expect(logger.warn).toHaveBeenCalledWith(
-      '[Notifier](notify) relaybus observer threw | Error: metrics backend down',
+      '[Notifier](logObserverFailure) relaybus observer threw | Error: metrics backend down',
     );
     vi.spyOn(store, 'purge').mockRejectedValue(new Error('locked'));
     await expect(busWithFailing.purgeExpired()).rejects.toThrow('locked');
     expect(logger.warn).toHaveBeenCalledWith(
-      '[Notifier](notify) relaybus observer threw | Error: failure hook broken',
+      '[Notifier](logObserverFailure) relaybus observer threw | Error: failure hook broken',
     );
     expect(logger.error).toHaveBeenCalledWith(
       '[Notifier](failure) relaybus purge failed | Error: locked',
@@ -434,7 +461,7 @@ describe('observers', () => {
     bus.subscribe(OrderPlaced, () => undefined, { id: 'h' });
     await bus.publish(new OrderPlaced({ orderId: '1' }));
     expect(logger.warn).toHaveBeenCalledWith(
-      '[Notifier](notify) relaybus observer threw | Error: second',
+      '[Notifier](logObserverFailure) relaybus observer threw | Error: second',
     );
   });
 

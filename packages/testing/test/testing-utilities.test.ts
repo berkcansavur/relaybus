@@ -9,6 +9,68 @@ describe('FakeClock', () => {
     expect(clock.set('2027-05-05T05:05:05.000Z').toISOString()).toBe('2027-05-05T05:05:05.000Z');
     expect(new FakeClock(0).now().getTime()).toBe(0);
   });
+
+  it('leaves timers to the platform unless asked to control them', () => {
+    expect(new FakeClock().schedule).toBeUndefined();
+    expect(new FakeClock(0, { controlTimers: false }).schedule).toBeUndefined();
+  });
+
+  it('runs controlled timers when their time comes, in time order and then in the order they were set', () => {
+    const clock = new FakeClock(0, { controlTimers: true });
+    const ran: string[] = [];
+    const at = (label: string) => () => ran.push(`${label}@${clock.now().getTime()}`);
+    clock.schedule!({ run: at('late'), delayMs: 300 });
+    clock.schedule!({ run: at('first'), delayMs: 100 });
+    clock.schedule!({ run: at('second'), delayMs: 100 });
+    clock.schedule!({ run: at('negative'), delayMs: -5 });
+    expect(clock.pendingTimers).toBe(4);
+    expect(clock.advance(99).getTime()).toBe(99);
+    expect(ran).toEqual(['negative@0']);
+    clock.advance(250);
+    expect(ran).toEqual(['negative@0', 'first@100', 'second@100', 'late@300']);
+    expect(clock.now().getTime()).toBe(349);
+    expect(clock.pendingTimers).toBe(0);
+  });
+
+  it('repeats a repeating timer every interval and stops a cancelled one', () => {
+    const clock = new FakeClock(0, { controlTimers: true });
+    const ticks: number[] = [];
+    const cancel = clock.schedule!({
+      run: () => ticks.push(clock.now().getTime()),
+      delayMs: 100,
+      repeat: true,
+    });
+    const zero: number[] = [];
+    const cancelZero = clock.schedule!({
+      run: () => zero.push(clock.now().getTime()),
+      delayMs: 0,
+      repeat: true,
+    });
+    clock.advance(2);
+    cancelZero();
+    clock.advance(298);
+    expect(ticks).toEqual([100, 200, 300]);
+    expect(zero).toEqual([0, 1, 2]);
+    cancel();
+    cancel();
+    clock.advance(1_000);
+    expect(ticks).toEqual([100, 200, 300]);
+    expect(clock.pendingTimers).toBe(0);
+  });
+
+  it('runs a timer that another timer sets when it falls due within the same advance', () => {
+    const clock = new FakeClock(0, { controlTimers: true });
+    const ran: number[] = [];
+    clock.schedule!({
+      run: () => {
+        ran.push(clock.now().getTime());
+        clock.schedule!({ run: () => ran.push(clock.now().getTime()), delayMs: 50 });
+      },
+      delayMs: 50,
+    });
+    clock.advance(100);
+    expect(ran).toEqual([50, 100]);
+  });
 });
 
 describe('InMemoryTransport', () => {

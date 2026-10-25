@@ -49,6 +49,11 @@ clock.advance(60_000); // make retries due
 await bus.drain();
 ```
 
+Timers (polling, heartbeats, handler timeouts, retention) stay real by default. With
+`new FakeClock(start, { controlTimers: true })` the clock owns the timers of the bus that uses it:
+they run inside `clock.advance(ms)` when their time comes, and `clock.pendingTimers` counts the ones
+still waiting. Any `Clock` can do the same by implementing the optional `schedule` method.
+
 ## InMemoryTransport
 
 Records publishes, simulates outages with `failNextPublishes(n)` and delivers

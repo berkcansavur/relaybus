@@ -66,22 +66,33 @@ export function createRetryPolicy(
   options: RetryPolicyOptions | undefined,
   base: RetryPolicy = DEFAULT_RETRY_POLICY,
 ): RetryPolicy {
+  const policy = mergeRetryPolicy(options, base);
+  assertValidRetryPolicy(policy);
+  return policy;
+}
+
+/** `options` over `base`, durations converted, without validation. */
+function mergeRetryPolicy(options: RetryPolicyOptions | undefined, base: RetryPolicy): RetryPolicy {
+  const overrides: RetryPolicyOptions = options ?? {};
   const initialDelayMs =
-    options?.initialDelay === undefined
+    overrides.initialDelay === undefined
       ? base.initialDelayMs
-      : toMilliseconds(options.initialDelay, 'retry.initialDelay');
-  const policy: RetryPolicy = {
-    attempts: options?.attempts ?? base.attempts,
+      : toMilliseconds(overrides.initialDelay, 'retry.initialDelay');
+  return {
+    attempts: overrides.attempts ?? base.attempts,
     initialDelayMs,
-    factor: options?.factor ?? base.factor,
+    factor: overrides.factor ?? base.factor,
     maxDelayMs:
-      options?.maxDelay === undefined
+      overrides.maxDelay === undefined
         ? // Raising only the initial delay must not trip the inherited cap.
           Math.max(base.maxDelayMs, initialDelayMs)
-        : toMilliseconds(options.maxDelay, 'retry.maxDelay'),
-    jitter: options?.jitter ?? base.jitter,
-    retryIf: options?.retryIf ?? base.retryIf,
+        : toMilliseconds(overrides.maxDelay, 'retry.maxDelay'),
+    jitter: overrides.jitter ?? base.jitter,
+    retryIf: overrides.retryIf ?? base.retryIf,
   };
+}
+
+function assertValidRetryPolicy(policy: RetryPolicy): void {
   if (
     policy.attempts !== Number.POSITIVE_INFINITY &&
     (!Number.isInteger(policy.attempts) || policy.attempts < 1)
@@ -101,13 +112,13 @@ export function createRetryPolicy(
       `retry.jitter must be one of ${JITTER_STRATEGIES.join(', ')}, received '${String(policy.jitter)}'`,
     );
   }
-  return policy;
 }
 
 /**
  * Delay before the next attempt after `failedAttempts` failures (1-based):
  * capped exponential backoff with the policy's jitter.
  */
+// eslint-disable-next-line relaybus/max-two-params -- exported API computeRetryDelay keeps its public signature
 export function computeRetryDelay(
   policy: RetryPolicy,
   failedAttempts: number,

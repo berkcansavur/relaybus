@@ -13,7 +13,7 @@ pnpm add @relaybus/core @relaybus/nestjs @relaybus/postgres pg
 
 | Package                                                                  | Use it for                                                    |
 | ------------------------------------------------------------------------ | ------------------------------------------------------------- |
-| [`@relaybus/nestjs`](https://www.npmjs.com/package/@relaybus/nestjs)     | `RelayBusModule` and the `@Subscribe` decorator               |
+| [`@relaybus/nestjs`](https://www.npmjs.com/package/@relaybus/nestjs)     | `RelayBusModule` and the `@RelayBusConsumer` decorator        |
 | [`@relaybus/postgres`](https://www.npmjs.com/package/@relaybus/postgres) | PostgreSQL store (pg, Prisma, TypeORM, Knex, Kysely, Drizzle) |
 | [`@relaybus/mongodb`](https://www.npmjs.com/package/@relaybus/mongodb)   | MongoDB store (driver or Mongoose sessions)                   |
 | [`@relaybus/kafka`](https://www.npmjs.com/package/@relaybus/kafka)       | Kafka transport between services                              |
@@ -33,7 +33,7 @@ export class AppModule {}
 // shipping.handlers.ts: consume with a decorator
 @Injectable()
 export class ShippingHandlers {
-  @Subscribe(OrderPlaced, { retry: { attempts: 5 } })
+  @RelayBusConsumer(OrderPlaced, { retry: { attempts: 5 } })
   async ship(event: EventEnvelope<{ orderId: string }>) {
     /* runs after the order transaction commits */
   }
@@ -84,6 +84,7 @@ Use a database store in production: [`@relaybus/postgres`](../postgres) or
 | `source`                                  | `'relaybus'`                                  | Service name recorded on every event.                                                                                                         |
 | `transactionMode`                         | `'required'`                                  | `'optional'` lets `publish` open its own transaction.                                                                                         |
 | `transactionResolver`                     | —                                             | Returns the caller's active transaction, e.g. from `@nestjs-cls/transactional`.                                                               |
+| `transactionTimeout`                      | `'5s'`                                        | Budget of every `bus.transaction`; the database enforces it where it can, an overrun rolls back with `TransactionTimeoutError`.               |
 | `unroutedEvents`                          | `'warn'`                                      | `'throw'` rejects events without any handler or route.                                                                                        |
 | `retry`                                   | 10 attempts, `1s`, ×2, max `10m`, full jitter | Default handler retry policy. `attempts: Infinity` retries forever.                                                                           |
 | `handlerTimeout`                          | `false`                                       | Default handler timeout.                                                                                                                      |
@@ -92,7 +93,7 @@ Use a database store in production: [`@relaybus/postgres`](../postgres) or
 | `dispatcher.batchSize`                    | concurrency                                   | Deliveries claimed per query.                                                                                                                 |
 | `dispatcher.pollInterval`                 | `'1s'`                                        | Idle wait between claims; retries are picked up on this cadence.                                                                              |
 | `dispatcher.leaseDuration`                | `'30s'`                                       | Lease length, renewed every third while a handler runs.                                                                                       |
-| `dispatcher.shutdownTimeout`              | `'30s'`                                       | Wait for running handlers on `stop`, then release them.                                                                                       |
+| `dispatcher.shutdownTimeout`              | `'30s'`                                       | Longest `stop` takes in all (default of `stop({ timeout })`); handlers are aborted and released at four fifths of it.                         |
 | `dispatcher.completionBatchWindow`        | `'2ms'`                                       | Deliveries that finish within this window are completed with one store call; `0` completes one by one.                                        |
 | `dispatcher.completionBatchSize`          | `200`                                         | Most deliveries completed in one store call.                                                                                                  |
 | `retention.completed`                     | `'7d'`                                        | Delete events whose deliveries all completed after this; also the deduplication horizon. A completed delivery is deleted at once (see below). |
@@ -100,9 +101,11 @@ Use a database store in production: [`@relaybus/postgres`](../postgres) or
 | `retention.interval`                      | `'1h'`                                        | Cleanup cadence.                                                                                                                              |
 | `transports` / `routes` / `subscriptions` | —                                             | Broker integration, see below.                                                                                                                |
 | `setupStore`                              | `true`                                        | Create tables and indexes on `start`.                                                                                                         |
-| `observers`                               | `[]`                                          | Lifecycle hooks for logs, metrics and tracing.                                                                                                |
+| `observers`                               | `[]`                                          | Lifecycle hooks for logs, metrics and tracing (see Observability below).                                                                      |
+| `tracer`                                  | none                                          | Spans around publish, send and handler runs; writes `traceparent`/`tracestate` into published events. `@relaybus/otel` provides one.          |
+| `backlogInterval`                         | off                                           | Reads `statistics()` this often while running and reports it to `onBacklog`.                                                                  |
 | `logger`                                  | `console`                                     | `{ log, warn, error }`.                                                                                                                       |
-| `clock`, `generateIdentifier`, `random`   | system                                        | Replace in tests.                                                                                                                             |
+| `clock`, `generateIdentifier`, `random`   | system                                        | Replace in tests. A clock with `schedule` also runs the bus's timers.                                                                         |
 
 Durations are milliseconds or strings such as `'250ms'`, `'30s'`, `'5m'`, `'1h'`, `'7d'`.
 
@@ -122,6 +125,11 @@ order: `options.transaction`, the transaction of `bus.transaction()`, then
 `transactionResolver`. Options: `key`, `delay`, `headers`, `correlationId`,
 and `id` on `publish` for idempotent publishing. Register every handler in each
 process that publishes the event: deliveries are created at publish time.
+
+Declare the ordering key on the event to apply it to every publish: `defineEvent('order.placed.v1',
+{ schema, key: (payload) => payload.orderId })` (or `defineEvent<Payload>(type, { key })`). The
+function is typed from the payload, so a wrong field fails to compile. An explicit `key` option
+overrides it; in `publishAll` an explicit key applies to every event of the call.
 
 ## Handlers
 
@@ -248,9 +256,11 @@ class ShipmentHandlers implements HandlersOf<typeof OrderEvents, 'OrderPlaced'> 
 - Received events (`bus.receive`, called by Kafka and RabbitMQ consumers) are matched to the
   catalog handlers by event type, idempotently on the event id, and the payload is validated
   against the event's schema before the handler runs; a payload that fails it is dead-lettered.
-- Per-key order holds **per handler and event type**: events of one type and key reach a
-  handler in publish order (Kafka: same partition; RabbitMQ: `ordered: true`). Events of two
-  types under one key travel through separate routes and handlers and can interleave.
+- Per-key order on the wire holds **per destination**: every route to one destination of one
+  transport shares one queue per key, so `OrderPlaced` and `OrderCancelled` of one key reach the
+  broker in publish order even when a send of the first is retried (Kafka: same partition;
+  RabbitMQ: `ordered: true`). On the consuming side order holds **per handler**: two handlers of
+  two types run independently and can interleave.
 
 ## Transports
 
@@ -268,10 +278,72 @@ Routes are deliveries like any handler: retried until the broker accepts them
 `bus.receive(envelope)`, which stores the event once by id for local handlers;
 transports acknowledge only after it resolves and dead-letter `InvalidEnvelopeError`.
 
+Every route to one destination of one transport is **one handler**, with the id
+`relaybus.transport:<transport>:<destination>` (`handlers()` lists it once per routed
+event type). Its deliveries of one key are sent one at a time in commit order, whatever
+their event types: while the oldest is retried, the later ones of that key wait until it
+is sent or dead-lettered (a dead-lettered head releases them, as for any handler). Other
+keys and unkeyed events are not held back. Because the routes share one queue, they must
+resolve to the same `retry` and `timeout`; `new RelayBus` throws a `ConfigurationError`
+when they differ, and when one event type is routed to the same destination twice. Each
+delivery is one transport call: a hot key is sent one event per round trip (sending a run
+of one key's deliveries in one ordered call is a possible follow-up, not implemented).
+
+### Upgrading from 0.2.0
+
+0.2.0 registered one route per event type, with the id
+`relaybus.transport:<transport>:<destination>:<eventType>`, so events of one key but two
+types could reach the broker out of order. 0.3.0 groups them under
+`relaybus.transport:<transport>:<destination>`. Nothing has to be migrated: deliveries
+stored under a 0.2.0 id, including those written by 0.2.0 processes during a rolling
+deploy, are still claimed and sent by the new route; the store rows keep their old id.
+
+- **Order during the upgrade.** A delivery under a 0.2.0 id and one under the new id are
+  two queues, so one key's backlog from 0.2.0 is not ordered against events published
+  after the upgrade. Where that matters, let the route backlog drain first
+  (`listDeliveries({ handler: '<0.2.0 id>', status: 'pending' })` returns nothing) and
+  stop 0.2.0 publishers before new ones start.
+- **Routes to one destination with different `retry` or `timeout`** now fail at
+  construction; give them the same settings.
+- Code or dashboards that match route ids (`handlers()`, `listDeliveries({ handler })`,
+  `HandlerContext.handler`, observer events) see the new id for new deliveries.
+
 ## Operations
 
 `listDeliveries(query)`, `requeue(ids)`, `statistics()`, `purgeExpired()`,
 `handlers()`, `runOnce()` and `drain()` (tests), `start()` and `stop()`.
+
+**`stop({ timeout })` is bounded.** The whole shutdown (stop claiming, wait for running
+handlers, hand back leases, close transports and the store) takes at most `timeout`, default
+`dispatcher.shutdownTimeout` (30 s). Running handlers get four fifths of it; then their
+`context.signal` aborts and their deliveries are released for another process. If the deadline
+itself passes (a hung query, a broker that does not answer), `stop` gives up waiting, force-closes
+what relaybus opened itself (the pool a store created from `connectionString`, its listening
+connection, a RabbitMQ transport's connection) and resolves; it never closes a pool or client you
+passed in, and never rejects because of the deadline. It resolves with a `StopResult`:
+
+```ts
+const { graceful, abandonedDeliveries, durationMs } = await bus.stop({ timeout: '25s' });
+```
+
+`graceful` is false when the deadline passed, and a warning is logged
+(`[RelayBus](stop) Shutdown deadline passed, forced close | abandoned=1 | timeoutMs=25000`).
+Abandoned deliveries keep their lease until it expires (`dispatcher.leaseDuration`), then another
+process runs them again: at-least-once still holds, so keep handlers idempotent. Kafka's
+`disconnect` has no forced variant; past the deadline the bus simply stops waiting for it.
+
+**Observability.** Besides the lifecycle hooks, observers can implement timed hooks:
+`onPublishFinished` (event types, duration, outcome), `onClaimFinished` (requested, claimed,
+lanes, duration), `onHandlerStarted` (end-to-end latency from `occurredAt`),
+`onHandlerFinished` (duration, outcome, error with its code), `onTransportSent` (transport,
+system, destination, duration, outcome), `onReceiveFinished` (transport, destination, source,
+trace context; `accepted`, `duplicate`, `ignored`, `invalid` or `error`), `onInvalidMessage`
+(a transport could not decode an inbound message, so it never reached the bus: transport,
+destination, reason) and `onBacklog`
+(pending deliveries and age of the oldest due one, every `backlogInterval`). A hook no observer
+implements costs nothing, not even a clock read. Hooks run synchronously and must not throw; a
+throwing hook is reported to `onFailure` with stage `observer`. `traceContextOf(event.headers)`
+returns the W3C trace context an event carries. `@relaybus/otel` maps all of it to OpenTelemetry.
 
 **Completed deliveries are deleted.** Completing a delivery removes its row instead
 of updating it, which is what keeps the write cost of a delivery constant (see
@@ -282,6 +354,46 @@ completion history (`completionHistory: true` on the SQL stores,
 on it: an event remembers every handler it ever had a delivery for, so a
 redelivered or republished event never runs a completed handler again, for as
 long as the event is kept (`retention.completed`).
+
+## Error codes
+
+Every relaybus error has a stable, machine-readable `code` next to its `name`. Codes are
+never renamed or reused once released, so branch on them in alerts and retry rules. The
+`lastError` of a dead or retried delivery and the `error` of observer events carry the
+`code` of relaybus errors; other errors keep `name`, `message` and `stack` only.
+
+| Code                                       | Error class                     | Package              |
+| ------------------------------------------ | ------------------------------- | -------------------- |
+| `RELAYBUS_ERROR`                           | `RelayBusError`                 | `@relaybus/core`     |
+| `RELAYBUS_CONFIGURATION`                   | `ConfigurationError`            | `@relaybus/core`     |
+| `RELAYBUS_TRANSACTION_REQUIRED`            | `TransactionRequiredError`      | `@relaybus/core`     |
+| `RELAYBUS_TRANSACTION_TIMEOUT`             | `TransactionTimeoutError`       | `@relaybus/core`     |
+| `RELAYBUS_NON_RETRYABLE`                   | `NonRetryableError`             | `@relaybus/core`     |
+| `RELAYBUS_EVENT_VALIDATION`                | `EventValidationError`          | `@relaybus/core`     |
+| `RELAYBUS_INVALID_ENVELOPE`                | `InvalidEnvelopeError`          | `@relaybus/core`     |
+| `RELAYBUS_LEASE_LOST`                      | `LeaseLostError`                | `@relaybus/core`     |
+| `RELAYBUS_HANDLER_TIMEOUT`                 | `HandlerTimeoutError`           | `@relaybus/core`     |
+| `RELAYBUS_DISPATCHER_STOPPED`              | `DispatcherStoppedError`        | `@relaybus/core`     |
+| `RELAYBUS_ATTEMPTS_EXHAUSTED`              | `AttemptsExhaustedError`        | `@relaybus/core`     |
+| `RELAYBUS_LIFECYCLE`                       | `LifecycleError`                | `@relaybus/core`     |
+| `RELAYBUS_DRAIN_INCOMPLETE`                | `DrainIncompleteError`          | `@relaybus/core`     |
+| `RELAYBUS_KAFKA_INVALID_MESSAGE`           | `InvalidKafkaMessageError`      | `@relaybus/kafka`    |
+| `RELAYBUS_KAFKA_UNENCODABLE_EVENT`         | `UnencodableEventError`         | `@relaybus/kafka`    |
+| `RELAYBUS_KAFKA_PUBLISH_TIMEOUT`           | `PublishTimeoutError`           | `@relaybus/kafka`    |
+| `RELAYBUS_KAFKA_HANDLER_FAILED`            | `HandlerFailedError`            | `@relaybus/kafka`    |
+| `RELAYBUS_KAFKA_TRANSPORT_CLOSED`          | `TransportClosedError`          | `@relaybus/kafka`    |
+| `RELAYBUS_KAFKA_GROUP_JOIN_TIMEOUT`        | `GroupJoinTimeoutError`         | `@relaybus/kafka`    |
+| `RELAYBUS_POSTGRES_RECONCILE_FAILED`       | `ReconcileFailedError`          | `@relaybus/postgres` |
+| `RELAYBUS_RABBITMQ_UNAVAILABLE`            | `RabbitMqUnavailableError`      | `@relaybus/rabbitmq` |
+| `RELAYBUS_RABBITMQ_PUBLISH_REJECTED`       | `RabbitMqPublishRejectedError`  | `@relaybus/rabbitmq` |
+| `RELAYBUS_RABBITMQ_UNROUTABLE_MESSAGE`     | `UnroutableMessageError`        | `@relaybus/rabbitmq` |
+| `RELAYBUS_RABBITMQ_MALFORMED_MESSAGE`      | `MalformedMessageError`         | `@relaybus/rabbitmq` |
+| `RELAYBUS_RABBITMQ_UNSERIALIZABLE_PAYLOAD` | `UnserializablePayloadError`    | `@relaybus/rabbitmq` |
+| `RELAYBUS_RABBITMQ_UNENCODABLE_EVENT`      | `RabbitMqUnencodableEventError` | `@relaybus/rabbitmq` |
+| `RELAYBUS_RABBITMQ_AMQP_LIMIT_EXCEEDED`    | `AmqpLimitExceededError`        | `@relaybus/rabbitmq` |
+
+An error class you derive from `RelayBusError` inherits `RELAYBUS_ERROR` unless it sets
+its own `code`. See [Error codes](https://berkcansavur.github.io/relaybus/concepts/error-codes) for what each one means.
 
 ## Writing a store
 

@@ -55,30 +55,31 @@ narrower check of the connection alone. relaybus health checks use `isReady()`.
 
 ## Options
 
-| Option               | Default                                           | Description                                                                                                                                                                                                                                                                                             |
-| -------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`               | `'rabbitmq'`                                      | Name referenced by routes and subscriptions.                                                                                                                                                                                                                                                            |
-| `url`                | -                                                 | `amqp://` URL or `{ hostname, port, username, password, vhost, heartbeat, protocol }`. Give exactly one of `url` and `connect`.                                                                                                                                                                         |
-| `connect`            | -                                                 | Factory returning an amqplib connection. Called again after every loss. Use for TLS options or credentials.                                                                                                                                                                                             |
-| `exchange`           | `'relaybus'`                                      | Durable topic exchange, created when missing.                                                                                                                                                                                                                                                           |
-| `prefetch`           | `50` (`1` when `ordered`)                         | Unacknowledged messages held by the consumer; also the handler concurrency.                                                                                                                                                                                                                             |
-| `queuePrefix`        | `'relaybus'`                                      | Prefix of derived queue names.                                                                                                                                                                                                                                                                          |
-| `consumerGroup`      | -                                                 | Services sharing a group share one queue `<queuePrefix>.<consumerGroup>` and split the messages. Required to subscribe unless `queue` is set.                                                                                                                                                           |
-| `queue`              | -                                                 | Explicit queue name; overrides `queuePrefix` and `consumerGroup`.                                                                                                                                                                                                                                       |
-| `deadLetterExchange` | `'<exchange>.dead'`                               | Direct exchange poison messages are dead-lettered to.                                                                                                                                                                                                                                                   |
-| `deadLetterQueue`    | `'<queue>.dead'`                                  | Quorum queue that keeps dead-lettered messages.                                                                                                                                                                                                                                                         |
-| `deliveryLimit`      | `10`                                              | Quorum queue `x-delivery-limit`: a backstop that makes the broker dead-letter a message that crashes its consumer again and again. Failing handlers do not use it.                                                                                                                                      |
-| `handlerRetry`       | 3 attempts, 200 ms, x2, 5 s cap, equal jitter     | Handler attempts, with short backoff, on one delivery before the message is scheduled for delayed redelivery (`RetryPolicyOptions`).                                                                                                                                                                    |
-| `redelivery`         | 2 s, x2, 5 min cap, equal jitter, `maxAge` `'1h'` | Delayed redelivery after `handlerRetry`: `initialDelay`, `factor`, `maxDelay`, `jitter`, and `maxAge`, how long a message may keep failing before it is dead-lettered.                                                                                                                                  |
-| `ordered`            | `false`                                           | Consume strictly in order: single active consumer, one message at a time, failing messages retried in place. See Ordering.                                                                                                                                                                              |
-| `reconnect`          | 500 ms, x2, 30 s cap, equal jitter                | Reconnect backoff (`initialDelay`, `factor`, `maxDelay`, `jitter`; attempts are unlimited), or `false`.                                                                                                                                                                                                 |
-| `failOnConnectError` | `true`                                            | `connect()` rejects when the broker is unreachable. When `false` it resolves and keeps trying in the background.                                                                                                                                                                                        |
-| `allowUnroutable`    | `false`                                           | When `true`, publishing a message no queue is bound to resolves (the broker discards it) instead of rejecting.                                                                                                                                                                                          |
-| `publishTimeout`     | `'30s'`                                           | How long `publish` waits for the confirm.                                                                                                                                                                                                                                                               |
-| `shutdownTimeout`    | `'30s'`                                           | How long `close()` waits for running handlers.                                                                                                                                                                                                                                                          |
-| `decode`             | strict binary mode                                | How consumed messages become events. `decodeCloudEvent` (binary and structured mode), `plainJsonDecoder({...})` (plain JSON from producers without relaybus) or your own function. See [Interoperating with services that do not use relaybus](#interoperating-with-services-that-do-not-use-relaybus). |
-| `logger`             | `console`                                         | `log`/`warn`/`error`.                                                                                                                                                                                                                                                                                   |
-| `random`             | `Math.random`                                     | Jitter source, for tests.                                                                                                                                                                                                                                                                               |
+| Option               | Default                                           | Description                                                                                                                                                                                                                                                                                                                                    |
+| -------------------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`               | `'rabbitmq'`                                      | Name referenced by routes and subscriptions.                                                                                                                                                                                                                                                                                                   |
+| `url`                | -                                                 | `amqp://` URL or `{ hostname, port, username, password, vhost, heartbeat, protocol }`. Give exactly one of `url` and `connect`.                                                                                                                                                                                                                |
+| `connect`            | -                                                 | Factory returning an amqplib connection. Called again after every loss. Use for TLS options or credentials.                                                                                                                                                                                                                                    |
+| `exchange`           | `'relaybus'`                                      | Durable topic exchange, created when missing.                                                                                                                                                                                                                                                                                                  |
+| `prefetch`           | `50` (`1` when `ordered`)                         | Unacknowledged messages held by the consumer; also the handler concurrency.                                                                                                                                                                                                                                                                    |
+| `queuePrefix`        | `'relaybus'`                                      | Prefix of derived queue names.                                                                                                                                                                                                                                                                                                                 |
+| `consumerGroup`      | -                                                 | Services sharing a group share one queue `<queuePrefix>.<consumerGroup>` and split the messages. Required to subscribe unless `queue` is set.                                                                                                                                                                                                  |
+| `queue`              | -                                                 | Explicit queue name; overrides `queuePrefix` and `consumerGroup`.                                                                                                                                                                                                                                                                              |
+| `deadLetterExchange` | `'<exchange>.dead'`                               | Direct exchange poison messages are dead-lettered to.                                                                                                                                                                                                                                                                                          |
+| `deadLetterQueue`    | `'<queue>.dead'`                                  | Quorum queue that keeps dead-lettered messages.                                                                                                                                                                                                                                                                                                |
+| `deliveryLimit`      | `10`                                              | Quorum queue `x-delivery-limit`: a backstop that makes the broker dead-letter a message that crashes its consumer again and again. Failing handlers do not use it.                                                                                                                                                                             |
+| `handlerRetry`       | 3 attempts, 200 ms, x2, 5 s cap, equal jitter     | Handler attempts, with short backoff, on one delivery before the message is scheduled for delayed redelivery (`RetryPolicyOptions`).                                                                                                                                                                                                           |
+| `redelivery`         | 2 s, x2, 5 min cap, equal jitter, `maxAge` `'1h'` | Delayed redelivery after `handlerRetry`: `initialDelay`, `factor`, `maxDelay`, `jitter`, and `maxAge`, how long a message may keep failing before it is dead-lettered.                                                                                                                                                                         |
+| `ordered`            | `false`                                           | Consume strictly in order: single active consumer, one message at a time, failing messages retried in place. See Ordering.                                                                                                                                                                                                                     |
+| `reconnect`          | 500 ms, x2, 30 s cap, equal jitter                | Reconnect backoff (`initialDelay`, `factor`, `maxDelay`, `jitter`; attempts are unlimited), or `false`.                                                                                                                                                                                                                                        |
+| `failOnConnectError` | `true`                                            | `connect()` rejects when the broker is unreachable. When `false` it resolves and keeps trying in the background.                                                                                                                                                                                                                               |
+| `allowUnroutable`    | `false`                                           | When `true`, publishing a message no queue is bound to resolves (the broker discards it) instead of rejecting.                                                                                                                                                                                                                                 |
+| `publishTimeout`     | `'30s'`                                           | How long `publish` waits for the confirm.                                                                                                                                                                                                                                                                                                      |
+| `shutdownTimeout`    | `'30s'`                                           | How long `close()` waits for running handlers; when the bus shutdown deadline passes first, the connection's socket is destroyed instead.                                                                                                                                                                                                      |
+| `codec`              | `cloudEventsBinary`                               | The wire format, both ways: `cloudEventsBinary` (CloudEvents binary mode, strict on read), `cloudEventsStructured`, `jsonEnvelope({...})` (your JSON envelope, MassTransit, or the bare payload) or `{ encode, decode }`. See [Interoperating with services that do not use relaybus](#interoperating-with-services-that-do-not-use-relaybus). |
+| `decode`             | none                                              | Deprecated: reads with your function, writes binary mode. Same as `codec: { encode: encodeEnvelope, decode }`; not together with `codec`.                                                                                                                                                                                                      |
+| `logger`             | `console`                                         | `log`/`warn`/`error`.                                                                                                                                                                                                                                                                                                                          |
+| `random`             | `Math.random`                                     | Jitter source, for tests.                                                                                                                                                                                                                                                                                                                      |
 
 ## Wire format
 
@@ -122,36 +123,74 @@ and the `cloudEvents:*` headers carry every attribute. A plain amqplib, Spring A
 consumer only needs to parse the body; deduplicate on `messageId`, because an outbox delivers at
 least once. Event headers are prefixed: `traceparent` arrives as `relaybus:traceparent`.
 
-**Other producer, relaybus consumer.** By default the transport accepts only binary-mode
-CloudEvents; anything else is malformed and dead-lettered, so a misconfigured producer cannot slip
-events in. Opt in per transport (one transport is one queue) with `decode`:
+**Other formats, both ways.** By default the transport reads only binary-mode CloudEvents;
+anything else is malformed and dead-lettered, so a misconfigured producer cannot slip events in.
+The `codec` option sets another wire format for publishing and consuming (one transport is one
+queue):
 
 ```ts
 import {
   RabbitMqTransport,
-  decodeCloudEvent,
-  fromHeader,
-  fromPayloadField,
+  cloudEventsStructured,
+  encodeEnvelope,
+  jsonEnvelope,
   plainJsonDecoder,
-  type RabbitMqMessageDecoder,
+  type RabbitMqCodec,
 } from '@relaybus/rabbitmq';
 
-// A plain amqplib / Spring AMQP producer: JSON body, event type in the `type` property.
-const transport = new RabbitMqTransport({
-  url,
-  consumerGroup: 'billing',
+// CloudEvents structured mode (`contentType: application/cloudevents+json`); reads binary too.
+new RabbitMqTransport({ url, consumerGroup: 'billing', codec: cloudEventsStructured });
+
+// MassTransit's JSON envelope.
+const massTransit = jsonEnvelope({
+  type: { body: 'messageType.0' },
+  id: { body: 'messageId' },
+  payload: { body: 'message' },
+  correlationId: { body: 'correlationId' },
+  causationId: { body: 'initiatorId' },
+  occurredAt: { body: 'sentTime' },
+  headers: { body: 'headers' },
+  contentType: 'application/vnd.masstransit+json',
+});
+
+// The bare JSON payload of a plain amqplib / Spring AMQP producer, the type in a header.
+const plain = jsonEnvelope({
+  type: { header: 'event-type' },
+  id: 'message-id-property', // the AMQP messageId, or { header: 'message-id' }
+  payload: 'whole-body',
+});
+
+// Your own: binary mode out, plain JSON and CloudEvents in.
+const custom: RabbitMqCodec = {
+  encode: encodeEnvelope,
   decode: plainJsonDecoder({ type: (message) => message.properties.type as string | undefined }),
-});
-
-// The type in a header, the ordering key in the payload.
-const byHeader = plainJsonDecoder({
-  type: fromHeader('event-type'),
-  key: fromPayloadField('orderId'),
-});
-
-// A CloudEvents SDK producer in structured mode (`contentType: application/cloudevents+json`).
-const cloudEvents: RabbitMqMessageDecoder = decodeCloudEvent;
+};
 ```
+
+| Codec                   | Writes                                                                    | Reads                                                                                |
+| ----------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `cloudEventsBinary`     | Binary mode, as above. Default, byte for byte unchanged.                  | Binary mode only (AMQP properties as fallback).                                      |
+| `cloudEventsStructured` | One `application/cloudevents+json` document, binary-mode AMQP properties. | Structured and binary mode (`decodeCloudEvent`).                                     |
+| `jsonEnvelope(mapping)` | The mapped JSON body and headers, binary-mode AMQP properties.            | The same mapping. A missing type, mapped id or payload is malformed.                 |
+| `{ encode, decode }`    | Whatever `encode` returns (`{ content, options }`; set `messageId`).      | Whatever `decode` returns; missing fields are filled as for a decoder (table below). |
+
+`jsonEnvelope` mappings name a body path (`{ body: 'meta.correlationId' }`, `'messageType.0'`
+indexes an array) or a header (`{ header: 'event-type' }`) for `type`, `id`, `payload` (or
+`'whole-body'`), `key`, `source`, `occurredAt`, `correlationId`, `causationId` and `headers`, plus a
+`contentType`. `type`, `id` and `payload` are required by the types; `id: 'message-id-property'`
+uses the `messageId` property, which the codec always writes. Unmapped, `source` is the `appId`
+property and `occurredAt` the `timestamp` property (whole seconds). Event headers that are message
+headers keep their names: a name the mapping uses, or one starting with `x-death`,
+`x-first-death-`, `x-last-death-` or `x-relaybus-`, is refused with `RabbitMqUnencodableEventError`
+(a `NonRetryableError`). The
+[interoperability recipe](https://berkcansavur.github.io/relaybus/recipes/interoperating-with-other-services)
+has a full table.
+
+Decoded payloads go through the event's schema (`defineEvent(type, { schema })`) as relaybus's own
+do; a payload that fails it makes the delivery dead with `EventValidationError`.
+
+The decoders below remain available for a custom codec's `decode`, and for the deprecated `decode`
+option:
 
 | Decoder                  | Accepts                                                                                                                                                                                                                                             |
 | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -177,9 +216,9 @@ String message headers become event headers, except the broker's and the transpo
 **Guarantees stay the same.** Decoding runs again on every redelivery (also after a retry-queue
 round trip, which keeps `messageId` and restores the original routing key from the
 `x-relaybus-routing-key` header it adds to retry copies) and must be deterministic; the inbox deduplicates on the id, so
-a redelivered message is stored and handled once. A message that cannot be decoded (not JSON, no id,
-no type, an invalid type, an extractor returning a non-string) and anything a custom decoder throws
-are dead-lettered (`x-relaybus-dead-letter-reason: malformed message`, the detail is logged) and the
+a redelivered message is stored and handled once. Under every codec, a message that cannot be
+decoded (not JSON, no id, no type, an invalid type, an extractor returning a non-string) and
+anything a custom `decode` throws are dead-lettered (`x-relaybus-dead-letter-reason: malformed message`, the detail is logged) and the
 consumer keeps running. Messages are handled in queue order only with `ordered: true`.
 
 **Give producers a `messageId`.** Spring AMQP generates one when the message converter has
@@ -222,7 +261,10 @@ payload.
   `InvalidEnvelopeError` from `bus.receive`. The consumer publishes a confirmed copy to the
   dead-letter exchange, then acknowledges the original; the copy keeps the message headers, drops
   the retry state (so replaying it starts a fresh retry window) and adds
-  `x-relaybus-dead-letter-reason`. If that publish fails the consumer rejects the message without
+  `x-relaybus-dead-letter-reason`, `x-relaybus-dead-letter-error-name` (the error class, such as
+  `MalformedMessageError`) and, for relaybus errors, `x-relaybus-dead-letter-error-code` (such as
+  `RELAYBUS_RABBITMQ_MALFORMED_MESSAGE`, see [Error codes](https://berkcansavur.github.io/relaybus/concepts/error-codes)).
+  The `error` log lines carry the same `errorName=` and `code=` fields. If that publish fails the consumer rejects the message without
   requeue and the broker dead-letters it (at-least-once strategy), so it still ends in `<queue>.dead`.
 - **Broker-level backstop.** `x-delivery-limit` (`deliveryLimit`) dead-letters a message that keeps
   coming back because the consumer or its channel dies while holding it.

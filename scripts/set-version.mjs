@@ -2,7 +2,7 @@
 // Writes one shared version into every packages/*/package.json.
 // Usage: node scripts/set-version.mjs <version>
 // Only the top-level "version" line is replaced so formatting stays intact.
-import { readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 const SEMVER =
@@ -19,8 +19,13 @@ let updated = 0;
 for (const entry of readdirSync(packagesDir, { withFileTypes: true })) {
   if (!entry.isDirectory()) continue;
   const file = join(packagesDir, entry.name, 'package.json');
-  if (!existsSync(file)) continue;
-  const source = readFileSync(file, 'utf8');
+  let source;
+  try {
+    source = readFileSync(file, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') continue;
+    throw error;
+  }
   const next = source.replace(/^(\s{2}"version":\s*)"[^"]*"/m, `$1"${version}"`);
   if (next === source && !source.includes(`"version": "${version}"`)) {
     console.error(`[set-version] No top-level "version" field found in ${file}`);

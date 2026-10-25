@@ -80,6 +80,16 @@
     "unit": "round trips",
     "description": "Round trips of publishing one fresh keyed event in its own transaction."
   },
+  "postgres.publish.budgetedSingle.sqlStatements": {
+    "budget": 4,
+    "unit": "statements",
+    "description": "SQL statements a bus.transaction publish of one event sends on a pool the application passed in: BEGIN with the transaction-scoped budget settings, the insert, COMMIT. The server also runs the foreign key check of the insert."
+  },
+  "postgres.publish.ownedPoolBudgetedSingle.sqlStatements": {
+    "budget": 3,
+    "unit": "statements",
+    "description": "The same on a pool the store created, once the connection keeps the budget as a session setting: BEGIN, the insert, COMMIT, as 0.2.0 sent without a budget (4 in pg_stat_statements with the foreign key check)."
+  },
   "postgres.publish.keyedBatch100.statements": {
     "budget": 3,
     "unit": "round trips",

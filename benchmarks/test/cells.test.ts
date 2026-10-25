@@ -16,6 +16,26 @@ describe('plans', () => {
     }
   });
 
+  it('adds the routed cells to the full run only, each with its own routed template', () => {
+    expect(quickPlan().cells.some((cell) => cell.id.includes('routed'))).toBe(false);
+    const plan = fullPlan();
+    const routed = plan.cells.filter((cell) => cell.kind === 'dispatch' && cell.routed === true);
+    expect(routed.map((cell) => cell.id)).toEqual([
+      'pg-disp-routed-k1000-1i-tuned',
+      'pg-disp-routed-hot10-1i-tuned',
+    ]);
+    for (const cell of routed) {
+      if (cell.kind !== 'dispatch') continue;
+      const template = plan.templates.find((candidate) => candidate.name === cell.template);
+      expect(template?.routed).toBe(true);
+    }
+    expect(plan.templates.filter((candidate) => candidate.routed === true)).toHaveLength(2);
+    expect(filterPlan(plan, ['routed']).templates.map((candidate) => candidate.name)).toEqual([
+      'pg-routed-k1000',
+      'pg-routed-hot10',
+    ]);
+  });
+
   it('keeps the quick gate small: fixed windows, the requested pairs, no mixed cell', () => {
     const plan = quickPlan(4);
     expect(plan.cells).toHaveLength(8);

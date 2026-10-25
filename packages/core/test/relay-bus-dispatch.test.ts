@@ -102,6 +102,29 @@ describe('retries and dead letters', () => {
     ]);
   });
 
+  it('records the class name and code of a relaybus error in the dead letter and the observer event', async () => {
+    const { bus, observer } = createTestBus({ transactionMode: 'optional' });
+    bus.subscribe(
+      OrderPlaced,
+      () => {
+        throw new NonRetryableError('invalid order');
+      },
+      { id: 'h' },
+    );
+    await bus.publish(new OrderPlaced({ orderId: '1' }));
+    await bus.runOnce();
+    const [dead] = await bus.listDeliveries({ status: 'dead' });
+    const error = {
+      name: 'NonRetryableError',
+      message: 'invalid order',
+      code: 'RELAYBUS_NON_RETRYABLE',
+    };
+    expect(dead!.lastError).toMatchObject(error);
+    expect(observer.onDeliveryDead).toHaveBeenCalledWith(
+      expect.objectContaining({ error: expect.objectContaining(error) }),
+    );
+  });
+
   it('dead-letters a delivery whose lease expired on its last attempt without running it', async () => {
     const { bus, store, clock } = createTestBus({
       transactionMode: 'optional',
@@ -125,6 +148,10 @@ describe('retries and dead letters', () => {
     expect(record!.lastError!.message).toBe(
       'Delivery reached attempt 2 of 1 after its lease expired',
     );
+    expect(record!.lastError).toMatchObject({
+      name: 'AttemptsExhaustedError',
+      code: 'RELAYBUS_ATTEMPTS_EXHAUSTED',
+    });
   });
 
   it('times out slow handlers, aborts their signal and retries', async () => {
@@ -338,7 +365,7 @@ describe('concurrency', () => {
     const logger = createLogger();
     registry.register(
       {
-        eventType: 'order.placed.v1',
+        eventTypes: ['order.placed.v1'],
         schema: undefined,
         handle: () => gate.promise,
         options: { id: 'single', concurrency: 1 },
@@ -358,7 +385,7 @@ describe('concurrency', () => {
     );
     registry.register(
       {
-        eventType: 'order.placed.v1',
+        eventTypes: ['order.placed.v1'],
         schema: undefined,
         handle: () => gate.promise,
         options: { id: 'other' },
@@ -451,7 +478,9 @@ describe('dispatcher safety net', () => {
         shutdownTimeoutMs: 100,
       },
     });
-    vi.spyOn(registry, 'all').mockReturnValue([{ id: 'ghost', concurrency: null } as never]);
+    vi.spyOn(registry, 'all').mockReturnValue([
+      { id: 'ghost', claimIds: ['ghost'], concurrency: null } as never,
+    ]);
     await store.transaction((transaction) =>
       store.append(
         transaction,

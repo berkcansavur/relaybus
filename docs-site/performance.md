@@ -16,6 +16,7 @@ Read the numbers as ratios on one laptop, not as capacity planning. Where a cell
 - [Mixed load and latency](#mixed-load-and-latency)
 - [What the database does per delivery](#what-the-database-does-per-delivery)
 - [Where it is not better](#where-it-is-not-better)
+- [0.3.0 vs 0.2.0](#_0-3-0-vs-0-2-0)
 - [Deep dives](#deep-dives)
 - [Reproduce it](#reproduce-it)
 
@@ -163,6 +164,97 @@ In 0.1.0 a delivery row was updated three times (claim, lease renewals, completi
 - **MongoDB batch-100 publish:** 31,600 to 31,167 events/s (0.98x, three samples): no change, and a higher p99 for the transaction (79 ms to 126 ms, interval inconclusive).
 - **Mixed load near saturation:** p99 can be higher than 0.1.0's, see above.
 - **Single sample cells** may move by 10 % or more in either direction on a re-run. The directions are consistent with the exact counters, which is why they are listed.
+
+## 0.3.0 vs 0.2.0
+
+0.3.0 is a code-quality release, and the numbers say it cost nothing: publish and MongoDB are unchanged within noise, most PostgreSQL dispatch cells are within about 10 to 20 % either way (which one sample cannot resolve), and keyed dispatch on PostgreSQL is 1.78 times faster in two cells. Every sample was checked for lost, duplicate and out-of-order deliveries: 0 of each.
+
+Same machine, same method and same database images as above (fingerprint `0c08a14e7a55`). Two runs feed the tables:
+
+- **Full run**, all cells, 39 minutes, candidate `a8587ff` against `v0.2.0`, interleaved. Each cell has **1 sample per side**, except where the table says 3. Every sample was valid except the two of PostgreSQL fan-out to 5 handlers on 4 processes (the preloaded backlog drained 0.5 s into the window on both sides), which are left out.
+- **Targeted run** for the publish and mixed-load cells, candidate `5575bc4`, **2 samples per side**. The full run was taken before two publish fixes (`a13fb7e`, `2fb3cde`: the transaction budget no longer costs a statement per publish), so these cells were measured again. The 0.2.0 side of this run reused the stored 0.2.0 samples; it was not measured alongside the candidate, so machine drift is not cancelled out.
+
+### Publish on PostgreSQL (targeted run, 2 samples)
+
+| Scenario                                            | 0.2.0 events/s | 0.3.0 events/s | Ratio | Statements per event, 0.2.0 / 0.3.0 |
+| --------------------------------------------------- | -------------: | -------------: | ----: | ----------------------------------: |
+| 1 publisher, 1 event per call                       |          1,543 |          1,573 |  1.02 |                         4.07 / 4.07 |
+| 1 publisher, 100 events per call                    |         18,030 |         17,960 |  1.00 |                         1.04 / 1.04 |
+| 32 publishers, 1 event per call                     |          6,235 |          6,111 |  0.98 |                         4.02 / 4.02 |
+| 32 publishers, 100 events per call                  |         69,580 |         68,493 |  0.98 |                         1.03 / 1.03 |
+| 8 publishers, 1 event per call, 1,000 distinct keys |          3,789 |          4,145 |  1.09 |                         4.03 / 4.02 |
+
+All intervals include 1.0, so none of these is a change.
+
+A second targeted run (`2026-10-25T05-12-40-754Z`, candidate `13c2a13`, 2 samples per side) measured the remaining publish cells after the fixes:
+
+| Scenario                                                              | Ratio 0.3.0 / 0.2.0 |
+| --------------------------------------------------------------------- | ------------------: |
+| PostgreSQL, 8 publishers, 1 event per call                            |                1.00 |
+| PostgreSQL, 8 publishers, 100 events per call                         |                1.05 |
+| PostgreSQL, 4 processes x 8 publishers, 100 events per call (ceiling) |                0.97 |
+| PostgreSQL, 8 publishers, 1 event per call, 5 handlers                |                1.07 |
+| PostgreSQL, 8 publishers, 100 events per call, 5 handlers             |                1.02 |
+| PostgreSQL, 8 publishers, 1 event per call, 10 hot keys               |                0.98 |
+| PostgreSQL, 8 publishers, 1 event per call, 1 hot key                 |                1.09 |
+| MongoDB, 8 publishers, 1 event per call                               |                1.02 |
+| MongoDB, 8 publishers, 100 events per call                            |                0.94 |
+| MongoDB, 8 publishers, 100 events per call, 5 handlers                |                0.98 |
+| MongoDB, 8 publishers, 1 event per call, 10 hot keys                  |                1.06 |
+
+Every publish cell is now between 0.94 and 1.09 of 0.2.0, with two samples per side, so publishing is unchanged in 0.3.0.
+
+### Dispatch on PostgreSQL (full run)
+
+| Scenario                                         | 0.2.0 deliveries/s | 0.3.0 deliveries/s | Ratio | Samples |
+| ------------------------------------------------ | -----------------: | -----------------: | ----: | :-----: |
+| 1 process, `defaults`                            |              4,373 |              4,087 |  0.93 |  1 / 1  |
+| 1 process, `mid`                                 |             11,140 |             10,890 |  0.98 |  1 / 1  |
+| 1 process, `tuned`                               |             15,613 |             14,255 |  0.98 |  3 / 3  |
+| 4 processes, `defaults`                          |             15,661 |             13,963 |  0.89 |  1 / 1  |
+| 4 processes, `mid`                               |             34,278 |             40,803 |  1.19 |  1 / 1  |
+| 4 processes, `tuned`                             |             53,844 |             56,831 |  1.06 |  1 / 1  |
+| 8 processes, `defaults`                          |             18,561 |             19,274 |  1.04 |  1 / 1  |
+| 8 processes, `mid`                               |             47,158 |             50,242 |  1.07 |  1 / 1  |
+| 8 processes, `tuned`                             |             59,814 |             52,865 |  0.88 |  1 / 1  |
+| Fan-out to 5 handlers, 1 process, `tuned`        |             20,850 |             20,701 |  0.99 |  1 / 1  |
+| 1,000 distinct keys, 1 process, `tuned`          |              4,200 |              4,133 |  0.98 |  1 / 1  |
+| 1,000 distinct keys, 4 processes, `tuned`        |              4,453 |              7,931 |  1.78 |  1 / 1  |
+| 10 hot keys, 1 process, `tuned`                  |              2,022 |              1,955 |  0.97 |  1 / 1  |
+| Routed, 1,000 distinct keys, 5 ms ack, 1 process |              3,267 |              5,827 |  1.78 |  1 / 1  |
+| Routed, 10 hot keys, 5 ms ack, 1 process         |                785 |                787 |  1.00 |  1 / 1  |
+
+The two 1.78 results are the ones this release is meant to help: with many keys and routes to one destination, per-key order now holds inside one handler instead of across several, so more keys can proceed at once. They are single samples, so the multiple is indicative; the direction is the same in two different cells. The 0.88 and 0.89 cells (8 processes `tuned`, 4 processes `defaults`) are as likely noise as a slowdown; one sample cannot tell, and a repeat run with three samples is the way to find out. Database counters, which do not depend on machine noise: WAL bytes per delivery were 8 to 11 % higher in four cells (1 process `tuned` with three samples, 4 processes `defaults` and `mid`, 8 processes `tuned`) and 5 to 8 % lower in five others. The benchmark gate flags the higher ones, which is why 0.3.0 is not described as faster per write.
+
+### Dispatch on MongoDB (full run)
+
+| Scenario                                  | 0.2.0 deliveries/s | 0.3.0 deliveries/s | Ratio | Samples |
+| ----------------------------------------- | -----------------: | -----------------: | ----: | :-----: |
+| 1 process, `defaults`                     |              1,149 |              1,161 |  1.01 |  1 / 1  |
+| 1 process, `tuned`                        |              6,431 |              6,228 |  0.98 |  3 / 3  |
+| 4 processes, `defaults`                   |              4,470 |              4,564 |  1.02 |  1 / 1  |
+| 4 processes, `tuned`                      |             21,771 |             22,452 |  1.03 |  1 / 1  |
+| Fan-out to 5 handlers, 1 process, `tuned` |              7,031 |              7,452 |  1.06 |  1 / 1  |
+| 1,000 distinct keys, 1 process, `tuned`   |              2,089 |              2,131 |  1.02 |  1 / 1  |
+| 10 hot keys, 1 process, `tuned`           |                347 |                349 |  1.01 |  1 / 1  |
+
+MongoDB is unchanged. MongoDB publish was also within noise (0.94 to 0.98 in five cells, one of them with three samples and an inconclusive interval).
+
+### Mixed load
+
+| Scenario                        | Accepted events/s 0.2.0 to 0.3.0 | p99 latency 0.2.0 | p99 latency 0.3.0 | Samples |
+| ------------------------------- | -------------------------------: | ----------------: | ----------------: | :-----: |
+| PostgreSQL, 1,000/s, `defaults` |                    1,000 / 1,000 |            9.9 ms |           10.4 ms |  1 / 1  |
+| PostgreSQL, 1,000/s, `tuned`    |                    1,000 / 1,000 |            9.0 ms |           14.4 ms |  1 / 1  |
+| PostgreSQL, 5,000/s, `tuned`    |                    4,133 / 4,032 |    not meaningful |    not meaningful |  2 / 2  |
+| MongoDB, 1,000/s, `tuned`       |                    1,000 / 1,000 |            474 ms |            377 ms |  1 / 1  |
+| MongoDB, 5,000/s, `tuned`       |                      (saturated) |             7.5 s |             8.1 s |  1 / 1  |
+
+At 5,000 per second both versions are past saturation and the p99 is dominated by queueing. The same cell gave 79 ms against 10.6 s in the full run and 2.0 s against 104 ms in the targeted run, so its p99 ratios (0.05 to 134) say nothing about the code. Accepted throughput, 0.98, is the number to read. The 14.4 ms against 9.0 ms at 1,000 per second is one sample.
+
+### Trust
+
+Same rule as above: one sample per side cannot separate a difference below about 10 % from noise, and where a ratio is outside that, the cell is called out. The exact counters (statements per publish, rows written, exactness) are the part that does not depend on the laptop. To check any cell on your hardware, run `pnpm bench:full --base v0.2.0 --only <cell>` with more samples.
 
 ## Deep dives
 

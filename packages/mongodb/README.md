@@ -291,6 +291,13 @@ core does not renew the lease of a transactional handler while it runs (its comp
 conflict with a renewal), so the lease must outlast the handler: keep transactional handlers
 short, as the core documentation recommends.
 
+### Transaction time budget
+
+`bus.transaction` passes the bus `transactionTimeout` (default `'5s'`) to the store, which bounds the commit on the
+server with `maxCommitTimeMS`. A transaction that ran past the budget is aborted before its commit, with all its writes,
+and the caller gets a `TransactionTimeoutError`. The driver's `timeoutMS` is not set on the transaction, because it would
+make operations that pass their own `timeoutMS` with the session throw. The store's own transactions are not affected.
+
 ## Indexes
 
 Created idempotently by `setup()` (also run by `bus.start()` unless `setupStore: false`):

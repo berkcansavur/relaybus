@@ -11,7 +11,10 @@ export const siteDescription =
 
 export const packages = [
   { name: 'core', blurb: 'The bus, dispatcher, retry policies and the in-memory store.' },
-  { name: 'nestjs', blurb: 'RelayBusModule, the @Subscribe decorator, lifecycle and health.' },
+  {
+    name: 'nestjs',
+    blurb: 'RelayBusModule, the @RelayBusConsumer decorator, lifecycle and health.',
+  },
   {
     name: 'postgres',
     blurb: 'PostgreSQL store for pg, Prisma, TypeORM, Drizzle, Knex and Kysely.',
@@ -26,6 +29,14 @@ export const packages = [
     blurb: 'RabbitMQ transport with publisher confirms, quorum queues and dead letters.',
   },
   { name: 'testing', blurb: 'The store contract suite, FakeClock and an in-memory transport.' },
+  {
+    name: 'eslint-plugin',
+    blurb: 'ESLint rules: no external calls inside a transaction, no publish outside one.',
+  },
+  {
+    name: 'otel',
+    blurb: 'OpenTelemetry metrics, backlog gauges and traces across services.',
+  },
 ];
 
 /** Ordered sections. `path` is the page path without extension, relative to the site root. */
@@ -92,6 +103,18 @@ export const sections = [
         description:
           'What happens to events that exhaust their retries, and how to inspect and requeue them.',
       },
+      {
+        title: 'Observability',
+        path: 'concepts/observability',
+        description:
+          'OpenTelemetry metrics and traces for relaybus: the metrics, one trace across services, a collector and Prometheus setup, and alerts on backlog age and dead letters.',
+      },
+      {
+        title: 'Error codes',
+        path: 'concepts/error-codes',
+        description:
+          'The stable, machine-readable code of every relaybus error, stored with dead letters and reported to observers.',
+      },
     ],
   },
   {
@@ -101,7 +124,7 @@ export const sections = [
         title: 'All packages',
         path: 'packages/',
         description:
-          'The seven @relaybus packages: core, nestjs, postgres, mongodb, kafka, rabbitmq and testing.',
+          'The nine @relaybus packages: core, nestjs, postgres, mongodb, kafka, rabbitmq, testing, eslint-plugin and otel.',
       },
       ...packages.map((p) => ({
         title: `@relaybus/${p.name}`,
@@ -113,6 +136,12 @@ export const sections = [
   {
     title: 'Recipes',
     items: [
+      {
+        title: 'Transactions in NestJS',
+        path: 'recipes/transactions-in-nestjs',
+        description:
+          'Run NestJS service methods in an outbox transaction with @RelayBusTransaction(), share it with repositories, hold it to a time budget and lint external calls out of it.',
+      },
       {
         title: 'Prisma',
         path: 'recipes/prisma',
@@ -173,10 +202,22 @@ export const sections = [
           'Recommended relaybus settings for a single-connection API, a high-traffic API, a worker fleet, PgBouncer in transaction mode and a MongoDB replica set.',
       },
       {
-        title: 'Upgrading from 0.1 to 0.2',
+        title: 'Upgrading',
         path: 'upgrading',
         description:
-          'Step-by-step upgrade of relaybus 0.1 to 0.2: completed deliveries are deleted, completionHistory, the in-place schema upgrade, PgBouncer settings and new optional APIs.',
+          'Step-by-step upgrades: 0.2 to 0.3: route id change and draining the old route backlog, the 5 second transaction budget, the StopResult of stop(), decorator and codec renames, error codes and the optional new packages.',
+      },
+      {
+        title: 'Stability',
+        path: 'stability',
+        description:
+          'The relaybus API stability policy: semver for 0.x and 1.x, what is public API, deprecations, wire-format and database schema stability, supported runtimes.',
+      },
+      {
+        title: 'Compatibility',
+        path: 'compatibility',
+        description:
+          'The tested matrix of relaybus (Node.js, CommonJS and ESM, NestJS, PostgreSQL clients and ORMs, MongoDB, Kafka, RabbitMQ), what is unsupported and notes for serverless.',
       },
       {
         title: 'Performance: 0.2.0 vs 0.1.0',
@@ -206,7 +247,7 @@ export const sections = [
         title: 'Releases',
         path: 'releases',
         description:
-          'What is new in relaybus 0.2.0, its breaking change and known issues, and how relaybus is versioned and released.',
+          'What is new in relaybus 0.3.0, its breaking changes, deprecations, known issues and a benchmark against 0.2.0, and how relaybus is versioned and released.',
       },
     ],
   },

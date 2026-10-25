@@ -1,6 +1,12 @@
 export {
+  GroupJoinTimeoutError,
+  HandlerFailedError,
   InvalidKafkaMessageError,
+  PublishTimeoutError,
+  TransportClosedError,
   UnencodableEventError,
+} from './errors.js';
+export {
   decodeEnvelope,
   encodeEnvelope,
   type DecodableMessage,
@@ -24,9 +30,15 @@ export type {
   KafkaRunConfig,
 } from './kafka-client.js';
 export {
-  HandlerFailedError,
+  cloudEventsBinary,
+  cloudEventsStructured,
+  jsonEnvelope,
+  type KafkaCodec,
+  type KafkaEncodedRecord,
+  type KafkaJsonEnvelopeMapping,
+} from './codecs.js';
+export {
   KafkaTransport,
-  PublishTimeoutError,
   type InvalidKafkaMessage,
   type InvalidMessagePolicy,
   type KafkaProcessingOptions,

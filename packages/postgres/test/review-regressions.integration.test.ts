@@ -111,7 +111,7 @@ describe('owned pool error handling', () => {
       );
       await vi.waitFor(() => expect(logger.error).toHaveBeenCalledTimes(1));
       expect(logger.error.mock.calls[0]![0]).toMatch(
-        /^\[PostgresEventStore\]\(constructor\) Idle connection failed/,
+        /^\[PostgresEventStore\]\(connect\) Idle connection failed/,
       );
       expect(uncaught).not.toHaveBeenCalled();
       await expect(store.statistics(at(0))).resolves.toMatchObject({ pending: 0 });

@@ -10,6 +10,7 @@ export {
   AmqpLimitExceededError,
   MalformedMessageError,
   RabbitMqPublishRejectedError,
+  RabbitMqUnencodableEventError,
   RabbitMqUnavailableError,
   UnroutableMessageError,
   UnserializablePayloadError,
@@ -21,6 +22,14 @@ export type {
   RedeliveryOptions,
 } from './options.js';
 export { RabbitMqTransport } from './rabbitmq-transport.js';
+export {
+  cloudEventsBinary,
+  cloudEventsStructured,
+  jsonEnvelope,
+  type RabbitMqCodec,
+  type RabbitMqJsonEnvelopeMapping,
+} from './codecs.js';
+export type { EncodedMessage } from './wire-format.js';
 export { fromHeader, fromPayloadField } from './field-extractors.js';
 export {
   decodeCloudEvent,

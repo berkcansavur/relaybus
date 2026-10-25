@@ -84,6 +84,21 @@ Scope: `core`, `nestjs`, `kafka`, `rabbitmq` and the `testing` helpers (`fake-cl
 
 Thresholds (break, low, high) are in `stryker.config.json`. The break threshold sits a few points under the score the current tests achieve (about 90) and must never drop below 75; raise it when the score improves.
 
+## Log lines
+
+Every log line starts with `[ClassName](methodName) message`, naming the class and method the call is
+written in (`#` dropped; outside a class, the module's main class and the enclosing function), followed
+by `| key=value` fields. The `relaybus/log-prefix` lint rule (`eslint-rules/log-prefix.js`) enforces it,
+so a log moved into another method must be renamed with it.
+
+## Parameters and timers
+
+A function takes at most two positional parameters (`relaybus/max-two-params`); further ones travel
+in one typed input object. Only public port and API signatures (EventStore, Transport and executor
+methods, published functions) keep more, each exempted on its line with the reason. Timers start
+through `schedule()`/`sleep()` of `@relaybus/core/internal`, never with `setTimeout`/`setInterval`
+directly, so a `Clock` can control them.
+
 ## Commit and PR conventions
 
 Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages and PR titles:
@@ -108,7 +123,7 @@ There are no changesets. The version is computed from Conventional Commits on `m
 | `!` or a `BREAKING CHANGE:` footer                          | minor (major from 1.0.0)    |
 | `docs`, `chore`, `test`, `ci`, `build`, `refactor`, `style` | no release                  |
 
-Allowed scopes: `core`, `nestjs`, `postgres`, `mongodb`, `kafka`, `rabbitmq`, `testing`, `repo`, `ci`, `deps`, `release`. A scope is optional.
+Allowed scopes: `core`, `nestjs`, `postgres`, `mongodb`, `kafka`, `rabbitmq`, `testing`, `eslint-plugin`, `otel`, `repo`, `ci`, `deps`, `release`. A scope is optional.
 
 All packages always share one version. Contributors never publish and never edit version fields. Dependabot PRs use `chore(deps)` and therefore do not release; a maintainer retitles one to `fix(deps): ...` when a dependency change must ship. See [docs/releasing.md](docs/releasing.md) for how releases work, prerelease channels and troubleshooting.
 

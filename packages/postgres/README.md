@@ -50,7 +50,9 @@ try {
 ```
 
 The transaction handle is a `pg` `PoolClient`. If you pass `connectionString` instead of `pool`, the store creates and,
-on `close()`, ends its own pool. A pool or executor you pass in is never closed by the store.
+on `close()`, ends its own pool. A pool or executor you pass in is never closed by the store. When `bus.stop()` runs past
+its deadline, the store destroys the connections it opened itself (its own pool's and the one it listens for
+notifications on), so a query stuck on a lock fails at once instead of holding the shutdown; your pool is left as is.
 
 ### Other libraries
 
@@ -78,6 +80,28 @@ await db.transaction().execute(async (trx) => {
 Use `transactionResolver` (for example from `@nestjs-cls/transactional`) to avoid passing the handle explicitly.
 For another client, implement `PostgresExecutor` (`transaction` and `query`; about 20 lines).
 
+**Transaction time budget.** `bus.transaction` passes the bus `transactionTimeout` (default `'5s'`) to the store,
+which sets it with `set_config(..., true)` (the `SET LOCAL` scope, gone after the transaction) as
+`statement_timeout`. Executors that declare `sessionTimeouts: true` (`PgExecutor` does; it listens for `error` on the
+connection while the transaction runs) also get `idle_in_transaction_session_timeout` and, on PostgreSQL 17+,
+`transaction_timeout`, so a transaction left idle by a slow external call is ended by the server and its locks are
+released. The other adapters keep only `statement_timeout`, because a server-ended session would emit an unhandled
+`error` on their checked-out `pg` connection; the bus still rolls back an overrun before the commit. The caller gets a
+`TransactionTimeoutError` with the server error as `cause`. `PgExecutor` sends the settings in the round trip of `BEGIN`
+(the optional executor method `transactionWithBudget`), so the budget costs no extra round trip; executors without it
+send them as the first statement of the transaction.
+
+Where the budget lives depends on who owns the pool:
+
+- **A pool the store created** (`connectionString`/`poolConfig`): each connection keeps the budget as a session setting.
+  The first `bus.transaction` on a connection sets it with `BEGIN`; later ones send nothing extra, so a publish costs
+  what it did without a budget. A transaction without a budget (setup, a transactional handler) puts the session
+  defaults back in its `BEGIN`. Statements outside a transaction (claims, completions) run under the budget the
+  connection last got. With `preparedStatements: false` (a pooler in transaction mode, which would carry session
+  settings to other clients) the budget stays transaction-scoped.
+- **A pool or executor you pass in**: the budget is transaction-scoped (`SET LOCAL` semantics), set with `BEGIN` by
+  `PgExecutor` and by its own statement for the other adapters. Session settings of your pool are never changed.
+
 **Prisma is not integration-tested yet.** The adapter is typed structurally (no Prisma dependency) and unit-tested
 against a fake client only. Prisma interactive transactions default to a 5 s timeout, so pass
 `createPrismaExecutor(prisma, { timeout, maxWait })` if handlers run longer.
@@ -97,7 +121,7 @@ against a fake client only. Prisma interactive transactions default to a 5 s tim
 | `wakeUp`                                 | `'notify'`            | `'notify'`: coalesced `NOTIFY` + `LISTEN` wake other processes. `'poll'`: no notifications, other processes poll.  |
 
 **Pool errors.** A pool created from `connectionString` gets an `error` listener that logs through `logger`
-(`[PostgresEventStore](constructor) Idle connection failed ...`); `pg` then replaces the dead connection, so a failover
+(`[PostgresEventStore](connect) Idle connection failed ...`); `pg` then replaces the dead connection, so a failover
 or `pg_terminate_backend` of an idle connection does not crash the process. A `pool` you pass in is yours: attach
 `pool.on('error', ...)` to it yourself, because without a listener `pg` re-throws the error as an uncaught exception.
 

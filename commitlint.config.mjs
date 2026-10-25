@@ -12,6 +12,8 @@ export default {
         'kafka',
         'rabbitmq',
         'testing',
+        'eslint-plugin',
+        'otel',
         'repo',
         'ci',
         'deps',

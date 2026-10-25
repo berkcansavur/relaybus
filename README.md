@@ -26,7 +26,7 @@ export class OrderPlaced extends defineEvent<{ orderId: string }>('order.placed.
 
 @Injectable()
 export class Shipping {
-  @Subscribe(OrderPlaced)
+  @RelayBusConsumer(OrderPlaced)
   async ship(event: EventEnvelope<{ orderId: string }>) {
     /* runs after the order transaction commits, retried until it succeeds */
   }
@@ -105,15 +105,17 @@ database (an HTTP call can repeat; send an idempotency key), or global ordering.
 
 ## Packages
 
-| Package                                   | Purpose                                                                                    |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------ |
-| [`@relaybus/core`](packages/core)         | The bus, dispatcher, retry policies and the in-memory store.                               |
-| [`@relaybus/nestjs`](packages/nestjs)     | `RelayBusModule`, the `@Subscribe` decorator, lifecycle and health.                        |
-| [`@relaybus/postgres`](packages/postgres) | PostgreSQL 13+ store for `pg`, Kysely, Knex, TypeORM, Drizzle and Prisma transactions.     |
-| [`@relaybus/mongodb`](packages/mongodb)   | MongoDB 6+ store on multi-document transactions; works with Mongoose sessions.             |
-| [`@relaybus/kafka`](packages/kafka)       | Kafka transport for kafkajs and `@confluentinc/kafka-javascript`, CloudEvents binary mode. |
-| [`@relaybus/rabbitmq`](packages/rabbitmq) | RabbitMQ transport with publisher confirms, reconnects, quorum queues and dead letters.    |
-| [`@relaybus/testing`](packages/testing)   | The store contract suite, a fake clock and an in-memory transport.                         |
+| Package                                             | Purpose                                                                                    |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| [`@relaybus/core`](packages/core)                   | The bus, dispatcher, retry policies and the in-memory store.                               |
+| [`@relaybus/nestjs`](packages/nestjs)               | `RelayBusModule`, the `@RelayBusConsumer` decorator, lifecycle and health.                 |
+| [`@relaybus/postgres`](packages/postgres)           | PostgreSQL 13+ store for `pg`, Kysely, Knex, TypeORM, Drizzle and Prisma transactions.     |
+| [`@relaybus/mongodb`](packages/mongodb)             | MongoDB 6+ store on multi-document transactions; works with Mongoose sessions.             |
+| [`@relaybus/kafka`](packages/kafka)                 | Kafka transport for kafkajs and `@confluentinc/kafka-javascript`, CloudEvents binary mode. |
+| [`@relaybus/rabbitmq`](packages/rabbitmq)           | RabbitMQ transport with publisher confirms, reconnects, quorum queues and dead letters.    |
+| [`@relaybus/testing`](packages/testing)             | The store contract suite, a fake clock and an in-memory transport.                         |
+| [`@relaybus/eslint-plugin`](packages/eslint-plugin) | ESLint rules: no calls to other services inside a transaction, no publish outside one.     |
+| [`@relaybus/otel`](packages/otel)                   | OpenTelemetry metrics, backlog gauges and one trace across services.                       |
 
 Bring your own store: implement the `EventStore` interface and run the contract
 suite from `@relaybus/testing` against it.
@@ -184,7 +186,7 @@ transaction opened by `bus.transaction()`, then your `transactionResolver`
 ### Handlers
 
 ```ts
-@Subscribe(OrderPlaced, {
+@RelayBusConsumer(OrderPlaced, {
   retry: { attempts: 5, initialDelay: '2s', maxDelay: '5m' },
   timeout: '30s',
   concurrency: 4,
@@ -207,7 +209,10 @@ const stats = await bus.statistics(); // pending, processing, dead, oldestDueAt;
 ```
 
 Observers receive every lifecycle event (published, started, succeeded, retry
-scheduled, dead, lease lost, released, purged, failures) for logs and metrics.
+scheduled, dead, lease lost, released, purged, failures) and timed hooks (publish, claim,
+handler, send, receive, backlog) for logs and metrics. `@relaybus/otel` turns them into
+OpenTelemetry metrics and adds one trace from `publish` in one service to the handler in
+another; see [Observability](https://berkcansavur.github.io/relaybus/concepts/observability).
 
 ## Defaults
 

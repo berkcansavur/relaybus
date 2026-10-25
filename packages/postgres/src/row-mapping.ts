@@ -48,7 +48,10 @@ export function mapEventEnvelope(row: PostgresRow): EventEnvelope {
  * The fencing token of a claimed delivery names its lane and the lane's epoch,
  * so every state change can check the lane without reading the delivery first.
  */
-export function formatLeaseToken(lane: number, epoch: string, claims: number): string {
+export function formatLeaseToken(
+  lane: number,
+  { epoch, claims }: { readonly epoch: string; readonly claims: number },
+): string {
   return `${lane}:${epoch}:${claims}`;
 }
 
@@ -73,11 +76,10 @@ export function parseLeaseToken(token: string): LaneLease | undefined {
 export function mapClaimedDelivery(row: PostgresRow, leaseExpiresAt: Date): ClaimedDelivery {
   return {
     deliveryId: text(row, 'delivery_id'),
-    leaseToken: formatLeaseToken(
-      readCount(row, 'lane'),
-      text(row, 'epoch'),
-      readCount(row, 'claims'),
-    ),
+    leaseToken: formatLeaseToken(readCount(row, 'lane'), {
+      epoch: text(row, 'epoch'),
+      claims: readCount(row, 'claims'),
+    }),
     handler: text(row, 'handler'),
     attempt: readCount(row, 'attempt'),
     leaseExpiresAt,

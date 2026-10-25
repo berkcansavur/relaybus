@@ -11,6 +11,23 @@ Pass a `key` when publishing to get ordering for related events, for example one
 await bus.publish(new OrderPlaced({ orderId }), { key: orderId });
 ```
 
+Or declare the key once, on the event, so no publish can forget it. The function is typed from the payload: a misspelled field or a value that is not a string fails to compile.
+
+```ts
+export class OrderPlaced extends defineEvent('order.placed.v1', {
+  schema: orderPlacedSchema,
+  key: (payload) => payload.orderId,
+}) {}
+// or, without a schema
+export class OrderShipped extends defineEvent<{ orderId: string }>('order.shipped.v1', {
+  key: (payload) => payload.orderId,
+}) {}
+
+await bus.publish(new OrderPlaced({ orderId, total })); // key = orderId
+```
+
+Precedence: an explicit `key` option wins over the definition's key; in `publishAll`, an explicit `key` applies to every event of the call, otherwise each event takes its own definition's key (or none). The key is computed from the validated payload (the schema's output) and must be a non-empty string, otherwise `publish` throws a `ConfigurationError`. It works the same through `bus.forCatalog(...)` views.
+
 ## What is guaranteed
 
 Events with the same `key` are handled **one at a time per handler, in commit order**. There is no global ordering across keys.
@@ -20,6 +37,7 @@ Events with the same `key` are handled **one at a time per handler, in commit or
 - On append, the key's counter row is incremented inside your transaction. The row lock is held until the transaction ends, so two transactions publishing the same key are serialized and the sequence equals the commit order.
 - A keyed delivery is claimed only when no earlier delivery of the same handler and key is pending or processing.
 - A retrying or leased head blocks its successors. A dead-lettered head releases them.
+- Every route to one destination of a transport is one handler, so the events of a key sent to one topic or exchange keep their commit order across event types.
 
 ## Costs and tips
 
