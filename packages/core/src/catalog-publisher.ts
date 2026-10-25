@@ -9,7 +9,7 @@ import {
 } from './catalog.js';
 import { ConfigurationError } from './errors.js';
 import type { DomainEvent, EventEnvelope } from './event.js';
-import type { PublishOneOptions, PublishOptions } from './relay-bus.js';
+import type { PublishOneOptions, PublishOptions } from './relay-bus-options.js';
 
 /** The publishing half of a bus, which a {@link CatalogPublisher} delegates to. */
 export interface PublishTarget<TTransaction> {

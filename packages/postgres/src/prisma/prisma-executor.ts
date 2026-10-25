@@ -1,4 +1,5 @@
-import type { PostgresExecutor, PostgresParameter, PostgresRow } from '../executor.js';
+import { adapterExecutor } from '../adapter-executor.js';
+import type { PostgresExecutor, PostgresRow } from '../executor.js';
 
 /** What a `PrismaClient` and an interactive-transaction client have in common. */
 export interface PrismaQueryable {
@@ -31,11 +32,11 @@ export function createPrismaExecutor(
   client: PrismaClientLike,
   transactionOptions: PrismaTransactionOptions = {},
 ): PostgresExecutor<PrismaQueryable> {
-  return {
+  return adapterExecutor<PrismaQueryable>({
+    root: client,
     transaction: (work) => client.$transaction(work, transactionOptions),
-    // eslint-disable-next-line relaybus/max-two-params -- PostgresExecutor port signature
-    async query(sql, parameters: readonly PostgresParameter[], transaction) {
-      return (await (transaction ?? client).$queryRawUnsafe(sql, ...parameters)) as PostgresRow[];
+    async run(queryable, { sql, parameters }) {
+      return (await queryable.$queryRawUnsafe(sql, ...parameters)) as PostgresRow[];
     },
-  };
+  });
 }

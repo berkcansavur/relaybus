@@ -5,7 +5,7 @@ import { ConfigurationError } from './errors.js';
 import type { RegistrationDefaults } from './handler-registry.js';
 import type { IdentifierGenerator } from './identifier.js';
 import { PositiveInteger } from './values/positive-integer.js';
-import type { DispatcherOptions, RelayBusOptions, RetentionOptions } from './relay-bus.js';
+import type { DispatcherOptions, RelayBusOptions, RetentionOptions } from './relay-bus-options.js';
 import { createRetryPolicy } from './retry-policy.js';
 
 // Option resolution of RelayBus: defaults and validation, in the order the options are read.

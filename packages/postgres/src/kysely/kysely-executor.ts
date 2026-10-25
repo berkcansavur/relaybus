@@ -1,5 +1,6 @@
+import { adapterExecutor } from '../adapter-executor.js';
 import { CompiledQuery } from 'kysely';
-import type { PostgresExecutor, PostgresParameter, PostgresRow } from '../executor.js';
+import type { PostgresExecutor, PostgresRow } from '../executor.js';
 
 /** What a Kysely instance and a Kysely transaction have in common. */
 export interface KyselyQueryable {
@@ -19,14 +20,14 @@ export interface KyselyLike extends KyselyQueryable {
  * `transaction` option of `publish`.
  */
 export function createKyselyExecutor(database: KyselyLike): PostgresExecutor<KyselyQueryable> {
-  return {
+  return adapterExecutor<KyselyQueryable>({
+    root: database,
     transaction: (work) => database.transaction().execute(work),
-    // eslint-disable-next-line relaybus/max-two-params -- PostgresExecutor port signature
-    async query(sql, parameters: readonly PostgresParameter[], transaction) {
-      const result = await (transaction ?? database).executeQuery<PostgresRow>(
+    async run(queryable, { sql, parameters }) {
+      const result = await queryable.executeQuery<PostgresRow>(
         CompiledQuery.raw(sql, [...parameters]),
       );
       return result.rows;
     },
-  };
+  });
 }

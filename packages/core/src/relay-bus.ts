@@ -43,19 +43,6 @@ import {
 import { runBudgetedTransaction } from './transaction-budget.js';
 import { Milliseconds } from './values/milliseconds.js';
 
-export type {
-  DispatcherOptions,
-  InboundSubscriptionOptions,
-  PublishOneOptions,
-  PublishOptions,
-  ReceiveStatus,
-  RelayBusOptions,
-  RetentionOptions,
-  RouteOptions,
-  TransactionMode,
-  UnroutedEventPolicy,
-} from './relay-bus-options.js';
-
 /** Batches `drain` runs at most before it gives up. */
 const DEFAULT_DRAIN_BATCHES = 1_000;
 const WAKE_DELAY_MS = 25;

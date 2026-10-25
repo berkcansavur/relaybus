@@ -1,4 +1,5 @@
-import type { PostgresExecutor, PostgresParameter, PostgresRow } from '../executor.js';
+import { adapterExecutor } from '../adapter-executor.js';
+import type { PostgresExecutor, PostgresRow } from '../executor.js';
 import { splitPositionalSql } from '../positional-sql.js';
 
 /** What a Knex instance and a Knex transaction have in common. */
@@ -16,17 +17,17 @@ export interface KnexLike extends KnexQueryable {
  * transaction: pass `trx` from `knex.transaction(async (trx) => ...)`.
  */
 export function createKnexExecutor(knex: KnexLike): PostgresExecutor<KnexQueryable> {
-  return {
+  return adapterExecutor<KnexQueryable>({
+    root: knex,
     transaction: (work) => knex.transaction(work),
-    // eslint-disable-next-line relaybus/max-two-params -- PostgresExecutor port signature
-    async query(sql, parameters: readonly PostgresParameter[], transaction) {
+    async run(queryable, { sql, parameters }) {
       const parts = splitPositionalSql(sql);
       const knexSql = parts.map((part) => (typeof part === 'string' ? part : '?')).join('');
       const bindings = parts.flatMap((part) =>
         typeof part === 'string' ? [] : [parameters[part.parameterIndex]],
       );
-      const result = await (transaction ?? knex).raw(knexSql, bindings);
+      const result = await queryable.raw(knexSql, bindings);
       return result.rows;
     },
-  };
+  });
 }

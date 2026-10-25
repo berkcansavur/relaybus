@@ -3,7 +3,7 @@ import { ConfigurationError } from './errors.js';
 import { assertEventType, type EventReference } from './event.js';
 import { DEFAULTS } from './relay-bus-settings.js';
 import { DEFAULT_ROUTE_RETRY_POLICY, createRetryPolicy, type RetryPolicy } from './retry-policy.js';
-import type { RouteOptions } from './relay-bus.js';
+import type { RouteOptions } from './relay-bus-options.js';
 
 const TRANSPORT_HANDLER_PREFIX = 'relaybus.transport';
 
