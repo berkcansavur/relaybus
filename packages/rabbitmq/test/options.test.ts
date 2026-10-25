@@ -39,7 +39,9 @@ describe('options', () => {
       ordered: false,
       reconnect: { initialDelayMs: 500, maxDelayMs: 30_000, factor: 2, jitter: 'equal' },
     });
-    expect(await settings.connect()).toBeInstanceOf(FakeConnection);
+    expect(await settings.connect({ signal: new AbortController().signal })).toBeInstanceOf(
+      FakeConnection,
+    );
   });
 
   it('accepts every option', () => {

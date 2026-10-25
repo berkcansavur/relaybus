@@ -7,9 +7,10 @@ import {
 import { abortableSleep } from './abortable-sleep.js';
 import type { AmqpConnection } from './amqp-types.js';
 import { RabbitMqUnavailableError } from './errors.js';
+import type { ConnectOptions } from './options.js';
 
 export interface ConnectionSupervisorSettings {
-  readonly connect: () => Promise<AmqpConnection>;
+  readonly connect: (options: ConnectOptions) => Promise<AmqpConnection>;
   /** Backoff between attempts, or undefined to never reconnect. */
   readonly reconnect: RetryPolicy | undefined;
   /** Creates channels and topology on a fresh connection. A rejection discards the connection. */
@@ -29,6 +30,12 @@ export interface ConnectionSupervisorSettings {
 export class ConnectionSupervisor {
   readonly #settings: ConnectionSupervisorSettings;
   readonly #stop = new AbortController();
+  /** Aborted by `forceClose`: destroys a socket that is still connecting. */
+  readonly #force = new AbortController();
+  /** Resolves on `forceClose`: closing stops waiting for the broker. */
+  readonly #forcing = new Promise<void>((resolve) => {
+    this.#force.signal.addEventListener('abort', () => resolve(), { once: true });
+  });
   #current: AmqpConnection | undefined;
   /** Connections being closed, until their closing handshake finishes. */
   readonly #closing = new Set<AmqpConnection>();
@@ -94,9 +101,10 @@ export class ConnectionSupervisor {
   async close(beforeDisconnect: () => Promise<void>): Promise<void> {
     this.#closed = true;
     this.#stop.abort();
-    await this.#reconnecting;
+    // Once forced, nothing waits for the broker: draining and the closing handshake are cut short.
+    await Promise.race([this.#reconnecting, this.#forcing]);
     try {
-      await beforeDisconnect();
+      await Promise.race([beforeDisconnect(), this.#forcing]);
     } finally {
       const connection = this.#current;
       this.#current = undefined;
@@ -115,6 +123,7 @@ export class ConnectionSupervisor {
     this.#closed = true;
     this.#forced = true;
     this.#stop.abort();
+    this.#force.abort();
     for (const connection of [this.#current, ...this.#closing]) {
       if (connection !== undefined) {
         destroySocket(connection);
@@ -134,7 +143,7 @@ export class ConnectionSupervisor {
   }
 
   async #establish(): Promise<void> {
-    const connection = await this.#settings.connect();
+    const connection = await this.#settings.connect({ signal: this.#force.signal });
     if (this.#closed) {
       // Opened after the transport closed: nobody would use or close it.
       await this.#closeConnection(connection);
@@ -224,10 +233,16 @@ export class ConnectionSupervisor {
   }
 }
 
-/** Destroys the socket under an amqplib connection: the channel model keeps it in fields its types omit. */
+/**
+ * Destroys the socket under an amqplib connection (the channel model keeps it in fields its types
+ * omit). With an error, so amqplib sees a socket error and runs its terminal cleanup: it stops
+ * heartbeating, fails pending channel operations and emits `close`.
+ */
 function destroySocket(connection: AmqpConnection): void {
   const model = connection as {
-    readonly connection?: { readonly stream?: { destroy(): void } };
+    readonly connection?: { readonly stream?: { destroy(error: Error): void } };
   };
-  model.connection?.stream?.destroy();
+  model.connection?.stream?.destroy(
+    new RabbitMqUnavailableError('Connection cut: the shutdown deadline passed'),
+  );
 }

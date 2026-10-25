@@ -60,9 +60,11 @@ export interface RabbitMqTransportOptions {
   readonly url?: string | BrokerConnectionSettings;
   /**
    * Opens one connection. Called again after every connection loss. Use it for
-   * TLS options, custom credentials or an alternative amqplib instance.
+   * TLS options, custom credentials or an alternative amqplib instance. `signal` aborts when a
+   * shutdown runs past its deadline: pass it on (`amqplib.connect(url, { signal })`) so a broker
+   * that never answers the handshake cannot hold the socket open.
    */
-  readonly connect?: () => Promise<AmqpConnection>;
+  readonly connect?: (options: ConnectOptions) => Promise<AmqpConnection>;
   /** Topic exchange events are published to. Durable, created when missing. Default `'relaybus'`. */
   readonly exchange?: string;
   /**
@@ -156,9 +158,15 @@ export interface RabbitMqTransportOptions {
   readonly random?: () => number;
 }
 
+/** What `connect` gets for each connection it opens. */
+export interface ConnectOptions {
+  /** Aborted when a shutdown runs past its deadline; destroys a socket still connecting. */
+  readonly signal: AbortSignal;
+}
+
 export interface ResolvedTransportSettings {
   readonly name: string;
-  readonly connect: () => Promise<AmqpConnection>;
+  readonly connect: (options: ConnectOptions) => Promise<AmqpConnection>;
   readonly exchange: string;
   readonly prefetch: number;
   readonly queuePrefix: string;
@@ -373,7 +381,9 @@ function resolveCodec({
   };
 }
 
-function resolveConnect(options: RabbitMqTransportOptions): () => Promise<AmqpConnection> {
+function resolveConnect(
+  options: RabbitMqTransportOptions,
+): (options: ConnectOptions) => Promise<AmqpConnection> {
   const { url, connect } = options;
   if ((url === undefined) === (connect === undefined)) {
     throw new ConfigurationError("Give exactly one of 'url' and 'connect'");
@@ -381,9 +391,11 @@ function resolveConnect(options: RabbitMqTransportOptions): () => Promise<AmqpCo
   if (connect !== undefined) {
     return connect;
   }
-  return async () => {
+  return async ({ signal }) => {
     const amqplib = await import('amqplib');
-    return amqplib.connect(url!);
+    // amqplib hands its socket options to net.connect / tls.connect, which take a signal; its types omit it.
+    const socketOptions = { signal } as unknown as Parameters<typeof amqplib.connect>[1];
+    return amqplib.connect(url!, socketOptions);
   };
 }
 

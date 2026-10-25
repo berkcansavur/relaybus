@@ -371,11 +371,106 @@ describe('stop deadline', () => {
     const release = deferred<boolean>();
     vi.spyOn(store, 'release').mockReturnValue(release.promise);
     const stopping = bus.stop();
-    clock.advance(1_000);
+    // The release starts at the drain point and answers only after the deadline.
+    clock.advance(800);
+    await flush();
+    clock.advance(200);
     await expect(stopping).resolves.toMatchObject({ abandonedDeliveries: 1 });
     release.reject(new Error('store closed'));
     await flush();
     expect(observer.onFailure).toHaveBeenCalledWith(expect.objectContaining({ stage: 'release' }));
+    expect(clock.pendingTimers).toBe(0);
+  });
+});
+
+describe('settlements of abandoned deliveries', () => {
+  it('never completes a delivery after stop abandoned it, and cancels the retry wait', async () => {
+    const clock = new FakeClock(0, { controlTimers: true });
+    const { bus, store, observer } = createTestBus({
+      clock,
+      transactionMode: 'optional',
+      retention: { completed: false },
+      dispatcher: { shutdownTimeout: 1_000, leaseDuration: 3_000, completionBatchWindow: 0 },
+    });
+    bus.subscribe(OrderPlaced, () => Promise.resolve(), { id: 'h' });
+    await bus.publish(new OrderPlaced({ orderId: 'o-1' }));
+    let storeDown = true;
+    const complete = store.complete.bind(store);
+    const completions = vi
+      .spyOn(store, 'complete')
+      .mockImplementation((...args) =>
+        storeDown ? Promise.reject(new Error('store down')) : complete(...args),
+      );
+    await bus.start();
+    await waitFor(() => completions.mock.calls.length === 1);
+    const stopping = bus.stop();
+    clock.advance(1_000);
+    await expect(stopping).resolves.toMatchObject({ graceful: false, abandonedDeliveries: 1 });
+    expect(clock.pendingTimers).toBe(0);
+    storeDown = false;
+    const calls = completions.mock.calls.length;
+    clock.advance(5_000);
+    await flush();
+    expect(completions.mock.calls.length).toBe(calls);
+    expect(observer.onDeliverySucceeded).not.toHaveBeenCalled();
+    // The delivery is still there, for another process once its lease expired.
+    expect(await bus.listDeliveries({ status: 'processing' })).toHaveLength(1);
+  });
+
+  it('releases nothing for an abandoned transactional handler that settles later', async () => {
+    const clock = new FakeClock(0, { controlTimers: true });
+    const { bus, store } = createTestBus({
+      clock,
+      transactionMode: 'optional',
+      retention: { completed: false },
+      dispatcher: { shutdownTimeout: 1_000, leaseDuration: 3_000 },
+    });
+    const gate = deferred();
+    let started = false;
+    bus.subscribe(
+      OrderPlaced,
+      async () => {
+        started = true;
+        await gate.promise;
+      },
+      { id: 'h', transactional: true },
+    );
+    const release = vi.spyOn(store, 'release');
+    await bus.publish(new OrderPlaced({ orderId: 'o-1' }));
+    await bus.start();
+    await waitFor(() => started);
+    const stopping = bus.stop();
+    clock.advance(1_000);
+    await expect(stopping).resolves.toMatchObject({ abandonedDeliveries: 1 });
+    gate.reject(new Error('connection terminated'));
+    await flush();
+    expect(release).not.toHaveBeenCalled();
+    expect(await bus.listDeliveries({ status: 'processing' })).toHaveLength(1);
+  });
+
+  it('cancels the timeout timer of an abandoned transactional handler', async () => {
+    const clock = new FakeClock(0, { controlTimers: true });
+    const { bus } = createTestBus({
+      clock,
+      transactionMode: 'optional',
+      retention: { completed: false },
+      dispatcher: { shutdownTimeout: 1_000, leaseDuration: 3_000 },
+    });
+    let started = false;
+    bus.subscribe(
+      OrderPlaced,
+      () => {
+        started = true;
+        return new Promise<void>(() => undefined);
+      },
+      { id: 'h', transactional: true, timeout: '1h' },
+    );
+    await bus.publish(new OrderPlaced({ orderId: 'o-1' }));
+    await bus.start();
+    await waitFor(() => started);
+    const stopping = bus.stop();
+    clock.advance(1_000);
+    await expect(stopping).resolves.toMatchObject({ graceful: false, abandonedDeliveries: 1 });
     expect(clock.pendingTimers).toBe(0);
   });
 });

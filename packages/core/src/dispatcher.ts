@@ -1,5 +1,7 @@
 import type { Clock } from './clock.js';
 import { CompletionBatcher } from './completion-batcher.js';
+import { DeliveryTimers } from './delivery-timers.js';
+import { pendingKey, rejectOnAbort } from './dispatcher-support.js';
 import {
   DispatcherStoppedError,
   HandlerTimeoutError,
@@ -7,7 +9,7 @@ import {
   AttemptsExhaustedError,
   toErrorInfo,
 } from './errors.js';
-import { schedule, sleep, type CancelTimer } from './internal/timers.js';
+import { schedule, type CancelTimer } from './internal/timers.js';
 import { validatePayload, type EventEnvelope } from './event.js';
 import type { ClaimedDelivery, EventStore } from './event-store.js';
 import { runInIsolatedScope } from './execution-scope.js';
@@ -144,10 +146,12 @@ export class Dispatcher {
   #abandoned = false;
   /** Stops the lease renewal (or transactional lease guard) of each delivery whose handler runs. */
   readonly #leaseKeepers = new Map<ClaimedDelivery, () => void>();
+  readonly #timers: DeliveryTimers;
 
   constructor(dependencies: DispatcherDependencies) {
     this.#dependencies = dependencies;
-    this.#sleep = dependencies.sleep ?? ((milliseconds) => sleep(dependencies.clock, milliseconds));
+    this.#timers = new DeliveryTimers(dependencies.clock);
+    this.#sleep = dependencies.sleep ?? ((milliseconds) => this.#timers.sleep(milliseconds));
     const { store, clock, settings } = dependencies;
     this.#refillThreshold = Math.ceil(
       Math.min(settings.concurrency, settings.batchSize) * REFILL_FRACTION,
@@ -312,6 +316,7 @@ export class Dispatcher {
       stopKeeping();
     }
     this.#leaseKeepers.clear();
+    this.#timers.cancelAll();
     this.#recoveryTimer?.();
     this.#recoveryTimer = undefined;
     this.#pending.clear();
@@ -642,6 +647,10 @@ export class Dispatcher {
       }
       return true;
     } catch (error) {
+      if (this.#abandoned) {
+        // Stop gave this delivery up and the store may be closed: its lease expires instead.
+        return false;
+      }
       if (error instanceof LeaseLostError) {
         notifier.notify('onLeaseLost', { delivery });
         if (!error.storeConfirmed) {
@@ -695,6 +704,10 @@ export class Dispatcher {
   async #confirmCompletion(delivery: ClaimedDelivery): Promise<HandlerOutcome> {
     const { notifier } = this.#dependencies;
     for (let attempt = 0; ; attempt += 1) {
+      if (this.#abandoned) {
+        // Stop gave this delivery up: no completion may reach the store any more.
+        return 'unconfirmed';
+      }
       let completed: boolean;
       try {
         completed = await this.#complete(delivery);
@@ -748,7 +761,7 @@ export class Dispatcher {
     let cancelTimeout: CancelTimer | undefined;
     if (registration.timeoutMs !== null) {
       const timeoutMs = registration.timeoutMs;
-      cancelTimeout = schedule(this.#dependencies.clock, {
+      cancelTimeout = this.#timers.start({
         run: () => {
           controller.abort(
             new HandlerTimeoutError(
@@ -983,18 +996,4 @@ export class Dispatcher {
       notifier.notify('onLeaseLost', { delivery });
     }
   }
-}
-
-/** Settlements are pending per claim: an older claim of a delivery must never replace or remove the newer one's. */
-function pendingKey(delivery: ClaimedDelivery): string {
-  return `${delivery.deliveryId}\u0000${delivery.leaseToken}`;
-}
-
-function rejectOnAbort(signal: AbortSignal): Promise<never> {
-  return new Promise<never>((_, reject) => {
-    // The reason is always an Error: the dispatcher aborts with LeaseLostError,
-    // HandlerTimeoutError or DispatcherStoppedError.
-    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
-    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
-  });
 }

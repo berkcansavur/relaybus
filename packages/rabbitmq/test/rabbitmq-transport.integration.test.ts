@@ -511,3 +511,22 @@ describe('RabbitMqTransport against a real broker', () => {
     expect(new Set(received)).toEqual(new Set([first.id, whileDown.id, after.id]));
   });
 });
+
+describe('RabbitMqTransport forced close on a real broker', () => {
+  it("runs amqplib's terminal cleanup when the deadline cuts the connection", async () => {
+    let model: amqplib.ChannelModel | undefined;
+    const transport = new RabbitMqTransport({
+      connect: async () => {
+        model = await amqplib.connect(amqpUrl);
+        return model;
+      },
+      logger: silent,
+    });
+    await transport.connect();
+    const closed = new Promise<unknown>((resolve) => model!.once('close', resolve));
+    model!.on('error', () => undefined);
+    await transport.close({ signal: AbortSignal.abort() });
+    // 'close' is what amqplib emits once it stopped heartbeating and failed its pending operations.
+    await expect(closed).resolves.toBeInstanceOf(Error);
+  });
+});

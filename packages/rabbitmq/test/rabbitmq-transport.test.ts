@@ -1,3 +1,4 @@
+import { createServer, type Socket } from 'node:net';
 import { describe, expect, it, vi } from 'vitest';
 import { ConfigurationError } from '@relaybus/core';
 import type { AmqpMessage } from '../src/amqp-types.js';
@@ -726,6 +727,50 @@ describe('RabbitMqTransport forced close', () => {
     await waitFor(() => connection.close.mock.calls.length === 1);
     void transport.close({ signal: AbortSignal.abort() });
     expect(destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('destroys the socket with an error, so amqplib runs its own cleanup', async () => {
+    const destroy = vi.fn();
+    const transport = new RabbitMqTransport({
+      connect: async () => hangingConnection({ destroy }),
+    });
+    await transport.connect();
+    void transport.close({ signal: AbortSignal.abort() });
+    expect(destroy).toHaveBeenCalledWith(expect.any(Error));
+  });
+
+  it('cuts a socket still in the AMQP handshake with a broker that never answers', async () => {
+    const accepted: Socket[] = [];
+    // Reads and ignores whatever the client sends, so it sees the client hang up.
+    const server = createServer((socket) => {
+      socket.resume();
+      accepted.push(socket);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as { port: number };
+    const transport = new RabbitMqTransport({ url: `amqp://127.0.0.1:${port}` });
+    const connecting = transport.connect();
+    await waitFor(() => accepted.length === 1);
+    const serverSaw = new Promise<void>((resolve) => accepted[0]!.once('close', () => resolve()));
+    const closing = transport.close({ signal: AbortSignal.abort() });
+    await expect(connecting).rejects.toThrow();
+    await serverSaw;
+    await closing;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }, 10_000);
+
+  it('passes the deadline signal to a connect function', async () => {
+    let received: AbortSignal | undefined;
+    const transport = new RabbitMqTransport({
+      connect: async ({ signal }) => {
+        received = signal;
+        return new FakeConnection();
+      },
+    });
+    await transport.connect();
+    expect(received!.aborted).toBe(false);
+    await transport.close({ signal: AbortSignal.abort() });
+    expect(received!.aborted).toBe(true);
   });
 
   it('stops listening to the deadline once it closed', async () => {
