@@ -19,6 +19,7 @@ A readability release: no behaviour, API, SQL or wire-format change. Nothing to 
 - Shared skeletons moved into abstract base classes: one lease settlement flow for the PostgreSQL, MongoDB and in-memory stores, one claim flow for PostgreSQL and MongoDB, and one subscription lifecycle for Kafka and RabbitMQ. Value objects replace repeated primitives with rules (durations, backoff, lease identity, composite keys, bounded integers).
 - Proof of no behaviour change: the public API snapshot, the SQL snapshot of every statement and the performance budgets are unchanged; 2,798 tests with 100% coverage.
 - Additive type change: `KafkaTransport` and `RabbitMqTransport` now extend the internal `SubscribingTransport` base class.
+- Benchmark against 0.3.0 (quick gate, 3 interleaved pairs per cell): publish 0.99–1.02x, dispatch 0.98–1.04x, every interval spans 1.0, so speed is unchanged. The 4-instance PostgreSQL dispatch cell was not valid on either side (its template drains before the measurement window ends); that is a harness sizing issue, not a regression.
 
 ## 0.3.0 (2026-10-25)
 
