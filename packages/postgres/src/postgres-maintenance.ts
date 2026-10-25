@@ -80,6 +80,25 @@ export class PostgresMaintenance<TTransaction> {
   /** Implements {@link PostgresEventStore.purge}. */
   async purge(request: PurgeRequest): Promise<PurgeResult> {
     const total = { deletedDeliveries: 0, deletedEvents: 0 };
+    const batches = this.#purgeBatchPlan(request);
+    for (const [sql, cutoff, deleteOrphans] of batches) {
+      if (cutoff === undefined) {
+        continue;
+      }
+      let deletedInBatch = this.#state.purgeBatchSize;
+      while (deletedInBatch === this.#state.purgeBatchSize) {
+        const batch = await this.#purgeBatch(sql, { cutoff, deleteOrphans });
+        deletedInBatch = batch.deletedDeliveries;
+        total.deletedDeliveries += batch.deletedDeliveries;
+        total.deletedEvents += batch.deletedEvents;
+      }
+    }
+    total.deletedEvents += await this.#purgeAllOrphanEvents(request);
+    return total;
+  }
+
+  /** The purge statements to run in order: SQL, cutoff (undefined skips it) and the orphan-event delete. */
+  #purgeBatchPlan(request: PurgeRequest): Array<[string, Date | undefined, string]> {
     const batches: Array<[string, Date | undefined, string]> = [
       [
         this.#state.statements.purge.purgeCompletedBatch(),
@@ -99,23 +118,17 @@ export class PostgresMaintenance<TTransaction> {
         this.#state.statements.purge.deleteOrphanEventsWithoutCompletion,
       ]);
     }
-    for (const [sql, cutoff, deleteOrphans] of batches) {
-      if (cutoff === undefined) {
-        continue;
-      }
-      let deletedInBatch = this.#state.purgeBatchSize;
-      while (deletedInBatch === this.#state.purgeBatchSize) {
-        const batch = await this.#purgeBatch(sql, { cutoff, deleteOrphans });
-        deletedInBatch = batch.deletedDeliveries;
-        total.deletedDeliveries += batch.deletedDeliveries;
-        total.deletedEvents += batch.deletedEvents;
-      }
-    }
+    return batches;
+  }
+
+  /** Removes the events left without deliveries, in two passes; returns how many events were deleted. */
+  async #purgeAllOrphanEvents(request: PurgeRequest): Promise<number> {
+    let deletedEvents = 0;
     const orphanCutoff = [request.completedBefore, request.deadBefore]
       .filter((cutoff) => cutoff !== undefined)
       .sort((first, second) => first.getTime() - second.getTime())[0];
     if (orphanCutoff !== undefined) {
-      total.deletedEvents += await this.#purgeOrphanEvents(
+      deletedEvents += await this.#purgeOrphanEvents(
         this.#state.statements.purge.lockOrphanEventsBatch,
         {
           deleteStatement: this.#state.statements.purge.deleteOrphanEventsWithoutCompletion,
@@ -125,7 +138,7 @@ export class PostgresMaintenance<TTransaction> {
       );
     }
     if (request.completedBefore !== undefined) {
-      total.deletedEvents += await this.#purgeOrphanEvents(
+      deletedEvents += await this.#purgeOrphanEvents(
         this.#state.statements.purge.lockCompletedOrphanEventsBatch,
         {
           deleteStatement: this.#state.statements.purge.deleteExpiredCompletedOrphanEvents,
@@ -134,7 +147,7 @@ export class PostgresMaintenance<TTransaction> {
         },
       );
     }
-    return total;
+    return deletedEvents;
   }
 
   async #purgeOrphanEvents(

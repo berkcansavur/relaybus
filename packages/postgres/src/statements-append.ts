@@ -19,15 +19,29 @@ export class AppendStatements {
    * inserted. Deliveries of events that already existed are left to {@link insertDeliveries}.
    */
   get insertFreshEvents(): string {
-    const events = this.#names.events;
-    return `WITH reserved AS (
+    return `WITH ${this.#reservedSequences()}, ${this.#incomingEvents()}, ${this.#insertedEvents()}, ${this.#insertedDeliveries()}, ${this.#wakeUp('inserted_deliveries', '$5')}
+SELECT incoming.id, incoming.sequence::text AS sequence,
+  incoming.id IN (SELECT inserted_events.id FROM inserted_events) AS inserted,
+  (SELECT count(*) FROM inserted_deliveries)::int AS deliveries
+FROM incoming
+WHERE (SELECT count(*) FROM woken) >= 0`;
+  }
+
+  /** The CTE `reserved` of {@link insertFreshEvents}: the sequences the keys of `$4` reserve. */
+  #reservedSequences(): string {
+    return `reserved AS (
   INSERT INTO ${this.#names.keySequences} AS reserved (key, sequence)
   SELECT requested.key, requested.count
   FROM jsonb_to_recordset($4::jsonb) AS requested (key text, count bigint)
   ORDER BY requested.key
   ON CONFLICT (key) DO UPDATE SET sequence = reserved.sequence + EXCLUDED.sequence
   RETURNING reserved.key AS key, reserved.sequence AS sequence
-), incoming AS (
+)`;
+  }
+
+  /** The CTE `incoming` of {@link insertFreshEvents}: the events of `$1` with their key sequences. */
+  #incomingEvents(): string {
+    return `incoming AS (
   SELECT incoming.*,
     CASE WHEN incoming.key IS NULL THEN NULL ELSE
       reserved.sequence - count(*) OVER (PARTITION BY incoming.key)
@@ -37,8 +51,13 @@ export class AppendStatements {
     ordinal int, id text, type text, source text, key text, payload jsonb, headers jsonb,
     correlation_id text, causation_id text, occurred_at timestamptz, handlers text[])
   LEFT JOIN reserved ON reserved.key = incoming.key
-), inserted_events AS (
-  INSERT INTO ${events}
+)`;
+  }
+
+  /** The CTE `inserted_events` of {@link insertFreshEvents}: the events of `$1` that do not exist yet. */
+  #insertedEvents(): string {
+    return `inserted_events AS (
+  INSERT INTO ${this.#names.events}
     (id, type, source, key, sequence, payload, headers, correlation_id, causation_id, occurred_at, created_at, handlers)
   SELECT incoming.id, incoming.type, incoming.source, incoming.key, incoming.sequence,
     COALESCE(incoming.payload, 'null'::jsonb), COALESCE(incoming.headers, '{}'::jsonb),
@@ -48,7 +67,12 @@ export class AppendStatements {
   ORDER BY incoming.id
   ON CONFLICT (id) DO NOTHING
   RETURNING id, key, sequence
-), inserted_deliveries AS (
+)`;
+  }
+
+  /** The CTE `inserted_deliveries` of {@link insertFreshEvents}: the deliveries of `$3` of the inserted events. */
+  #insertedDeliveries(): string {
+    return `inserted_deliveries AS (
   INSERT INTO ${this.#names.deliveries}
     (id, event_id, handler, lane, status, attempts, available_at, key, sequence, created_at, updated_at)
   SELECT delivery.id, delivery.event_id, delivery.handler, ${laneExpression('event.key', 'event.id')}, 'pending', 0,
@@ -58,12 +82,7 @@ export class AppendStatements {
   ORDER BY delivery.event_id, delivery.handler
   ON CONFLICT (event_id, handler) DO NOTHING
   RETURNING available_at
-), ${this.#wakeUp('inserted_deliveries', '$5')}
-SELECT incoming.id, incoming.sequence::text AS sequence,
-  incoming.id IN (SELECT inserted_events.id FROM inserted_events) AS inserted,
-  (SELECT count(*) FROM inserted_deliveries)::int AS deliveries
-FROM incoming
-WHERE (SELECT count(*) FROM woken) >= 0`;
+)`;
   }
 
   /** One wake-up notification on {@link PostgresNames.notificationChannel}, outside any publishing transaction. */

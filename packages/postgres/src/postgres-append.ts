@@ -69,22 +69,11 @@ export class PostgresAppend<TTransaction> {
     const createdAt = now.toISOString();
     const wakeAt = this.#wakeAt(plan.deliveries, { now, transaction });
     const handlersByEvent = handlersByEventOf(plan.deliveries);
-    const keyCounts = keyCountsOf(plan.events);
-    const fresh = await this.#state.query({
-      sql: this.#state.statements.append.insertFreshEvents,
-      parameters: [
-        JSON.stringify(
-          plan.events.map((event, ordinal) => ({
-            ordinal,
-            ...toEventRow(event, { sequence: null, handlers: handlersByEvent.get(event.id) ?? [] }),
-          })),
-        ),
-        createdAt,
-        JSON.stringify(plan.deliveries),
-        JSON.stringify([...keyCounts].map(([key, count]) => ({ key, count }))),
-        wakeAt,
-      ],
-      transaction,
+    const fresh = await this.#insertFreshEvents(transaction, {
+      plan,
+      handlersByEvent,
+      createdAt,
+      wakeAt,
     });
     const insertedEventIds = new Set(
       fresh.filter((row) => row['inserted'] === true).map((row) => row['id'] as string),
@@ -105,6 +94,53 @@ export class PostgresAppend<TTransaction> {
       });
     }
     return { ...splitOutcomes(plan, insertedEventIds), appendedDeliveryCount };
+  }
+
+  /** Runs the publishing statement that inserts the events not stored yet, with their deliveries. */
+  async #insertFreshEvents(
+    transaction: TTransaction,
+    {
+      plan,
+      handlersByEvent,
+      createdAt,
+      wakeAt,
+    }: {
+      readonly plan: AppendPlan;
+      readonly handlersByEvent: ReadonlyMap<string, string[]>;
+      readonly createdAt: string;
+      readonly wakeAt: string | null;
+    },
+  ): Promise<readonly PostgresRow[]> {
+    const keyCounts = keyCountsOf(plan.events);
+    return this.#state.query({
+      sql: this.#state.statements.append.insertFreshEvents,
+      parameters: [
+        JSON.stringify(
+          plan.events.map((event, ordinal) => ({
+            ordinal,
+            ...toEventRow(event, { sequence: null, handlers: handlersByEvent.get(event.id) ?? [] }),
+          })),
+        ),
+        createdAt,
+        JSON.stringify(plan.deliveries),
+        JSON.stringify([...keyCounts].map(([key, count]) => ({ key, count }))),
+        wakeAt,
+      ],
+      transaction,
+    });
+  }
+
+  /** Locks the given events and returns the ids of those that still exist. */
+  async #lockExistingEvents(
+    transaction: TTransaction,
+    existing: readonly EventRow[],
+  ): Promise<Set<string>> {
+    const locked = await this.#state.query({
+      sql: this.#state.statements.append.lockExistingEvents,
+      parameters: [JSON.stringify(existing.map((row) => row.id).sort())],
+      transaction,
+    });
+    return new Set(locked.map((row) => row['id'] as string));
   }
 
   /**
@@ -192,15 +228,7 @@ export class PostgresAppend<TTransaction> {
         }),
       );
     while (existing.length > 0) {
-      const locked = new Set(
-        (
-          await this.#state.query({
-            sql: this.#state.statements.append.lockExistingEvents,
-            parameters: [JSON.stringify(existing.map((row) => row.id).sort())],
-            transaction,
-          })
-        ).map((row) => row['id'] as string),
-      );
+      const locked = await this.#lockExistingEvents(transaction, existing);
       const gone = existing.filter((row) => !locked.has(row.id));
       if (gone.length > 0) {
         const inserted = await this.#state.query({
