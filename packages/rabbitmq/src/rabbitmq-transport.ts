@@ -6,6 +6,7 @@ import {
   type EventEnvelope,
   type Transport,
   type TransportMessageHandler,
+  type TransportSubscriptionHooks,
 } from '@relaybus/core';
 import { schedule } from '@relaybus/core/internal';
 import type {
@@ -212,9 +213,11 @@ export class RabbitMqTransport implements Transport {
    * to `onMessage`. Call it once per transport; give each subscription its own
    * transport instance, with its own `name` and `consumerGroup`.
    */
+  // eslint-disable-next-line relaybus/max-two-params -- the Transport.subscribe signature
   async subscribe(
     destinations: readonly string[],
     onMessage: TransportMessageHandler,
+    hooks?: TransportSubscriptionHooks,
   ): Promise<void> {
     if (this.#subscription !== undefined) {
       throw new ConfigurationError(
@@ -249,6 +252,7 @@ export class RabbitMqTransport implements Transport {
           this.#publishConfirmed({ exchange, routingKey, content, options, mandatory: true }),
         shutdownTimeoutMs: this.#settings.shutdownTimeoutMs,
         onMessage,
+        ...(hooks === undefined ? {} : { onInvalidMessage: hooks.onInvalidMessage }),
         decode: this.#settings.decode,
         onConsumerLost: (reason) => this.#supervisor.recover(reason),
         logger: this.#settings.logger,

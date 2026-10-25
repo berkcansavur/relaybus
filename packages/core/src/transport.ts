@@ -7,6 +7,27 @@ export interface TransportMessage {
   readonly destination: string;
 }
 
+/** A message the transport could not turn into an event, so it never reaches the bus. */
+export interface InvalidTransportMessage {
+  /** Topic, routing key or queue the message arrived on. */
+  readonly destination: string;
+  /** What the codec or decoder threw. */
+  readonly error: unknown;
+}
+
+/**
+ * What the bus offers a transport at `subscribe`, beyond the message handler. Present only when
+ * an observer implements the matching hook, so a transport can skip the work otherwise.
+ */
+export interface TransportSubscriptionHooks {
+  /**
+   * Call once for each inbound message the transport rejected as undecodable (dead-lettered or
+   * skipped) before it reached `onMessage`. Messages the bus rejected itself are reported by
+   * `onReceiveFinished` and must not be reported here. Never throws.
+   */
+  readonly onInvalidMessage: (message: InvalidTransportMessage) => void;
+}
+
 /**
  * Receives an event from a broker. Resolve only after it is durably stored. Transports pass
  * `message` to tell where the event arrived; it is optional for transports written before it.
@@ -36,7 +57,11 @@ export interface Transport {
   readonly system?: string;
   connect?(): Promise<void>;
   publish(envelope: EventEnvelope, destination: string): Promise<void>;
-  subscribe?(destinations: readonly string[], onMessage: TransportMessageHandler): Promise<void>;
+  subscribe?(
+    destinations: readonly string[],
+    onMessage: TransportMessageHandler,
+    hooks?: TransportSubscriptionHooks,
+  ): Promise<void>;
   /**
    * Whether the transport can currently publish and, when subscribed, is
    * consuming. Health checks use it to report a dead consumer or a lost

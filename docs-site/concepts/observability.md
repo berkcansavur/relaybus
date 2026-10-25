@@ -108,7 +108,7 @@ by default. Read it in one process per database if many share it, or accept the 
 
 The metrics come from observer hooks you can also implement yourself: `onPublishFinished`,
 `onClaimFinished`, `onHandlerStarted`, `onHandlerFinished`, `onTransportSent`,
-`onReceiveFinished`, `onBacklog`, next to the lifecycle hooks (`onDeliveryRetryScheduled`,
+`onReceiveFinished`, `onInvalidMessage`, `onBacklog`, next to the lifecycle hooks (`onDeliveryRetryScheduled`,
 `onDeliveryDead`, `onLeaseLost`, `onFailure`, ...). A hook that no observer implements costs
 nothing, not even a clock read.
 

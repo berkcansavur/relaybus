@@ -337,7 +337,9 @@ process runs them again: at-least-once still holds, so keep handlers idempotent.
 lanes, duration), `onHandlerStarted` (end-to-end latency from `occurredAt`),
 `onHandlerFinished` (duration, outcome, error with its code), `onTransportSent` (transport,
 system, destination, duration, outcome), `onReceiveFinished` (transport, destination, source,
-trace context; `accepted`, `duplicate`, `ignored`, `invalid` or `error`) and `onBacklog`
+trace context; `accepted`, `duplicate`, `ignored`, `invalid` or `error`), `onInvalidMessage`
+(a transport could not decode an inbound message, so it never reached the bus: transport,
+destination, reason) and `onBacklog`
 (pending deliveries and age of the oldest due one, every `backlogInterval`). A hook no observer
 implements costs nothing, not even a clock read. Hooks run synchronously and must not throw; a
 throwing hook is reported to `onFailure` with stage `observer`. `traceContextOf(event.headers)`

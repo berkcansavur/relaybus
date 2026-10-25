@@ -9,6 +9,7 @@ import {
   type RelayBusLogger,
   type Transport,
   type TransportMessageHandler,
+  type TransportSubscriptionHooks,
 } from '@relaybus/core';
 import { assertPositiveInteger, schedule, type CancelTimer } from '@relaybus/core/internal';
 import { decodeEnvelope, encodeEnvelope, toOutgoingHeaders } from './cloudevents-codec.js';
@@ -265,9 +266,11 @@ export class KafkaTransport implements Transport {
    * @throws ConfigurationError when `groupId` is missing, `destinations` is empty
    * or the transport already subscribed (create one transport per subscription).
    */
+  // eslint-disable-next-line relaybus/max-two-params -- the Transport.subscribe signature
   async subscribe(
     destinations: readonly string[],
     onMessage: TransportMessageHandler,
+    hooks?: TransportSubscriptionHooks,
   ): Promise<void> {
     this.#assertCanSubscribe(destinations);
     this.#state = 'subscribed';
@@ -275,7 +278,7 @@ export class KafkaTransport implements Transport {
     this.#consumer = consumer;
     this.#observeConsumer(consumer);
     const start = (): Promise<void> =>
-      this.#startConsumer(consumer, { destinations: [...destinations], onMessage });
+      this.#startConsumer(consumer, { destinations: [...destinations], onMessage, hooks });
     this.#startConsuming = start;
     try {
       await start();
@@ -298,13 +301,20 @@ export class KafkaTransport implements Transport {
     {
       destinations,
       onMessage,
-    }: { readonly destinations: string[]; readonly onMessage: TransportMessageHandler },
+      hooks,
+    }: {
+      readonly destinations: string[];
+      readonly onMessage: TransportMessageHandler;
+      readonly hooks: TransportSubscriptionHooks | undefined;
+    },
   ): Promise<void> {
     await consumer.connect();
     await consumer.subscribe({ topics: destinations, fromBeginning: this.#fromBeginning });
     const joined = this.#waitForGroupJoin(consumer);
     try {
-      await consumer.run({ eachMessage: (payload) => this.#handleMessage(payload, onMessage) });
+      await consumer.run({
+        eachMessage: (payload) => this.#handleMessage(payload, { onMessage, hooks }),
+      });
       await joined.promise;
     } finally {
       joined.dispose();
@@ -424,7 +434,13 @@ export class KafkaTransport implements Transport {
 
   async #handleMessage(
     payload: KafkaEachMessagePayload,
-    onMessage: TransportMessageHandler,
+    {
+      onMessage,
+      hooks,
+    }: {
+      onMessage: TransportMessageHandler;
+      hooks: TransportSubscriptionHooks | undefined;
+    },
   ): Promise<void> {
     let envelope: EventEnvelope;
     try {
@@ -434,6 +450,7 @@ export class KafkaTransport implements Transport {
       if (this.#codec === cloudEventsBinary && !(error instanceof InvalidKafkaMessageError)) {
         throw toHandlerFailure(error);
       }
+      hooks?.onInvalidMessage({ destination: payload.topic, error });
       await this.#withRetries(payload, {
         method: 'handleInvalid',
         operation: () => this.#handleInvalid(payload, error),

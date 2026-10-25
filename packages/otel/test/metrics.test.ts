@@ -340,3 +340,50 @@ describe('observer edge cases', () => {
     expect(metrics.has('messaging.process.duration')).toBe(false);
   });
 });
+
+describe('invalid inbound messages', () => {
+  it('counts messages a transport could not decode by system, destination and error type', async () => {
+    createBus();
+    const observer = telemetry.otel.observer;
+    const error = { name: 'MalformedMessageError', message: 'not json', code: 'MALFORMED' };
+    observer.onInvalidMessage!({
+      transport: 'rabbit',
+      system: 'rabbitmq',
+      destination: 'orders.placed',
+      reason: 'not json',
+      error,
+    });
+    observer.onInvalidMessage!({
+      transport: 'rabbit',
+      system: 'rabbitmq',
+      destination: 'orders.placed',
+      reason: 'not json',
+      error,
+    });
+    observer.onInvalidMessage!({
+      transport: 'events',
+      system: 'kafka',
+      destination: 'orders',
+      reason: 'bad bytes',
+      error: { name: 'TypeError', message: 'bad bytes' },
+    });
+    expect(await points('relaybus.messages.invalid')).toEqual([
+      {
+        attributes: {
+          'messaging.system': 'rabbitmq',
+          'messaging.destination.name': 'orders.placed',
+          'error.type': 'MALFORMED',
+        },
+        value: 2,
+      },
+      {
+        attributes: {
+          'messaging.system': 'kafka',
+          'messaging.destination.name': 'orders',
+          'error.type': 'TypeError',
+        },
+        value: 1,
+      },
+    ]);
+  });
+});

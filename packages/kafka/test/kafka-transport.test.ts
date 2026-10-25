@@ -6,6 +6,7 @@ import {
   NonRetryableError,
   type EventEnvelope,
   type TransportMessage,
+  type TransportSubscriptionHooks,
 } from '@relaybus/core';
 import {
   HandlerFailedError,
@@ -37,13 +38,16 @@ function setup(options: Partial<KafkaTransportOptions> = {}) {
   return { kafka, logger, transport, producer: kafka.producer_, consumer: kafka.consumer_ };
 }
 
-async function subscribed(options: Partial<KafkaTransportOptions> = {}) {
+async function subscribed(
+  options: Partial<KafkaTransportOptions> = {},
+  hooks?: TransportSubscriptionHooks,
+) {
   const context = setup(options);
   const received: EventEnvelope[] = [];
   const onMessage = vi.fn(async (envelope: EventEnvelope, _message?: TransportMessage) => {
     received.push(envelope);
   });
-  await context.transport.subscribe(['orders'], onMessage);
+  await context.transport.subscribe(['orders'], onMessage, hooks);
   return { ...context, received, onMessage };
 }
 
@@ -828,6 +832,42 @@ describe('events the bus rejects for good', () => {
     expect(producer.sent[0]!.messages[0]!.headers).toMatchObject({
       'relaybus-invalid-reason': error.message,
     });
+  });
+});
+
+describe('reporting malformed messages to the bus', () => {
+  const malformed = { key: Buffer.from('k'), value: Buffer.from('{nope'), offset: '9' };
+
+  it.each([
+    ['dead-lettering', undefined],
+    ['skipping', 'skip' as const],
+    ['a custom policy', () => undefined],
+  ])('reports a record it cannot decode once when %s', async (_label, onInvalidMessage) => {
+    const onInvalid = vi.fn();
+    const { consumer } = await subscribed(
+      onInvalidMessage === undefined ? {} : { onInvalidMessage },
+      { onInvalidMessage: onInvalid },
+    );
+    await consumer.deliver(malformed);
+    expect(onInvalid).toHaveBeenCalledExactlyOnceWith({
+      destination: 'orders',
+      error: expect.any(Error),
+    });
+  });
+
+  it('does not report records that decode, nor events the bus rejects itself', async () => {
+    const onInvalid = vi.fn();
+    const { consumer, onMessage } = await subscribed({}, { onInvalidMessage: onInvalid });
+    onMessage.mockRejectedValueOnce(new NonRetryableError('bus says no'));
+    await consumer.deliver(asIncoming(createEnvelope()));
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onInvalid).not.toHaveBeenCalled();
+  });
+
+  it('reports to nobody when the bus passes no hooks', async () => {
+    const { consumer, producer } = await subscribed();
+    await consumer.deliver(malformed);
+    expect(producer.sent).toHaveLength(1);
   });
 });
 

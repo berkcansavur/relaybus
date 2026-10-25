@@ -2,7 +2,13 @@ import { context, trace } from '@opentelemetry/api';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { InMemoryEventStore, RelayBus, defineEvent } from '@relaybus/core';
 import { RabbitMqTransport } from '@relaybus/rabbitmq';
-import { startBroker, unique, type TestBroker } from '../../rabbitmq/test/support/broker.js';
+import {
+  eventually,
+  publishRaw,
+  startBroker,
+  unique,
+  type TestBroker,
+} from '../../rabbitmq/test/support/broker.js';
 import { createTelemetry, enableContextPropagation, type Telemetry } from './support.js';
 
 class OrderPlaced extends defineEvent<{ orderId: string }>('order.placed.v1') {}
@@ -118,6 +124,39 @@ describe('OpenTelemetry across two services over RabbitMQ', () => {
     ]);
     await ordersTelemetry.shutdown();
     await billingTelemetry.shutdown();
+  });
+
+  it('counts a message RabbitMQ delivers but the transport cannot decode, which never reaches the bus', async () => {
+    const exchange = unique('events');
+    const telemetry = createTelemetry();
+    const billing = createService('billing', {
+      exchange,
+      telemetry,
+      consumerGroup: unique('billing'),
+    });
+    try {
+      await billing.start();
+      await publishRaw(broker.getAmqpUrl(), exchange, 'orders.placed', Buffer.from('not json'));
+      await eventually(async () => {
+        const invalid = (await telemetry.collect()).get('relaybus.messages.invalid');
+        return invalid !== undefined && invalid.points.length > 0;
+      });
+    } finally {
+      await billing.stop();
+    }
+    const metrics = await telemetry.collect();
+    expect(metrics.get('relaybus.messages.invalid')!.points).toEqual([
+      {
+        attributes: {
+          'messaging.system': 'rabbitmq',
+          'messaging.destination.name': 'orders.placed',
+          'error.type': 'RELAYBUS_RABBITMQ_MALFORMED_MESSAGE',
+        },
+        value: 1,
+      },
+    ]);
+    expect(metrics.has('messaging.client.consumed.messages')).toBe(false);
+    await telemetry.shutdown();
   });
 });
 

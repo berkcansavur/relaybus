@@ -88,7 +88,7 @@ import {
 } from './shutdown-deadline.js';
 import { runBudgetedTransaction } from './transaction-budget.js';
 import type { StandardSchemaV1 } from './standard-schema.js';
-import type { Transport } from './transport.js';
+import type { Transport, TransportSubscriptionHooks } from './transport.js';
 
 export type {
   DispatcherOptions,
@@ -594,11 +594,15 @@ export class RelayBus<TTransaction = unknown> {
       }
       for (const subscription of this.#subscriptions) {
         const transport = this.#transports.get(subscription.transport)!;
-        await transport.subscribe!(subscription.destinations, async (envelope, message) => {
-          await (this.#observation === undefined
-            ? this.#receive(envelope)
-            : this.#observedReceive(envelope, { transport, destination: message?.destination }));
-        });
+        await transport.subscribe!(
+          subscription.destinations,
+          async (envelope, message) => {
+            await (this.#observation === undefined
+              ? this.#receive(envelope)
+              : this.#observedReceive(envelope, { transport, destination: message?.destination }));
+          },
+          this.#subscriptionHooks(transport),
+        );
       }
     } catch (error) {
       await withinDeadline(
@@ -624,6 +628,25 @@ export class RelayBus<TTransaction = unknown> {
     this.#logger.log(
       `[RelayBus](startComponents) relaybus started | handlers=${this.#registry.all().length} dispatcher=${this.#dispatcherEnabled}`,
     );
+  }
+
+  /** What a transport may report back while subscribed; undefined when no observer wants it. */
+  #subscriptionHooks(transport: Transport): TransportSubscriptionHooks | undefined {
+    if (!this.#notifier.wants('onInvalidMessage')) {
+      return undefined;
+    }
+    return {
+      onInvalidMessage: ({ destination, error }) => {
+        const errorInfo = toErrorInfo(error);
+        this.#notifier.notify('onInvalidMessage', {
+          transport: transport.name,
+          system: transport.system ?? transport.name,
+          destination,
+          reason: errorInfo.message,
+          error: errorInfo,
+        });
+      },
+    };
   }
 
   /** Applies the retention policy every `retention.interval` while the bus runs, when it deletes anything. */

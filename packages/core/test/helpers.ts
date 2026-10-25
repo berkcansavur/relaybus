@@ -45,6 +45,7 @@ export function createObserver(): Required<RelayBusObserver> {
     onHandlerFinished: vi.fn(),
     onTransportSent: vi.fn(),
     onReceiveFinished: vi.fn(),
+    onInvalidMessage: vi.fn(),
     onBacklog: vi.fn(),
   };
 }

@@ -30,6 +30,7 @@ export const METRICS = {
   sentMessages: 'messaging.client.sent.messages',
   consumedMessages: 'messaging.client.consumed.messages',
   processDuration: 'messaging.process.duration',
+  invalidMessages: 'relaybus.messages.invalid',
   published: 'relaybus.events.published',
   claimedDeliveries: 'relaybus.claim.deliveries',
   claimedLanes: 'relaybus.claim.lanes',

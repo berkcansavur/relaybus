@@ -104,6 +104,22 @@ export interface ReceiveFinishedEvent {
   readonly error?: ErrorInfo;
 }
 
+/**
+ * A transport could not decode an inbound message (codec failure, malformed record) and
+ * dead-lettered or skipped it. It never reached the bus, so `onReceiveFinished` does not see it.
+ */
+export interface InvalidMessageEvent {
+  /** Name of the transport. */
+  readonly transport: string;
+  /** The messaging system of the transport (`kafka`, `rabbitmq`), else its name. */
+  readonly system: string;
+  /** Topic, routing key or queue the message arrived on. */
+  readonly destination: string;
+  /** Why the message was rejected. */
+  readonly reason: string;
+  readonly error: ErrorInfo;
+}
+
 /** A periodic reading of the store's backlog (`RelayBusOptions.backlogInterval`). */
 export interface BacklogEvent {
   /** Deliveries waiting to run, due or not. */
@@ -154,6 +170,8 @@ export interface RelayBusObserver {
   onHandlerFinished?(event: HandlerFinishedEvent): void;
   onTransportSent?(event: TransportSentEvent): void;
   onReceiveFinished?(event: ReceiveFinishedEvent): void;
+  /** A transport rejected an inbound message it could not decode. */
+  onInvalidMessage?(event: InvalidMessageEvent): void;
   /** Called every `backlogInterval` while the bus runs, when that option is set. */
   onBacklog?(event: BacklogEvent): void;
 }

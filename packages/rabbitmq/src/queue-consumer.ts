@@ -6,6 +6,7 @@ import {
   type RelayBusLogger,
   type RetryPolicy,
   type TransportMessageHandler,
+  type TransportSubscriptionHooks,
 } from '@relaybus/core';
 import { abortableSleep } from './abortable-sleep.js';
 import type { AmqpChannel, AmqpMessage, AmqpPublishOptions } from './amqp-types.js';
@@ -46,6 +47,8 @@ export interface QueueConsumerSettings {
   readonly deadLetterExchange: string;
   readonly shutdownTimeoutMs: number;
   readonly onMessage: TransportMessageHandler;
+  /** Told of each message `decode` rejected; undefined when nobody observes them. */
+  readonly onInvalidMessage?: TransportSubscriptionHooks['onInvalidMessage'];
   /** Turns a message into an envelope; anything it throws dead-letters the message as malformed. */
   readonly decode: (message: AmqpMessage) => EventEnvelope;
   /** The consumer's channel closed or the broker cancelled the consumer. */
@@ -240,6 +243,7 @@ export class QueueConsumer {
       this.#settings.logger.error(
         `[QueueConsumer](decodeOrDeadLetter) Dead-lettering malformed message | queue=${this.#settings.queue} routingKey=${message.fields.routingKey} ${describeError(error)}`,
       );
+      this.#settings.onInvalidMessage?.({ destination: message.fields.routingKey, error });
       await this.#deadLetter(channel, { message, reason: 'malformed message', error });
       return undefined;
     }

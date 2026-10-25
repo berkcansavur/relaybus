@@ -88,6 +88,7 @@ export type {
   FailureStage,
   HandlerFinishedEvent,
   HandlerStartedEvent,
+  InvalidMessageEvent,
   OperationOutcome,
   PublishFinishedEvent,
   ReceiveFinishedEvent,
@@ -131,4 +132,10 @@ export {
   type SendTraceInput,
   type TraceContext,
 } from './tracing.js';
-export type { Transport, TransportMessage, TransportMessageHandler } from './transport.js';
+export type {
+  InvalidTransportMessage,
+  Transport,
+  TransportMessage,
+  TransportMessageHandler,
+  TransportSubscriptionHooks,
+} from './transport.js';

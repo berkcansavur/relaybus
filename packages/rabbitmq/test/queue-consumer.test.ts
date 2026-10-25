@@ -35,6 +35,7 @@ interface SetupOverrides {
   shutdownTimeoutMs?: number;
   republish?: ConfirmedRepublish;
   decode?: (message: AmqpMessage) => EventEnvelope;
+  onInvalidMessage?: (message: { destination: string; error: unknown }) => void;
 }
 
 function setup(
@@ -57,6 +58,9 @@ function setup(
     shutdownTimeoutMs: overrides.shutdownTimeoutMs ?? 1_000,
     onMessage: handler,
     decode: overrides.decode ?? decodeEnvelope,
+    ...(overrides.onInvalidMessage === undefined
+      ? {}
+      : { onInvalidMessage: overrides.onInvalidMessage }),
     onConsumerLost,
     republish,
     logger,
@@ -329,6 +333,33 @@ describe('QueueConsumer', () => {
         [DEAD_LETTER_ERROR_NAME_HEADER]: 'MalformedMessageError',
         [DEAD_LETTER_ERROR_CODE_HEADER]: 'RELAYBUS_RABBITMQ_MALFORMED_MESSAGE',
       });
+    });
+
+    it('reports a malformed message to the bus once, with its routing key and the decode error', async () => {
+      const onInvalidMessage = vi.fn();
+      const { consumer, channel, handler } = setup(undefined, { onInvalidMessage });
+      await consumer.attach(channel);
+      channel.deliver!({ ...message, content: Buffer.from('not json') });
+      await waitFor(() => channel.ack.mock.calls.length === 1);
+      expect(onInvalidMessage).toHaveBeenCalledExactlyOnceWith({
+        destination: 'order.placed.v1',
+        error: expect.objectContaining({ name: 'MalformedMessageError' }),
+      });
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it('does not report a message the handler rejects as non-retryable', async () => {
+      const onInvalidMessage = vi.fn();
+      const { consumer, channel } = setup(
+        async () => {
+          throw new InvalidEnvelopeError('bus says no');
+        },
+        { onInvalidMessage },
+      );
+      await consumer.attach(channel);
+      channel.deliver!(message);
+      await waitFor(() => channel.ack.mock.calls.length === 1);
+      expect(onInvalidMessage).not.toHaveBeenCalled();
     });
 
     it('dead-letters a message whose decoder throws any error, and keeps consuming', async () => {

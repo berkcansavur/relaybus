@@ -7,6 +7,7 @@ import type {
   FailureStage,
   HandlerFinishedEvent,
   HandlerStartedEvent,
+  InvalidMessageEvent,
   PublishFinishedEvent,
   ReceiveFinishedEvent,
   RelayBusObserver,
@@ -35,6 +36,7 @@ type Instruments = {
   readonly operationDuration: Histogram;
   readonly sentMessages: Counter;
   readonly consumedMessages: Counter;
+  readonly invalidMessages: Counter;
   readonly processDuration: Histogram;
   readonly published: Counter;
   readonly claimedDeliveries: Histogram;
@@ -120,6 +122,10 @@ function createInstruments(meter: Meter): Instruments {
     consumedMessages: counter(METRICS.consumedMessages, [
       '{message}',
       'Events received from a broker, by what receive did with them.',
+    ]),
+    invalidMessages: counter(METRICS.invalidMessages, [
+      '{message}',
+      'Inbound messages a transport could not decode, so they never reached the bus.',
     ]),
     published: counter(METRICS.published, ['{event}', 'Events passed to publish.']),
     deadLettered: counter(METRICS.deadLettered, ['{delivery}', 'Deliveries moved to dead.']),
@@ -262,6 +268,16 @@ export class RelayBusMetricsObserver implements RelayBusObserver {
       [ATTRIBUTES.receiveOutcome]: event.outcome,
     });
     this.#instruments.operationDuration.record(seconds(event.durationMs), attributes);
+  }
+
+  onInvalidMessage(event: InvalidMessageEvent): void {
+    this.#instruments.invalidMessages.add(
+      1,
+      withError(
+        { [ATTRIBUTES.system]: event.system, [ATTRIBUTES.destination]: event.destination },
+        event.error,
+      ),
+    );
   }
 
   onDeliveryRetryScheduled(event: {
