@@ -1298,35 +1298,51 @@ describe('claim behind a saturated fast window', () => {
     for (let index = 0; index < 80; index += 1) {
       await append(store, [{ event: createEnvelope({ key: 'blocked' }), handlers: ['h'] }], at(2));
     }
-    // Probe keys until two other keys hash into the lane of 'blocked'.
-    const probes = new Map<string, string>();
-    for (let index = 0; index < 600; index += 1) {
-      const event = createEnvelope({ key: `probe-${index}` });
-      probes.set(event.id, `probe-${index}`);
-      await append(store, [{ event, handlers: ['h'] }], at(100));
-    }
     const lane = await database.pool.query(
       `SELECT lane FROM "${schema}".relaybus_deliveries WHERE id = $1`,
       [running!.deliveryId],
     );
-    const sameLane = await database.pool.query<{ event_id: string }>(
-      `SELECT event_id FROM "${schema}".relaybus_deliveries WHERE lane = $1 AND key LIKE 'probe-%' ORDER BY sequence`,
-      [lane.rows[0]!.lane],
-    );
-    const [first, second] = sameLane.rows.map((row) => row.event_id);
+    const laneId = lane.rows[0]!.lane;
+    // Keys and event ids hash to lanes at random (256 lanes), so keep adding until the lane of
+    // 'blocked' holds two other keys; a fixed count would miss the lane on some runs.
+    const probes = new Map<string, string>();
+    let probeIndex = 0;
+    let sameLane: { event_id: string }[] = [];
+    while (sameLane.length < 2 && probeIndex < 20_000) {
+      for (let batch = 0; batch < 200; batch += 1, probeIndex += 1) {
+        const event = createEnvelope({ key: `probe-${probeIndex}` });
+        probes.set(event.id, `probe-${probeIndex}`);
+        await append(store, [{ event, handlers: ['h'] }], at(100));
+      }
+      sameLane = (
+        await database.pool.query<{ event_id: string }>(
+          `SELECT event_id FROM "${schema}".relaybus_deliveries WHERE lane = $1 AND key LIKE 'probe-%' ORDER BY sequence`,
+          [laneId],
+        )
+      ).rows;
+    }
+    const [first, second] = sameLane.map((row) => row.event_id);
     expect(second).toBeDefined();
-    // And unkeyed deliveries, which have no ordering to keep.
-    const unkeyed = Array.from({ length: 1_000 }, () => createEnvelope());
-    await append(
-      store,
-      unkeyed.map((event) => ({ event, handlers: ['h'] })),
-      at(100),
-    );
-    const unkeyedInLane = await database.pool.query<{ event_id: string }>(
+    // And unkeyed deliveries, which have no ordering to keep: at least one must land in the lane.
+    let unkeyedInLane = 0;
+    for (let batch = 0; batch < 100 && unkeyedInLane === 0; batch += 1) {
+      await append(
+        store,
+        Array.from({ length: 1_000 }, () => ({ event: createEnvelope(), handlers: ['h'] })),
+        at(100),
+      );
+      unkeyedInLane = (
+        await database.pool.query(
+          `SELECT 1 FROM "${schema}".relaybus_deliveries WHERE lane = $1 AND key IS NULL`,
+          [laneId],
+        )
+      ).rowCount!;
+    }
+    const laneUnkeyedRows = await database.pool.query<{ event_id: string }>(
       `SELECT event_id FROM "${schema}".relaybus_deliveries WHERE lane = $1 AND key IS NULL`,
-      [lane.rows[0]!.lane],
+      [laneId],
     );
-    const laneUnkeyed = new Set(unkeyedInLane.rows.map((row) => row.event_id));
+    const laneUnkeyed = new Set(laneUnkeyedRows.rows.map((row) => row.event_id));
     expect(laneUnkeyed.size).toBeGreaterThan(0);
     const firstFollower = createEnvelope({ key: probes.get(first!)! });
     await append(store, [{ event: firstFollower, handlers: ['h'] }], at(101));
