@@ -191,12 +191,7 @@ export function plainJsonDecoder(options: PlainJsonDecoderOptions): RabbitMqMess
     ) {
       return decodeCloudEvent(message);
     }
-    const plain: PlainJsonMessage = {
-      routingKey: message.fields.routingKey,
-      properties,
-      headers: readForeignHeaders(properties),
-      payload: parseJsonBody(message.content),
-    };
+    const plain = plainMessageOf(message);
     const type = RABBITMQ_EVENTS.text(options.type, { plain, name: 'type' });
     if (type === undefined) {
       throw new MalformedMessageError('Message has no event type: the type option found none');
@@ -221,6 +216,17 @@ export function plainJsonDecoder(options: PlainJsonDecoderOptions): RabbitMqMess
       causationId: null,
       occurredAt: resolveOccurredAt(options.occurredAt, plain),
     };
+  };
+}
+
+/** A message as the extractor options of {@link plainJsonDecoder} see it. */
+function plainMessageOf(message: AmqpMessage): PlainJsonMessage {
+  const { properties } = message;
+  return {
+    routingKey: message.fields.routingKey,
+    properties,
+    headers: readForeignHeaders(properties),
+    payload: parseJsonBody(message.content),
   };
 }
 

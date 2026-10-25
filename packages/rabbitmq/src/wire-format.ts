@@ -73,6 +73,24 @@ export function encodeEnvelope(envelope: EventEnvelope): EncodedMessage {
     [`${ATTRIBUTE_PREFIX}time`]: envelope.occurredAt.toISOString(),
     [`${ATTRIBUTE_PREFIX}datacontenttype`]: JSON_CONTENT_TYPE,
   };
+  addOptionalAttributes(headers, envelope);
+  return {
+    content: Buffer.from(JSON.stringify(envelope.payload), 'utf8'),
+    options: {
+      contentType: JSON_CONTENT_TYPE,
+      persistent: true,
+      messageId: envelope.id,
+      timestamp: Math.floor(envelope.occurredAt.getTime() / MILLISECONDS_PER_SECOND),
+      ...mirror('type', envelope.type),
+      ...mirror('appId', envelope.source),
+      ...(envelope.correlationId === null ? {} : mirror('correlationId', envelope.correlationId)),
+      headers,
+    },
+  };
+}
+
+/** Adds the attributes an envelope may lack (subject, causation, correlation) and its event headers. */
+function addOptionalAttributes(headers: Record<string, string>, envelope: EventEnvelope): void {
   if (envelope.key !== null) {
     headers[`${ATTRIBUTE_PREFIX}subject`] = envelope.key;
   }
@@ -89,19 +107,6 @@ export function encodeEnvelope(envelope: EventEnvelope): EncodedMessage {
     );
     headers[`${EVENT_HEADER_PREFIX}${name}`] = value;
   }
-  return {
-    content: Buffer.from(JSON.stringify(envelope.payload), 'utf8'),
-    options: {
-      contentType: JSON_CONTENT_TYPE,
-      persistent: true,
-      messageId: envelope.id,
-      timestamp: Math.floor(envelope.occurredAt.getTime() / MILLISECONDS_PER_SECOND),
-      ...mirror('type', envelope.type),
-      ...mirror('appId', envelope.source),
-      ...(envelope.correlationId === null ? {} : mirror('correlationId', envelope.correlationId)),
-      headers,
-    },
-  };
 }
 
 /**
