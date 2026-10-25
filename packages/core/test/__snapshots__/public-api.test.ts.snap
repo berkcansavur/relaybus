@@ -225,6 +225,7 @@ exports[`public API > @relaybus/kafka keeps its exported surface 1`] = `
   "KafkaInboundRecord: type",
   "KafkaIncomingHeaders: type",
   "KafkaIncomingMessage: type",
+  "KafkaInjectedProducer: type",
   "KafkaJsonEnvelopeMapping: type",
   "KafkaMessageDecoder: type",
   "KafkaOutgoingHeaders: type",

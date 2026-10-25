@@ -55,7 +55,8 @@ const consuming = transport.isConsuming();
 
 | Option                         | Default             | Meaning                                                                                                                                                                                                                                                                                                                           |
 | ------------------------------ | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `kafka`                        | required            | A `kafkajs` `Kafka` or Confluent `KafkaJS.Kafka` instance. It is the producer/consumer factory.                                                                                                                                                                                                                                   |
+| `kafka`                        | required            | A `kafkajs` `Kafka` or Confluent `KafkaJS.Kafka` instance: the factory of the transport's consumer and producer. Optional with `producer`, but then the transport cannot subscribe.                                                                                                                                               |
+| `producer`                     | none                | An already-connected producer the application owns (kafkajs `Producer`, Confluent `KafkaJS.Producer`), used to publish and dead-letter instead of one of `kafka`. Never connected or disconnected by the transport. See [Reusing the application's producer](#reusing-the-applications-producer).                                 |
 | `client`                       | `'kafkajs'`         | Which client `kafka` is: `'kafkajs'` or `'confluent'`. Set `'confluent'` for a Confluent `KafkaJS.Kafka`; see [Choosing a client](#choosing-a-client).                                                                                                                                                                            |
 | `name`                         | `'kafka'`           | Transport name used by routes and subscriptions.                                                                                                                                                                                                                                                                                  |
 | `groupId`                      | none                | Consumer group. Required as soon as `subscribe` is used; publish-only services can omit it.                                                                                                                                                                                                                                       |
@@ -300,6 +301,29 @@ set on the producer and consumer instead), and `on`/`events` are not used.
 wait for the join or observe crashes, so `subscribe` resolves when `run` returns and
 `isConsuming()` only reflects processing stalls and `close()`. kafkajs 2.2.4 and
 `@confluentinc/kafka-javascript` 1.11.0 are verified by the integration tests.
+
+## Reusing the application's producer
+
+An application that already has a connected producer, with its SSL and SASL settings, can hand it
+to the transport instead of letting it open a second connection:
+
+```ts
+const transport = new KafkaTransport({
+  producer: ordersService.producer, // already connected, owned by the application
+  client: 'confluent', // when it is a Confluent producer
+});
+```
+
+Without `kafka` the transport only publishes; give `kafka` and `groupId` as well to subscribe (the
+consumer stays the transport's own). The transport calls only `send` on the injected producer: it
+never connects or disconnects it, so it is usable before `bus.start()` and stays open after
+`bus.stop()`; closing it is the application's job, after the bus stopped. The guarantees hold
+only if that producer is configured like the transport's own: idempotent, `acks` -1 (all in-sync
+replicas) and at most 5 in-flight requests (1 keeps retries from reordering a key). For kafkajs
+that is `kafka.producer({ idempotent: true, maxInFlightRequests: 1 })`, for Confluent
+`kafka.producer({ kafkaJS: { idempotent: true, acks: -1, maxInFlightRequests: 1 } })`. Because the
+transport cannot apply `producerConfig` or `maxInFlightRequests` to it, giving them together with
+`producer` is a configuration error.
 
 ## Choosing a client
 

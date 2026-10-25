@@ -14,6 +14,8 @@ export interface KafkaClientUnderTest {
   createClient(brokers: string[], options?: { readonly unreachable?: boolean }): KafkaClientLike;
   /** The transport options a test transport on this client needs besides `kafka`. */
   readonly transportOptions: Partial<KafkaTransportOptions>;
+  /** Settings of an application's own producer that keep the transport's guarantees. */
+  readonly appProducerConfig: object;
 }
 
 export const KAFKAJS: KafkaClientUnderTest = {
@@ -31,6 +33,11 @@ export const KAFKAJS: KafkaClientUnderTest = {
     producerConfig: { createPartitioner: Partitioners.DefaultPartitioner },
     consumerConfig: { retry: { initialRetryTime: 100, retries: 10 } },
   },
+  appProducerConfig: {
+    idempotent: true,
+    maxInFlightRequests: 1,
+    createPartitioner: Partitioners.DefaultPartitioner,
+  },
 };
 
 export const CONFLUENT: KafkaClientUnderTest = {
@@ -46,6 +53,16 @@ export const CONFLUENT: KafkaClientUnderTest = {
     }),
   // librdkafka's default partitioner for the KafkaJS API is murmur2, like kafkajs' DefaultPartitioner.
   transportOptions: { client: 'confluent' },
+  appProducerConfig: { kafkaJS: { idempotent: true, maxInFlightRequests: 1, acks: -1 } },
 };
 
 export const KAFKA_CLIENTS: readonly KafkaClientUnderTest[] = [KAFKAJS, CONFLUENT];
+
+/** The client's transport options without settings of the transport's own producer, for an injected one. */
+export function withoutOwnProducerSettings(
+  client: KafkaClientUnderTest,
+): Partial<KafkaTransportOptions> {
+  return Object.fromEntries(
+    Object.entries(client.transportOptions).filter(([name]) => name !== 'producerConfig'),
+  );
+}

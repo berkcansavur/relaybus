@@ -30,6 +30,7 @@ import { WakeableSleeps } from './wakeable-sleeps.js';
 export type {
   InvalidKafkaMessage,
   InvalidMessagePolicy,
+  KafkaInjectedProducer,
   KafkaProcessingOptions,
   KafkaRestartOptions,
   KafkaTransportOptions,
@@ -139,7 +140,7 @@ export class KafkaTransport extends SubscribingTransport {
     this.#state = 'subscribed';
     const { kafka, dialect, groupId } = this.#settings;
     const membership = this.#observeConsumer();
-    const consumer = kafka.consumer(dialect.consumerConfig(this.#settings, membership));
+    const consumer = kafka!.consumer(dialect.consumerConfig(this.#settings, membership));
     this.#consumer = consumer;
     this.#groupJoined = !dialect.tracksMembership(consumer);
     dialect.observe(consumer, membership);

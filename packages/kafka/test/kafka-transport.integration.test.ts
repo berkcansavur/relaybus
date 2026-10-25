@@ -16,7 +16,11 @@ import {
   type KafkaTransportOptions,
 } from '../src/index.js';
 import { createEnvelope, createLogger } from './fakes.js';
-import { KAFKA_CLIENTS, type KafkaClientUnderTest } from './support/kafka-clients.js';
+import {
+  KAFKA_CLIENTS,
+  withoutOwnProducerSettings,
+  type KafkaClientUnderTest,
+} from './support/kafka-clients.js';
 import {
   brokerAddresses,
   createClient,
@@ -407,6 +411,63 @@ describe.each(KAFKA_CLIENTS)('KafkaTransport on $name against a real broker', (c
     await expect(transport.subscribe(['any'], async () => undefined)).rejects.toThrow();
     expect(transport.isConsuming()).toBe(false);
     await transport.close().catch(() => undefined);
+  });
+
+  it('publishes through an injected, already-connected producer and leaves it open on close', async () => {
+    const topic = uniqueName('injected');
+    await createTopics(topic);
+    const appProducer = client.createClient(brokerAddresses()).producer(client.appProducerConfig);
+    await appProducer.connect();
+    const { transport: consumerSide } = createTransport();
+    const received: EventEnvelope[] = [];
+    await consumerSide.subscribe([topic], async (envelope) => {
+      received.push(envelope);
+    });
+    // Publish-only: no client of its own, so no second connection.
+    const clientOptions = withoutOwnProducerSettings(client);
+    const publisher = new KafkaTransport({
+      ...clientOptions,
+      producer: appProducer,
+      logger: createLogger(),
+    });
+    await publisher.connect();
+    expect(publisher.isReady()).toBe(true);
+    await publisher.publish(createEnvelope({ id: 'through-app-producer' }), topic);
+    await waitFor(() => received.length === 1);
+    expect(received[0]!.id).toBe('through-app-producer');
+    await publisher.close();
+
+    // Still connected: the application keeps using it after the transport closed.
+    await appProducer.send({
+      topic,
+      messages: [{ key: null, value: 'after close', headers: {} }],
+    });
+    const records = await readRaw(topic, 2);
+    expect(records.map((record) => record.value)).toContain('after close');
+    await appProducer.disconnect();
+    await consumerSide.close();
+  });
+
+  it('dead-letters through an injected producer while consuming with its own client', async () => {
+    const topic = uniqueName('injected-dlq');
+    await createTopics(topic, `${topic}.dead`);
+    const appProducer = client.createClient(brokerAddresses()).producer(client.appProducerConfig);
+    await appProducer.connect();
+    const clientOptions = withoutOwnProducerSettings(client);
+    const consumerSide = new KafkaTransport({
+      ...clientOptions,
+      kafka: client.createClient(brokerAddresses()),
+      groupId: uniqueName('group'),
+      producer: appProducer,
+      logger: createLogger(),
+    });
+    await produceRaw(topic, [{ key: 'k1', value: 'garbage' }]);
+    await consumerSide.subscribe([topic], async () => undefined);
+    const [deadLetter] = await readRaw(`${topic}.dead`, 1);
+    expect(deadLetter).toMatchObject({ key: 'k1', value: 'garbage' });
+    await consumerSide.close();
+    await appProducer.send({ topic, messages: [{ key: null, value: 'still open', headers: {} }] });
+    await appProducer.disconnect();
   });
 
   it('closes gracefully: stops consuming, rejects publishes, leaves the group', async () => {

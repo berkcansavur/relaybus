@@ -1,7 +1,7 @@
 import type { Duration, RelayBusLogger } from '@relaybus/core';
 import type { KafkaCodec } from './codecs.js';
 import type { KafkaMessageDecoder } from './inbound-decoders.js';
-import type { KafkaClientLike } from './kafka-client.js';
+import type { KafkaClientLike, KafkaProducerLike } from './kafka-client.js';
 import type { KafkaClientName } from './kafka-client-dialects.js';
 
 /** A record the transport refused to hand to the bus because it is malformed. */
@@ -57,9 +57,28 @@ export interface KafkaRestartOptions {
   readonly maxBackoff?: Duration;
 }
 
+/**
+ * A producer the application already connected and owns, such as the one of its own Kafka
+ * service: a kafkajs `Producer` or a Confluent `KafkaJS.Producer`. Only `send` is called.
+ */
+export type KafkaInjectedProducer = Pick<KafkaProducerLike, 'send'>;
+
 export interface KafkaTransportOptions {
-  /** A `kafkajs` `Kafka` or `@confluentinc/kafka-javascript` `KafkaJS.Kafka` instance. */
-  readonly kafka: KafkaClientLike;
+  /**
+   * A `kafkajs` `Kafka` or `@confluentinc/kafka-javascript` `KafkaJS.Kafka` instance: the
+   * factory of the transport's own consumer and, unless `producer` is given, producer.
+   * Required unless `producer` is given; required to subscribe.
+   */
+  readonly kafka?: KafkaClientLike;
+  /**
+   * Publish (and dead-letter) through this already-connected producer instead of one of
+   * `kafka`, reusing the application's connection and its SSL/SASL settings. The transport never
+   * connects or disconnects it; `close` leaves it open. Make it idempotent with `acks` -1 (all
+   * in-sync replicas) and at most 5 in-flight requests (1 to keep retries from reordering), as
+   * the transport's own producer is: `producerConfig` and `maxInFlightRequests` cannot be given
+   * with it. With Confluent, set `client: 'confluent'` too.
+   */
+  readonly producer?: KafkaInjectedProducer;
   /**
    * Which client `kafka` is. Default `'kafkajs'`; set `'confluent'` for a
    * `@confluentinc/kafka-javascript` `KafkaJS.Kafka`. The two KafkaJS-style APIs differ in where

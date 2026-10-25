@@ -2,7 +2,11 @@ import { systemClock } from '@relaybus/core';
 import { schedule, type CancelTimer } from '@relaybus/core/internal';
 import { PublishTimeoutError, TransportClosedError } from './errors.js';
 import type { KafkaProducerLike, KafkaProducerRecord } from './kafka-client.js';
+import type { KafkaInjectedProducer } from './kafka-options.js';
 import type { KafkaSettings } from './kafka-settings.js';
+
+/** A producer as the transport uses it once connected: it sends, and closing disconnects it. */
+export type SessionProducer = Pick<KafkaProducerLike, 'send' | 'disconnect'>;
 
 /**
  * The idempotent producer of a transport: connected on first use (once, shared by concurrent
@@ -12,7 +16,7 @@ export class KafkaProducerSession {
   readonly #settings: KafkaSettings;
   /** Whether the transport is closed: then nothing connects any more. */
   readonly #isClosed: () => boolean;
-  #producer: Promise<KafkaProducerLike> | undefined;
+  #producer: Promise<SessionProducer> | undefined;
   #connected = false;
 
   constructor(settings: KafkaSettings, isClosed: () => boolean) {
@@ -26,7 +30,7 @@ export class KafkaProducerSession {
   }
 
   /** The producer opened so far, if any: what closing must disconnect. */
-  get pending(): Promise<KafkaProducerLike> | undefined {
+  get pending(): Promise<SessionProducer> | undefined {
     return this.#producer;
   }
 
@@ -34,7 +38,7 @@ export class KafkaProducerSession {
     this.#connected = false;
   }
 
-  connected(): Promise<KafkaProducerLike> {
+  connected(): Promise<SessionProducer> {
     if (this.#isClosed()) {
       return Promise.reject(
         new TransportClosedError(`Transport '${this.#settings.name}' is closed`),
@@ -45,7 +49,7 @@ export class KafkaProducerSession {
   }
 
   /** Sends with the publish timeout; the late outcome of a timed-out send is ignored. */
-  async send(producer: KafkaProducerLike, record: KafkaProducerRecord): Promise<void> {
+  async send(producer: SessionProducer, record: KafkaProducerRecord): Promise<void> {
     const { name, timings } = this.#settings;
     let cancel: CancelTimer | undefined;
     const timeout = new Promise<never>((_resolve, reject) => {
@@ -69,9 +73,13 @@ export class KafkaProducerSession {
     }
   }
 
-  async #open(): Promise<KafkaProducerLike> {
-    const { kafka, dialect } = this.#settings;
-    const producer = kafka.producer(dialect.producerConfig(this.#settings));
+  async #open(): Promise<SessionProducer> {
+    const { kafka, dialect, injectedProducer } = this.#settings;
+    if (injectedProducer !== undefined) {
+      this.#connected = true;
+      return withoutLifecycle(injectedProducer);
+    }
+    const producer = kafka!.producer(dialect.producerConfig(this.#settings));
     try {
       await producer.connect();
     } catch (error) {
@@ -81,4 +89,12 @@ export class KafkaProducerSession {
     this.#connected = !this.#isClosed();
     return producer;
   }
+}
+
+/** The application's producer, with a disconnect that leaves it open. */
+function withoutLifecycle(producer: KafkaInjectedProducer): SessionProducer {
+  return {
+    send: (record) => producer.send(record),
+    disconnect: () => Promise.resolve(),
+  };
 }

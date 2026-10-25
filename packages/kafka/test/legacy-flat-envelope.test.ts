@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { ConfigurationError, type EventEnvelope } from '@relaybus/core';
 import { kafkaCodecContract } from '@relaybus/testing';
+import { FakeProducer, createLogger } from './fakes.js';
 import {
+  KafkaTransport,
   decodeKafkaRecord,
   jsonEnvelope,
   type KafkaCodec,
@@ -77,6 +79,33 @@ kafkaCodecContract('a legacy flat JSON envelope', {
         value:
           '{"provider":"billing-api","timestamp":1792936800123,"createdDate":"2026-10-25T14:00:00.123Z","type":"order.cancelled","data":{"orderId":2},"userId":"u-9","region":"eu","attempt":2,"meta":{"v":1}}',
       },
+    },
+  ],
+});
+
+/** What a transport with `codec` sends, captured by an injected producer. */
+async function publishedRecord(envelope: EventEnvelope) {
+  const producer = new FakeProducer();
+  const transport = new KafkaTransport({ producer, codec, logger: createLogger() });
+  await transport.publish(envelope, 'orders');
+  await transport.close();
+  return producer.sent[0]!.messages[0]!;
+}
+
+kafkaCodecContract('a legacy flat JSON envelope, as the transport publishes it', {
+  encode: publishedRecord,
+  decode: (record) => decodeKafkaRecord(codec, record),
+  cases: [
+    {
+      name: 'an event relaybus writes',
+      envelope: EVENT,
+      record: {
+        topic: 'orders',
+        key: null,
+        value:
+          '{"id":"evt-1","requestId":"req-1","provider":"billing-api","timestamp":1792936800123,"createdDate":"2026-10-25T14:00:00.123Z","type":"order.created","data":{"orderId":1,"total":10.5},"userId":"u-7","channel":"web"}',
+      },
+      decoded: { ...EVENT, key: null },
     },
   ],
 });

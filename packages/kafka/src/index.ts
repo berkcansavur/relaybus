@@ -43,6 +43,7 @@ export {
   KafkaTransport,
   type InvalidKafkaMessage,
   type InvalidMessagePolicy,
+  type KafkaInjectedProducer,
   type KafkaProcessingOptions,
   type KafkaRestartOptions,
   type KafkaTransportOptions,
