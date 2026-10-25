@@ -1,5 +1,11 @@
 import { assertEventType, type EventEnvelope, type EventHeaders } from '@relaybus/core';
-import { createCloudEventReaders, isJsonObject, mediaTypeOf } from '@relaybus/core/internal';
+import {
+  DecodedEventReader,
+  createCloudEventReaders,
+  isJsonObject,
+  mediaTypeOf,
+  observeRejection,
+} from '@relaybus/core/internal';
 import type { AmqpMessage, AmqpMessageProperties } from './amqp-types.js';
 import { MalformedMessageError } from './errors.js';
 import { RFC3339_PATTERN, decodeEnvelope } from './wire-format.js';
@@ -191,13 +197,13 @@ export function plainJsonDecoder(options: PlainJsonDecoderOptions): RabbitMqMess
       headers: readForeignHeaders(properties),
       payload: parseJsonBody(message.content),
     };
-    const type = resolveText(options.type, { message: plain, name: 'type' });
+    const type = RABBITMQ_EVENTS.text(options.type, { plain, name: 'type' });
     if (type === undefined) {
       throw new MalformedMessageError('Message has no event type: the type option found none');
     }
     assertValidType(type, 'The event type');
     const id =
-      resolveText(options.id, { message: plain, name: 'id' }) ?? nonEmptyText(properties.messageId);
+      RABBITMQ_EVENTS.text(options.id, { plain, name: 'id' }) ?? nonEmptyText(properties.messageId);
     if (id === undefined) {
       throw new MalformedMessageError(
         'Message has no id: set the messageId property on the producer or configure the id option',
@@ -207,8 +213,8 @@ export function plainJsonDecoder(options: PlainJsonDecoderOptions): RabbitMqMess
       id,
       type,
       source:
-        resolveText(options.source, { message: plain, name: 'source' }) ?? defaultSource(message),
-      key: resolveText(options.key, { message: plain, name: 'key' }) ?? null,
+        RABBITMQ_EVENTS.text(options.source, { plain, name: 'source' }) ?? defaultSource(message),
+      key: RABBITMQ_EVENTS.text(options.key, { plain, name: 'key' }) ?? null,
       payload: plain.payload,
       headers: plain.headers,
       correlationId: null,
@@ -218,30 +224,35 @@ export function plainJsonDecoder(options: PlainJsonDecoderOptions): RabbitMqMess
   };
 }
 
+/** The inbound plumbing of AMQP messages: malformed messages and the message's own defaults. */
+class RabbitMqDecodedEvents extends DecodedEventReader<AmqpMessage, PlainJsonMessage> {
+  invalid(reason: string): Error {
+    return new MalformedMessageError(reason);
+  }
+
+  protected defaultSource(message: AmqpMessage): string {
+    return defaultSource(message);
+  }
+
+  /** None: AMQP messages carry no ordering key. */
+  protected defaultKey(): null {
+    return null;
+  }
+
+  /** The `timestamp` property, else the time of receipt. */
+  protected defaultTime(message: AmqpMessage): Date {
+    return propertyTimeOrNow(message.properties);
+  }
+}
+
+const RABBITMQ_EVENTS = new RabbitMqDecodedEvents();
+
 /**
  * Fills the fields a decoder left out (see {@link DecodedEvent}) and guards
  * against a decoder that returned no object.
  */
 export function completeDecodedEvent(decoded: unknown, message: AmqpMessage): EventEnvelope {
-  if (typeof decoded !== 'object' || decoded === null) {
-    throw new MalformedMessageError('The decoder must return an event object synchronously');
-  }
-  if ('then' in decoded) {
-    observeRejection(decoded);
-    throw new MalformedMessageError('The decoder must return an event object synchronously');
-  }
-  const event = decoded as DecodedEvent;
-  return {
-    id: event.id,
-    type: event.type,
-    source: event.source ?? defaultSource(message),
-    key: event.key ?? null,
-    payload: event.payload,
-    headers: event.headers ?? {},
-    correlationId: event.correlationId ?? null,
-    causationId: event.causationId ?? null,
-    occurredAt: event.occurredAt ?? propertyTimeOrNow(message.properties),
-  };
+  return RABBITMQ_EVENTS.complete(decoded, message);
 }
 
 /** Parses the body as UTF-8 JSON, refusing invalid UTF-8 instead of replacing it. */
@@ -302,23 +313,6 @@ export function readForeignHeaders(properties: AmqpMessageProperties): Record<st
   );
 }
 
-function resolveText<TValue extends string | null>(
-  option: TValue | ((message: PlainJsonMessage) => TValue | undefined) | undefined,
-  { message, name }: { readonly message: PlainJsonMessage; readonly name: string },
-): string | undefined {
-  const value: unknown = typeof option === 'function' ? option(message) : option;
-  if (value === undefined || value === null) {
-    return undefined;
-  }
-  if (typeof value !== 'string') {
-    observeRejection(value);
-    throw new MalformedMessageError(
-      `The ${name} option returned ${typeof value}, expected a string`,
-    );
-  }
-  return value.length === 0 ? undefined : value;
-}
-
 function resolveOccurredAt(
   option: PlainJsonDecoderOptions['occurredAt'],
   message: PlainJsonMessage,
@@ -332,15 +326,4 @@ function resolveOccurredAt(
     throw new MalformedMessageError('The occurredAt option returned no valid Date');
   }
   return value;
-}
-
-/**
- * Observes the rejection of a promise an async decoder or extractor returned by
- * mistake: the value is refused as malformed, and an unobserved rejection would
- * otherwise crash the process.
- */
-function observeRejection(value: unknown): void {
-  if (typeof value === 'object' && value !== null && 'then' in value) {
-    Promise.resolve(value).catch(() => undefined);
-  }
 }

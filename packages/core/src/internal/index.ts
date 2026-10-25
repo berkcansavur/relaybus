@@ -42,6 +42,12 @@ export {
 } from '../store-kit/lease-settlement.js';
 export { OwnerSerializedClaims } from '../store-kit/owner-serialized-claims.js';
 export {
+  DecodedEventReader,
+  observeRejection,
+  type DecodedEventFields,
+  type TextOption,
+} from '../transport-kit/decoded-event-reader.js';
+export {
   BoundedInteger,
   CompositeKey,
   DeliveryLeaseIdentity,
