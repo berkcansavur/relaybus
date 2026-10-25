@@ -1,4 +1,4 @@
-import { toTimerMilliseconds } from './duration.js';
+import { Milliseconds } from './values/milliseconds.js';
 import { ConfigurationError } from './errors.js';
 import { assertEventType, type EventReference } from './event.js';
 import { DEFAULTS } from './relay-bus-settings.js';
@@ -101,7 +101,7 @@ function resolveSettings(
     timeoutMs:
       route.timeout === undefined
         ? DEFAULTS.routeTimeoutMs
-        : toTimerMilliseconds(route.timeout, `Timeout of handler '${id}'`),
+        : Milliseconds.forTimer(route.timeout, `Timeout of handler '${id}'`),
   };
 }
 

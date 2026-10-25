@@ -34,9 +34,15 @@ export {
   type WireField,
 } from './json-envelope.js';
 export {
+  BoundedInteger,
   CompositeKey,
   DeliveryLeaseIdentity,
+  ExponentialBackoff,
   LaneLeaseTokenFormat,
+  Milliseconds,
+  NonEmptyText,
+  PositiveInteger,
+  type IntegerBounds,
   type LaneLeaseTokenLimits,
   type LaneLeaseTokenParts,
 } from '../values/index.js';

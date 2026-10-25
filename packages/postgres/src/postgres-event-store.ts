@@ -16,7 +16,7 @@ import {
   type PurgeResult,
   type RelayBusLogger,
 } from '@relaybus/core';
-import { assertPositiveInteger } from '@relaybus/core/internal';
+import { PositiveInteger } from '@relaybus/core/internal';
 import { Client, Pool, type PoolClient, type PoolConfig } from 'pg';
 import type { PostgresExecutor, PostgresQueryOptions } from './executor.js';
 import { resolvePostgresNames, type PostgresSchemaOptions } from './names.js';
@@ -425,7 +425,7 @@ function resolveStoreSettings<TTransaction>(options: PostgresEventStoreOptions<T
       'PostgresEventStore needs exactly one of pool, connectionString or executor',
     );
   }
-  const purgeBatchSize = assertPositiveInteger(
+  const purgeBatchSize = PositiveInteger.of(
     options.purgeBatchSize ?? DEFAULT_PURGE_BATCH_SIZE,
     'purgeBatchSize',
   );

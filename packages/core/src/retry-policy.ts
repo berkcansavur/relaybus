@@ -1,4 +1,5 @@
-import { toMilliseconds, type Duration } from './duration.js';
+import { type Duration } from './duration.js';
+import { Milliseconds } from './values/milliseconds.js';
 import { ConfigurationError, NonRetryableError } from './errors.js';
 
 /**
@@ -77,7 +78,7 @@ function mergeRetryPolicy(options: RetryPolicyOptions | undefined, base: RetryPo
   const initialDelayMs =
     overrides.initialDelay === undefined
       ? base.initialDelayMs
-      : toMilliseconds(overrides.initialDelay, 'retry.initialDelay');
+      : Milliseconds.of(overrides.initialDelay, 'retry.initialDelay');
   return {
     attempts: overrides.attempts ?? base.attempts,
     initialDelayMs,
@@ -86,7 +87,7 @@ function mergeRetryPolicy(options: RetryPolicyOptions | undefined, base: RetryPo
       overrides.maxDelay === undefined
         ? // Raising only the initial delay must not trip the inherited cap.
           Math.max(base.maxDelayMs, initialDelayMs)
-        : toMilliseconds(overrides.maxDelay, 'retry.maxDelay'),
+        : Milliseconds.of(overrides.maxDelay, 'retry.maxDelay'),
     jitter: overrides.jitter ?? base.jitter,
     retryIf: overrides.retryIf ?? base.retryIf,
   };

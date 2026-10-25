@@ -3,7 +3,6 @@ import {
   systemClock,
   NonRetryableError,
   toErrorInfo,
-  toMilliseconds,
   type Duration,
   type EventEnvelope,
   type RelayBusLogger,
@@ -11,7 +10,14 @@ import {
   type TransportMessageHandler,
   type TransportSubscriptionHooks,
 } from '@relaybus/core';
-import { assertPositiveInteger, schedule, type CancelTimer } from '@relaybus/core/internal';
+import {
+  BoundedInteger,
+  ExponentialBackoff,
+  Milliseconds,
+  PositiveInteger,
+  schedule,
+  type CancelTimer,
+} from '@relaybus/core/internal';
 import { decodeEnvelope, encodeEnvelope, toOutgoingHeaders } from './cloudevents-codec.js';
 import { cloudEventsBinary, type KafkaCodec } from './codecs.js';
 import {
@@ -150,13 +156,11 @@ type TransportState = 'idle' | 'subscribed' | 'closed';
 
 interface Settings {
   readonly maxAttempts: number;
-  readonly initialBackoffMs: number;
-  readonly maxBackoffMs: number;
+  readonly processingBackoff: ExponentialBackoff;
   readonly startupTimeoutMs: number;
   readonly publishTimeoutMs: number;
   readonly heartbeatIntervalMs: number;
-  readonly restartInitialBackoffMs: number;
-  readonly restartMaxBackoffMs: number;
+  readonly restartBackoff: ExponentialBackoff;
 }
 
 /**
@@ -212,8 +216,9 @@ export class KafkaTransport implements Transport {
     this.#kafka = options.kafka;
     this.#groupId = options.groupId;
     this.#fromBeginning = options.fromBeginning ?? true;
-    this.#maxInFlightRequests = assertMaxInFlightRequests(
+    this.#maxInFlightRequests = BoundedInteger.of(
       options.maxInFlightRequests ?? DEFAULTS.maxInFlightRequests,
+      { name: 'maxInFlightRequests', minimum: 1, maximum: MAXIMUM_IN_FLIGHT_REQUESTS },
     );
     this.#producerConfig = options.producerConfig ?? {};
     this.#consumerConfig = options.consumerConfig ?? {};
@@ -550,7 +555,7 @@ export class KafkaTransport implements Transport {
     payload: KafkaEachMessagePayload,
     { method, operation }: { readonly method: string; readonly operation: () => Promise<void> },
   ): Promise<void> {
-    const { maxAttempts, initialBackoffMs, maxBackoffMs } = this.#settings;
+    const { maxAttempts, processingBackoff } = this.#settings;
     const location = `topic=${payload.topic} partition=${payload.partition} offset=${payload.message.offset}`;
     const partitionKey = `${payload.topic}:${payload.partition}`;
     for (let attempt = 1; ; attempt += 1) {
@@ -570,10 +575,7 @@ export class KafkaTransport implements Transport {
         this.#logger.warn(
           `[KafkaTransport](withRetries) Attempt failed, retrying | operation=${method} ${location} attempt=${attempt} error=${reason}`,
         );
-        await this.#sleepWithHeartbeats(
-          Math.min(initialBackoffMs * 2 ** (attempt - 1), maxBackoffMs),
-          payload,
-        );
+        await this.#sleepWithHeartbeats(processingBackoff.delayFor(attempt), payload);
       }
     }
   }
@@ -662,12 +664,9 @@ export class KafkaTransport implements Transport {
    * again, with bounded backoff, until it joined or the transport closed.
    */
   async #restartConsumer(): Promise<void> {
-    const { restartInitialBackoffMs, restartMaxBackoffMs } = this.#settings;
     const consumer = this.#consumer!;
     for (let attempt = 1; this.#state === 'subscribed'; attempt += 1) {
-      await this.#sleep(
-        Math.min(restartInitialBackoffMs * 2 ** (attempt - 1), restartMaxBackoffMs),
-      );
+      await this.#sleep(this.#settings.restartBackoff.delayFor(attempt));
       if (this.#state !== 'subscribed') {
         return;
       }
@@ -729,66 +728,50 @@ function resolveCodec({ codec, decode }: KafkaTransportOptions): KafkaCodec {
 
 function resolveSettings(options: KafkaTransportOptions): Settings {
   const processing: KafkaProcessingOptions = options.processing ?? {};
-  const maxAttempts = assertPositiveInteger(
+  const maxAttempts = PositiveInteger.of(
     processing.maxAttempts ?? DEFAULTS.maxAttempts,
     'processing.maxAttempts',
   );
   return {
     maxAttempts,
-    initialBackoffMs: toMilliseconds(
-      processing.initialBackoff ?? DEFAULTS.initialBackoff,
-      'processing.initialBackoff',
-    ),
-    maxBackoffMs: toMilliseconds(
-      processing.maxBackoff ?? DEFAULTS.maxBackoff,
-      'processing.maxBackoff',
-    ),
-    startupTimeoutMs: toMilliseconds(
+    processingBackoff: new ExponentialBackoff({
+      initialMs: Milliseconds.of(
+        processing.initialBackoff ?? DEFAULTS.initialBackoff,
+        'processing.initialBackoff',
+      ),
+      maxMs: Milliseconds.of(processing.maxBackoff ?? DEFAULTS.maxBackoff, 'processing.maxBackoff'),
+    }),
+    startupTimeoutMs: Milliseconds.of(
       options.startupTimeout ?? DEFAULTS.startupTimeout,
       'startupTimeout',
     ),
-    publishTimeoutMs: toMilliseconds(
+    publishTimeoutMs: Milliseconds.of(
       options.publishTimeout ?? DEFAULTS.publishTimeout,
       'publishTimeout',
     ),
     heartbeatIntervalMs: Math.max(
       1,
-      toMilliseconds(
+      Milliseconds.of(
         processing.heartbeatInterval ?? DEFAULTS.heartbeatInterval,
         'processing.heartbeatInterval',
       ),
     ),
-    ...resolveRestartSettings(options.restart ?? {}),
+    restartBackoff: resolveRestartBackoff(options.restart ?? {}),
   };
 }
 
-function resolveRestartSettings(
-  restart: KafkaRestartOptions,
-): Pick<Settings, 'restartInitialBackoffMs' | 'restartMaxBackoffMs'> {
-  return {
-    restartInitialBackoffMs: toMilliseconds(
+function resolveRestartBackoff(restart: KafkaRestartOptions): ExponentialBackoff {
+  return new ExponentialBackoff({
+    initialMs: Milliseconds.of(
       restart.initialBackoff ?? DEFAULTS.restartInitialBackoff,
       'restart.initialBackoff',
     ),
-    restartMaxBackoffMs: toMilliseconds(
-      restart.maxBackoff ?? DEFAULTS.restartMaxBackoff,
-      'restart.maxBackoff',
-    ),
-  };
+    maxMs: Milliseconds.of(restart.maxBackoff ?? DEFAULTS.restartMaxBackoff, 'restart.maxBackoff'),
+  });
 }
 
 /** Largest `maxInFlightRequests`. */
 const MAXIMUM_IN_FLIGHT_REQUESTS = 5;
-
-/** Returns `value` when it is an integer from 1 to 5. */
-function assertMaxInFlightRequests(value: number): number {
-  if (!Number.isInteger(value) || value < 1 || value > MAXIMUM_IN_FLIGHT_REQUESTS) {
-    throw new ConfigurationError(
-      `maxInFlightRequests must be an integer from 1 to 5, received ${value}`,
-    );
-  }
-  return value;
-}
 
 /**
  * Wraps a failure in a fresh error before it goes back to the Kafka client.

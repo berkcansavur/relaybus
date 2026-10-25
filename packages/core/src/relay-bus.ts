@@ -17,7 +17,7 @@ import {
 import { systemClock, type Clock } from './clock.js';
 import { DispatchObservation } from './dispatch-observation.js';
 import { Dispatcher, type DispatcherSettings } from './dispatcher.js';
-import { toMilliseconds, toTimerMilliseconds } from './duration.js';
+import { Milliseconds } from './values/milliseconds.js';
 import {
   ConfigurationError,
   DrainIncompleteError,
@@ -496,7 +496,7 @@ export class RelayBus<TTransaction = unknown> {
     const timeoutMs =
       options.timeout === undefined
         ? this.#shutdownTimeoutMs
-        : toTimerMilliseconds(options.timeout, 'timeout');
+        : Milliseconds.forTimer(options.timeout, 'timeout');
     if (this.#stopping !== undefined) {
       return this.#stopping;
     }
@@ -737,7 +737,7 @@ export class RelayBus<TTransaction = unknown> {
       return [];
     }
     const now = this.#clock.now();
-    const delayMs = options.delay === undefined ? 0 : toMilliseconds(options.delay, 'delay');
+    const delayMs = options.delay === undefined ? 0 : Milliseconds.of(options.delay, 'delay');
     const availableAt = new Date(now.getTime() + delayMs);
     const scope = getCurrentScope();
     const entries = await this.#createEntries({ events, options, id, scope, now, availableAt });
