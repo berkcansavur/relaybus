@@ -10,6 +10,8 @@ export interface PublisherConfig {
   readonly batch: number;
   readonly handlers: number;
   readonly keys: KeySpec;
+  /** Route events to the fake transport instead of registering local handlers (ack delay in ms). */
+  readonly routeAckMs?: number;
   readonly pool: number;
   readonly warmupMs: number;
   readonly durationMs: number;
@@ -28,6 +30,8 @@ export interface DispatcherConfig {
   readonly pollMs: number;
   readonly pool: number;
   readonly trackHandled: boolean;
+  /** The handler is a route to the fake transport that acks after this many ms. */
+  readonly routeAckMs?: number;
 }
 
 interface InitBase {

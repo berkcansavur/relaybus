@@ -9,6 +9,9 @@ export interface KeySpec {
   readonly count: number;
 }
 
+/** Fixed delay after which the in-process fake transport of a routed cell acks a send. */
+export const ROUTED_ACK_MS = 5;
+
 export const NO_KEYS: KeySpec = { mode: 'none', count: 0 };
 
 export interface Windows {
@@ -28,6 +31,8 @@ export interface TemplateDefinition {
   readonly procs: number;
   readonly loops: number;
   readonly pool: number;
+  /** Deliveries are routes to the fake transport instead of local handlers. */
+  readonly routed?: boolean;
 }
 
 interface CellBase {
@@ -60,6 +65,7 @@ export interface DispatchCell extends CellBase, Windows, DispatchSettings {
   readonly kind: 'dispatch';
   readonly template: string;
   readonly handlers: number;
+  readonly routed?: boolean;
 }
 
 export interface MixedCell extends CellBase, Windows, DispatchSettings {
@@ -127,6 +133,7 @@ function dispatchCell(
   handlers: number,
   name: SettingsName,
   instances: number,
+  routed = false,
 ): DispatchCell {
   return {
     kind: 'dispatch',
@@ -137,6 +144,7 @@ function dispatchCell(
     ...windows,
     template,
     handlers,
+    ...(routed ? { routed } : {}),
     ...settings(store, name, instances),
   };
 }
@@ -148,6 +156,7 @@ function template(
   handlers: number,
   keys: KeySpec,
   batch: number,
+  routed = false,
 ): TemplateDefinition {
   return {
     name: `${store}-${name}`,
@@ -159,6 +168,7 @@ function template(
     procs: 2,
     loops: 4,
     pool: 10,
+    ...(routed ? { routed } : {}),
   };
 }
 
@@ -400,6 +410,31 @@ export function fullPlan(pairs?: number): Plan {
       'tuned',
       1,
     ),
+    // Routed: one route to an in-process fake transport that acks after ROUTED_ACK_MS, so no broker is involved.
+    dispatchCell(
+      'pg',
+      'routed-k1000-1i-tuned',
+      `routed dispatch distinct:1000, ${ROUTED_ACK_MS} ms ack, 1 instance, tuned`,
+      window,
+      single,
+      'pg-routed-k1000',
+      1,
+      'tuned',
+      1,
+      true,
+    ),
+    dispatchCell(
+      'pg',
+      'routed-hot10-1i-tuned',
+      `routed dispatch hot:10, ${ROUTED_ACK_MS} ms ack, 1 instance, tuned`,
+      window,
+      single,
+      'pg-routed-hot10',
+      1,
+      'tuned',
+      1,
+      true,
+    ),
   );
   for (const instances of [1, 4]) {
     for (const name of ['defaults', 'tuned'] as const) {
@@ -467,6 +502,8 @@ export function fullPlan(pairs?: number): Plan {
       template('pg', 'fanout', 50_000, 5, NO_KEYS, 500),
       template('pg', 'k1000', 120_000, 1, keyed('distinct', 1000), 100),
       template('pg', 'hot10', 40_000, 1, keyed('hot', 10), 100),
+      template('pg', 'routed-k1000', 120_000, 1, keyed('distinct', 1000), 100, true),
+      template('pg', 'routed-hot10', 40_000, 1, keyed('hot', 10), 100, true),
       template('mongo', 'unkeyed', 100_000, 1, NO_KEYS, 500),
       template('mongo', 'fanout', 20_000, 5, NO_KEYS, 100),
       template('mongo', 'k1000', 40_000, 1, keyed('distinct', 1000), 100),

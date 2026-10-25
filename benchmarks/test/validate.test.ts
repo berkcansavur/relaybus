@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { validateRun, type OpenDelivery } from '../lib/validate.ts';
+import { handlerNumberOf, validateRun, type OpenDelivery } from '../lib/validate.ts';
 
 const events = [
   { w: 0, n: 0, key: 'k', sequence: 1 },
@@ -80,5 +80,48 @@ describe('validateRun', () => {
   it('detects deliveries that were never published and dead letters', () => {
     expect(run([...all, [9, code(0), 6]]).unexpected).toBe(1);
     expect(run(all, [{ ...pending, status: 'dead' }]).valid).toBe(false);
+  });
+});
+
+describe('routed runs', () => {
+  const route = (n: number): OpenDelivery => ({
+    w: 1,
+    n,
+    handler: 'relaybus.transport:bench-fake:bench',
+    status: 'pending',
+  });
+
+  it('reads the handler number of a local handler or of a route', () => {
+    expect(handlerNumberOf('h3', false)).toBe(3);
+    expect(handlerNumberOf('relaybus.transport:bench-fake:bench', true)).toBe(1);
+    expect(handlerNumberOf('relaybus.transport:bench-fake:bench:bench.order.placed.v1', true)).toBe(
+      1,
+    );
+  });
+
+  it('matches an open route delivery with the send that reached the consumer', () => {
+    const input = { handlers: 1, handled: all.slice(0, 3), drained: false, leaseLost: 0 };
+    const data = { events, open: [route(0)] };
+    expect(validateRun({ ...input, data, routed: true }).lost).toBe(0);
+    expect(validateRun({ ...input, data }).lost).toBe(1);
+  });
+
+  it('still detects a key sent out of order', () => {
+    const swapped: Array<readonly [number, number, number]> = [
+      [0, code(1), 1],
+      [0, code(0), 2],
+      [0, code(2), 3],
+      [1, code(0), 4],
+    ];
+    const result = validateRun({
+      handlers: 1,
+      handled: swapped,
+      data: { events, open: [] },
+      drained: true,
+      leaseLost: 0,
+      routed: true,
+    });
+    expect(result.orderViolations).toBeGreaterThan(0);
+    expect(result.valid).toBe(false);
   });
 });

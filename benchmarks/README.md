@@ -64,6 +64,11 @@ Full run (about 40 cells): publish P=1/8/32 x batch 1/100, 5-handler fan-out, ke
 (concurrency 10, batch size 10, poll 1 s, `pg` pool 10, MongoDB pool 100); `mid` is concurrency 50, batch 200, pool 20;
 `tuned` is concurrency 200, batch 200, pool 40, poll 50 ms.
 
+Routed cells (`pg-disp-routed-k1000-1i-tuned`, `pg-disp-routed-hot10-1i-tuned`, full run only): the same keyed templates, but the
+only handler is a route to an in-process fake transport that acks every send after 5 ms, so no broker is needed and 0.2.0 and
+later run it unchanged. The consumer side of the fake transport records each send; the exactness and per-key order checks read
+that record. A hot key is sent one event per round trip, so `hot:10` is bounded by the ack delay.
+
 Keyed templates are loaded with one key per transaction (`publishAll` with `key`), which is why loading them takes
 seconds instead of a minute.
 

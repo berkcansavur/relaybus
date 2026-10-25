@@ -45,6 +45,14 @@ export interface Validation {
   keyedEvents: number;
 }
 
+/**
+ * The handler number of an open delivery. Local handlers are named `h<number>`; in a routed run the single handler is the
+ * route to the fake transport, whose id differs between releases (`relaybus.transport:<transport>:<destination>[:<type>]`).
+ */
+export function handlerNumberOf(handler: string, routed: boolean): number {
+  return routed ? 1 : Number(handler.slice(1));
+}
+
 export function validateRun(input: {
   handlers: number;
   handled: ReadonlyArray<readonly [number, number, number]>;
@@ -52,6 +60,8 @@ export function validateRun(input: {
   /** The run handled everything it was meant to; then nothing may remain open. */
   drained: boolean;
   leaseLost: number;
+  /** The only handler is a route to a transport (see `handlerNumberOf`). */
+  routed?: boolean;
 }): Validation {
   const { handlers, handled, data } = input;
   const id = (w: number, n: number): string => `${w}:${n}`;
@@ -81,7 +91,8 @@ export function validateRun(input: {
   }
   const openSet = new Set(
     data.open.map(
-      (delivery) => `${id(delivery.w, delivery.n)}:${Number(delivery.handler.slice(1))}`,
+      (delivery) =>
+        `${id(delivery.w, delivery.n)}:${handlerNumberOf(delivery.handler, input.routed === true)}`,
     ),
   );
   let lost = 0;
