@@ -1,9 +1,14 @@
 ---
-title: Upgrading relaybus from 0.2 to 0.3
-description: Step-by-step upgrade of relaybus 0.2 to 0.3 with before and after code, the route id change and draining the 0.2 route backlog, the 5 second transaction budget, the StopResult of stop(), decorator and codec renames, new error codes and the optional new packages.
+title: Upgrading relaybus
+description: 'Step-by-step upgrades between relaybus releases: 0.2 to 0.3 (route ids, transaction budget, StopResult, decorator and codec renames, error codes) and 0.1 to 0.2 (completed deliveries deleted, completionHistory, schema upgrade, PgBouncer settings).'
 ---
 
-# Upgrading from 0.2 to 0.3
+# Upgrading relaybus
+
+- [0.2 → 0.3](#upgrading-from-0-2-to-0-3)
+- [0.1 → 0.2](#upgrading-from-0-1-to-0-2)
+
+## Upgrading from 0.2 to 0.3
 
 ```yaml
 applies to: '@relaybus/* 0.2.x -> 0.3.0'
@@ -22,7 +27,7 @@ Your code keeps compiling and running: every renamed API still works under its o
 6. [Error codes and the Mongo error field](#step-6-error-codes)
 7. [Optional new packages](#step-7-optional-new-packages)
 
-## Step 1: update the packages
+### Step 1: update the packages
 
 Keep every `@relaybus/*` package on the same version:
 
@@ -32,7 +37,7 @@ pnpm add @relaybus/core@0.3.0 @relaybus/nestjs@0.3.0 @relaybus/postgres@0.3.0
 
 Do the same for `mongodb`, `kafka`, `rabbitmq` and `testing` if you use them. Node.js 22.12 or newer is still required.
 
-## Step 2: route ids changed
+### Step 2: route ids changed
 
 A route sends deliveries of an event type to a transport destination. Routes to one destination used to be one handler per event type; they are now one handler per destination, so events of one key but different types reach the broker in commit order.
 
@@ -42,7 +47,7 @@ A route sends deliveries of an event type to a transport destination. Routes to 
 
 **Nothing has to be migrated.** Deliveries stored under a 0.2.0 id, including those written by 0.2.0 processes during a rolling deploy, are still claimed and sent by the new route. The stored rows keep their old id.
 
-### Order during the upgrade
+#### Order during the upgrade
 
 A delivery under a 0.2.0 id and one under the new id are two queues, so one key's backlog from 0.2.0 is not ordered against events published after the upgrade. Where cross-type order matters, drain the old backlog first:
 
@@ -61,7 +66,7 @@ const old = await bus.listDeliveries({
 
 If order across types does not matter for your consumers, skip this and deploy normally.
 
-### Two routes that no longer construct
+#### Two routes that no longer construct
 
 Routes to the same destination now have to resolve to the same `retry` and `timeout`, and an event type may be routed to a destination once; otherwise `new RelayBus` throws a `ConfigurationError`.
 
@@ -79,11 +84,11 @@ routes: [
 ],
 ```
 
-### Dashboards and code that match ids
+#### Dashboards and code that match ids
 
 `handlers()`, `listDeliveries({ handler })`, `HandlerContext.handler` and observer events show the new id for new deliveries. Update alerts that filter on the old id; query both ids while the 0.2.0 backlog drains.
 
-## Step 3: transactions have a time budget
+### Step 3: transactions have a time budget
 
 `transactionTimeout` is new and defaults to `'5s'`. A `bus.transaction(...)` or `@RelayBusTransaction()` method that runs longer is rolled back before its commit, and the caller gets a `TransactionTimeoutError` (`RELAYBUS_TRANSACTION_TIMEOUT`). The database enforces the budget where it can: on PostgreSQL `statement_timeout` and, with the `pg` executor, `idle_in_transaction_session_timeout` (and `transaction_timeout` on PostgreSQL 17 or newer); on MongoDB `maxCommitTimeMS`.
 
@@ -115,7 +120,7 @@ RelayBusModule.forRoot({ store, source: 'orders', transactionTimeout: '30s' });
 
 `@relaybus/eslint-plugin` ([step 7](#step-7-optional-new-packages)) finds external calls inside transactions at lint time.
 
-## Step 4: stop() returns a StopResult
+### Step 4: stop() returns a StopResult
 
 `bus.stop()` is now bounded: the whole shutdown takes at most `timeout` (default `dispatcher.shutdownTimeout`, 30 s) and resolves with what happened.
 
@@ -134,11 +139,11 @@ if (!graceful)
 - Align the timeout with Kubernetes: `terminationGracePeriodSeconds` should be larger than `shutdownTimeout`. With NestJS call `app.enableShutdownHooks()`; `RelayBusModule` stops the bus in `beforeApplicationShutdown`, now bounded.
 - Existing `await bus.stop()` calls compile and behave as before; only code that needs to know whether the shutdown was graceful has to read the result.
 
-## Step 5: renames: decorators and codec
+### Step 5: renames: decorators and codec
 
 Both old names keep working, are marked `@deprecated` and are removed in 1.0.0. Moving now means the editor shows no strikethrough and the upgrade to 1.0.0 is a no-op.
 
-### Decorators
+#### Decorators
 
 ```ts
 // Before (0.2.0)
@@ -168,7 +173,7 @@ export class BillingHandlers implements HandlersOf<typeof OrderEvents> {}
 
 `@RelayBusConsumer` only compiles on a method and takes an event; `@RelayBusCatalogConsumer` only on a class and takes a catalog. Handler ids are unchanged (`ClassName.methodName` by default), so no stored delivery is orphaned.
 
-### `decode` becomes `codec`
+#### `decode` becomes `codec`
 
 `KafkaTransport` and `RabbitMqTransport` take one symmetric `codec` for the wire format, both for publishing and for consuming. The `decode` option reads with your function and writes the default format; it is the same as `codec: { encode: encodeEnvelope, decode }`.
 
@@ -191,7 +196,7 @@ new KafkaTransport({
 
 Giving both `decode` and `codec` is a configuration error. The default codec, `cloudEventsBinary`, writes exactly the bytes 0.2.0 wrote (pinned by golden tests), so services you did not upgrade keep reading your messages. See the [interoperability recipe](/recipes/interoperating-with-other-services).
 
-## Step 6: error codes
+### Step 6: error codes
 
 - **Every relaybus error has a `code`.** `ErrorInfo` (the `lastError` of a delivery, the `error` of observer events) gains an optional `code` for relaybus errors; other errors are unchanged. Records written before 0.3.0 have no `code`, so read it as optional. The list is on [Error codes](/concepts/error-codes).
 - **Five error classes report their own name.** `InvalidKafkaMessageError`, `RabbitMqUnavailableError`, `RabbitMqPublishRejectedError`, `UnroutableMessageError` and `MalformedMessageError` used to report `name: 'RelayBusError'`. Alerts that matched that name should match the class name or, better, the `code`.
@@ -199,7 +204,7 @@ Giving both `decode` and `codec` is a configuration error. The default codec, `c
 - **Broker dead letters carry more headers.** Kafka adds `relaybus-error-name` and `relaybus-error-code` to records copied to `<topic>.dead`; RabbitMQ adds `x-relaybus-dead-letter-error-name` and `x-relaybus-dead-letter-error-code`. The reason headers are unchanged.
 - **`onFailure` has a new stage, `'backlog'`.** Add a case if you `switch` exhaustively over the stage.
 
-## Step 7: optional new packages
+### Step 7: optional new packages
 
 Neither is required, and neither changes behaviour until you add it.
 
@@ -226,7 +231,7 @@ new RelayBus({ store, observers: [otel.observer], tracer: otel.tracer, backlogIn
 
 See [Transactions in NestJS](/recipes/transactions-in-nestjs) and [Observability](/concepts/observability).
 
-## Checklist
+### Checklist
 
 - [ ] All `@relaybus/*` packages on 0.3.0
 - [ ] Routes to one destination share `retry` and `timeout`
@@ -234,3 +239,134 @@ See [Transactions in NestJS](/recipes/transactions-in-nestjs) and [Observability
 - [ ] No transaction waits on a slow external call (or `transactionTimeout` raised on purpose)
 - [ ] `stop()` callers handle `StopResult`; grace period larger than `shutdownTimeout`
 - [ ] Dashboards read both route ids during the drain
+
+## Upgrading from 0.1 to 0.2
+
+```yaml
+applies to: '@relaybus/* 0.1.0 -> 0.2.0'
+downtime: 'a short stop of every 0.1.0 worker (the upgraded schema is not compatible with 0.1.0 code)'
+rollback: 'restore from a backup; there is no down migration'
+```
+
+0.2.0 changes how deliveries are stored ([why](/performance/write-amplification)). Your code keeps working: `publish`, `@Subscribe`, handlers, retries and dead letters have the same API. What changes is the database layout, which `setup()` upgrades in place, and one visible behaviour: completed deliveries are deleted.
+
+### What changes for you
+
+| 0.1.0                                                                      | 0.2.0                                                                                                                      | Action                                                                     |
+| -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| A completed delivery stays as a `completed` row until retention purges it. | It is **deleted** when it completes. `listDeliveries({ status: 'completed' })` is empty and `statistics().completed` is 0. | If you read completed deliveries, set `completionHistory: true`.           |
+| Each delivery has lease columns and a `processing` status.                 | Workers lease 256 lanes; the lease columns are dropped and `processing` deliveries become `pending`.                       | Stop 0.1.0 workers first; `setup()` converts the data.                     |
+| Deduplication relies on completed rows.                                    | Every event remembers the handlers it ever had a delivery for, so a redelivered event runs no handler twice.               | None. Keep `retention.completed` longer than any broker redelivery window. |
+| No notifications.                                                          | PostgreSQL `LISTEN`/`NOTIFY` wakes other processes.                                                                        | None, or `wakeUp: 'poll'` behind a pooler.                                 |
+| Statements are parsed on every call.                                       | Repeated statements are prepared per connection.                                                                           | None, or `preparedStatements: false` behind PgBouncer before 1.21.         |
+
+### Before you start
+
+1. **Back up the database.** There is no down migration.
+2. **Rehearse on a copy** of production data and time it. The PostgreSQL upgrade rewrites every `deliveries` row once.
+3. **Purge old completed deliveries** to shorten that rewrite: set a short `retention.completed` and run `bus.purgeExpired()` while still on 0.1.0.
+4. **Update every package to the same version**, for example `pnpm add @relaybus/core@0.2.0 @relaybus/nestjs@0.2.0 @relaybus/postgres@0.2.0` (and `mongodb`, `kafka`, `rabbitmq`, `testing` if you use them).
+
+### Step 1: stop every 0.1.0 worker
+
+Scale the processes that run a dispatcher (API processes with the dispatcher enabled, worker fleets) to zero. Running 0.1.0 and 0.2.0 together is not supported: 0.1.0 code fails on the dropped columns.
+
+### Step 2: upgrade the schema
+
+Choose one.
+
+#### Option A: let `setup()` do it (default)
+
+Start one 0.2.0 process with `setupStore: true` (the default). `setup()` runs in one transaction under an advisory lock and is safe to run again. In order, on PostgreSQL it:
+
+1. Detects a 0.1.0 table by its `deliveries.lease_token` column.
+2. Adds `events.handlers`, filled from the existing deliveries (completed ones included, so nothing that completed under 0.1.0 runs again).
+3. Adds `deliveries.lane` with the same hash new deliveries use, turns `processing` deliveries into `pending` (the attempt stays counted, as a lost lease would count it) and drops `lease_owner`, `lease_token` and `lease_expires_at`.
+4. Drops the indexes that no longer exist, creates the new ones and seeds the 256 `lanes` rows.
+
+Deliveries that were `completed` stay as `completed` rows and are purged by `retention.completed`, or kept forever with `retention: { completed: false }`. New completions are deleted.
+
+#### Option B: run the SQL with your own migration tool
+
+When your application role has no DDL rights, or you apply migrations from CI, render the script and run it as **one transaction with the workers stopped**:
+
+```ts
+import { createPostgresSchemaSql } from '@relaybus/postgres';
+
+// schema and tablePrefix must match your store options
+console.log(createPostgresSchemaSql({ schema: 'app', tablePrefix: 'bus_' }));
+```
+
+Then start 0.2.0 with `setupStore: false`, so the processes only need DML rights.
+
+#### MongoDB
+
+`setup()` upgrades the database in place and repeatably: `processing` deliveries become `pending` and due at once (the attempt stays counted), per-delivery lease fields are removed, every delivery gets its `laneId` and every event its `handlers` and `createdAt` (in batches of 1,000), the old indexes are dropped and the 256 lane documents are created. The lane documents mark the upgrade as done, so later runs skip it. `completed` documents left by 0.1.0 stay until `purge({ completedBefore })` removes them. There is no SQL to run: if your application role cannot create collections, call `setup()` once from a deployment script with a role that can.
+
+### Step 3: keep completion history (optional)
+
+If an audit, a dashboard or a test reads completed deliveries, opt in:
+
+```ts
+new PostgresEventStore({ pool, completionHistory: true });
+new MongoEventStore({ client, database: 'orders', completionHistory: true });
+new InMemoryEventStore({ retainCompleted: true }); // tests
+```
+
+With it, each completion also inserts one append-only row into `<prefix>completed_deliveries` (a collection on MongoDB) in the same transaction that deletes the delivery. `listDeliveries({ status: 'completed' })` and `statistics().completed` read it, and `retention.completed` purges it. The cost is one more heap and index write per delivery, so leave it off on hot paths. Use the same value in every process.
+
+Completed rows that 0.1.0 left in `deliveries` keep being listed until retention purges them, whatever this option says.
+
+### Step 4: start 0.2.0 and verify
+
+Start the workers, one at a time if you want to watch, then check:
+
+```ts
+console.log(await bus.statistics()); // pending falls, dead is unchanged, nothing stays in processing
+```
+
+```sql
+SELECT count(*) FROM relaybus_lanes;                          -- 256
+SELECT count(*) FROM relaybus_deliveries WHERE lane IS NULL;  -- 0
+```
+
+Dead letters from 0.1.0 are still listed and can be requeued as before.
+
+### PgBouncer and other poolers
+
+A pooler in transaction mode gives each transaction a different server session, and 0.2.0 uses two things that need a session: `LISTEN` and prepared statements.
+
+| Setup                                                                           | Settings                                                                               |
+| ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Direct to PostgreSQL, or PgBouncer in session mode                              | Defaults.                                                                              |
+| PgBouncer 1.21 or newer in transaction mode with `max_prepared_statements > 0`  | `wakeUp: 'poll'` (no `LISTEN` through a transaction pooler); prepared statements work. |
+| PgBouncer **before 1.21** in transaction mode, or `max_prepared_statements = 0` | `preparedStatements: false` and `wakeUp: 'poll'`.                                      |
+
+```ts
+new PostgresEventStore({
+  pool, // connects through PgBouncer
+  wakeUp: 'poll',
+  preparedStatements: false,
+});
+```
+
+If you forget `preparedStatements: false`, the first statement that lands on another session fails once, the store stops preparing and logs `[PgExecutor](query) The server does not keep prepared statements per connection`. When you poll, shorten `dispatcher.pollInterval` to the latency you need. See [Tuning](/tuning#pgbouncer-in-transaction-mode).
+
+### New optional APIs
+
+None of these is required to upgrade.
+
+- **Event catalogs:** `defineCatalog`, `HandlersOf`, `defineHandlers`, `bus.forCatalog`, `bus.subscribeCatalog`, `consume(...)` and `produce(...)` roles, and `@EventConsumer` in `@relaybus/nestjs`. [Guide](/concepts/event-catalogs).
+- **Foreign messages:** `decode: plainJsonDecoder(...)` and `decode: decodeCloudEvent` on the Kafka and RabbitMQ transports. [Guide](/recipes/interoperating-with-other-services).
+- **Store options:** `wakeUp`, `preparedStatements`, `completionHistory`. [Tuning](/tuning).
+
+### Rollback
+
+Going back to 0.1.0 needs a restore of the backup you took before step 2. Keep it until you are happy with 0.2.0 in production.
+
+### Related
+
+- [Releases: what is new and known issues](/releases)
+- [Performance: 0.2.0 vs 0.1.0](/performance)
+- [@relaybus/postgres: Upgrading from 0.1.0](/packages/postgres#upgrading-from-0-1-0)
+- [@relaybus/mongodb: Upgrading from 0.1.0](/packages/mongodb#upgrading-from-0-1-0)

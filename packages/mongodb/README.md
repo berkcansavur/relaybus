@@ -331,6 +331,8 @@ operator queries.
 
 ## Upgrading from 0.1.0
 
+The step-by-step guide, including `completionHistory` and PgBouncer settings, is [Upgrading from 0.1 to 0.2](https://berkcansavur.github.io/relaybus/upgrading).
+
 `setup()` upgrades a 0.1.0 database in place, idempotently, and is safe to run again: `processing`
 deliveries become `pending` and due at once (their attempt stays counted, as a lost lease would count
 it), the per-delivery lease fields are removed, every delivery gets its `laneId` and every event its

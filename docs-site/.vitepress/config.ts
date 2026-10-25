@@ -131,6 +131,8 @@ export default defineConfig({
       { text: 'Error codes', link: '/concepts/error-codes' },
       { text: 'FAQ', link: '/faq' },
       { text: 'Comparison', link: '/comparison' },
+      { text: 'Performance', link: '/performance' },
+      { text: 'Upgrading', link: '/upgrading' },
       { text: 'Releases', link: '/releases' },
     ],
     sidebar,
