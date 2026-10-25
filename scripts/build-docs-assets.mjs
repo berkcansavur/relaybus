@@ -9,7 +9,7 @@
 //
 // Usage: node scripts/build-docs-assets.mjs [--check]
 // With --check nothing is written: the script exits 1 when a committed file is out of date.
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 const root = resolve(import.meta.dirname, '..');
@@ -23,16 +23,25 @@ const stale = [];
 /** Content of files this script generates or rewrites, so check mode can read them without writing. */
 const generatedFiles = new Map();
 
+/** Reads a file, or returns null when it does not exist (no separate existence check, so no race). */
+function readIfPresent(file) {
+  try {
+    return readFileSync(file, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
 /** Writes a file, or in check mode records it as stale when the content differs. */
 function emit(file, content, { committed }) {
   if (check) {
     if (!committed) return;
-    const current = existsSync(file) ? readFileSync(file, 'utf8') : null;
-    if (current !== content) stale.push(file.replace(`${root}/`, ''));
+    if (readIfPresent(file) !== content) stale.push(file.replace(`${root}/`, ''));
     return;
   }
   mkdirSync(dirname(file), { recursive: true });
-  if (!existsSync(file) || readFileSync(file, 'utf8') !== content) writeFileSync(file, content);
+  if (readIfPresent(file) !== content) writeFileSync(file, content);
 }
 
 // 1. Shared snippets inside committed Markdown files.
