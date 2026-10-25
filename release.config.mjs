@@ -21,7 +21,8 @@ export const releaseRules = [
   { type: 'test', release: false },
   { type: 'ci', release: false },
   { type: 'build', release: false },
-  { type: 'refactor', release: false },
+  // Refactors change the published code (same behaviour), so they ship as a patch.
+  { type: 'refactor', release: 'patch' },
   { type: 'style', release: false },
 ];
 
@@ -54,7 +55,7 @@ export default {
             { type: 'test', hidden: true },
             { type: 'ci', hidden: true },
             { type: 'build', hidden: true },
-            { type: 'refactor', hidden: true },
+            { type: 'refactor', section: 'Code Refactoring' },
             { type: 'style', hidden: true },
           ],
         },

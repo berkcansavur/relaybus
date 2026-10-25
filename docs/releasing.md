@@ -8,12 +8,12 @@ Configuration lives in `release.config.mjs`; the workflow is `.github/workflows/
 
 The baseline is the git tag `v0.0.0` (see [bootstrap](#bootstrap-one-time)). semantic-release analyzes the commits between the last `v*` tag reachable from the branch and `HEAD`, takes the highest bump, and applies it. PRs are squash-merged, so the PR title is the commit message that counts (`pr-title.yml` validates it).
 
-| Commit (0.x phase)                                          | Bump  | Example                         |
-| ----------------------------------------------------------- | ----- | ------------------------------- |
-| `feat`                                                      | minor | `feat(postgres): lease batches` |
-| `fix`, `perf`, `revert`                                     | patch | `fix(core): clamp retry delay`  |
-| Any type with `!` or a `BREAKING CHANGE:` footer            | minor | `feat(core)!: rename publish()` |
-| `docs`, `chore`, `test`, `ci`, `build`, `refactor`, `style` | none  | `chore(deps): bump vitest`      |
+| Commit (0.x phase)                               | Bump  | Example                         |
+| ------------------------------------------------ | ----- | ------------------------------- |
+| `feat`                                           | minor | `feat(postgres): lease batches` |
+| `fix`, `perf`, `refactor`, `revert`              | patch | `fix(core): clamp retry delay`  |
+| Any type with `!` or a `BREAKING CHANGE:` footer | minor | `feat(core)!: rename publish()` |
+| `docs`, `chore`, `test`, `ci`, `build`, `style`  | none  | `chore(deps): bump vitest`      |
 
 Examples: from `v0.0.0`, a `feat` gives `0.1.0`, only `fix` gives `0.0.1`, a breaking change gives `0.1.0` (not `1.0.0`). From `v0.3.2`, a breaking change gives `0.4.0`. Only `docs`/`chore`/... commits produce no release and the workflow ends successfully.
 
