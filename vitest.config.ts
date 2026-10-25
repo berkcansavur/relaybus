@@ -27,14 +27,14 @@ const alias = Object.fromEntries([
 
 /** Integration files whose timing or server-wide effects must not overlap with other files. */
 const serialIntegrationTests = [
-  'packages/postgres/test/lane-leases.integration.test.ts',
+  'packages/postgres/test/lane-leases*.integration.test.ts',
   'packages/postgres/test/claim-concurrency.integration.test.ts',
   // Bounded shutdown: asserts how long stop takes on the wall clock.
   'packages/postgres/test/stop-deadline.integration.test.ts',
   // Ten dispatchers with their own pools or clients for about 20 s each.
   'packages/postgres/test/stress.integration.test.ts',
   'packages/mongodb/test/stress.integration.test.ts',
-  'packages/mongodb/test/mongo-lane-leases.integration.test.ts',
+  'packages/mongodb/test/mongo-lane-leases*.integration.test.ts',
   'packages/rabbitmq/test/broker-restart.integration.test.ts',
   // End-to-end flows across a broker with wall-clock waits: under the parallel load of the
   // other files they missed their deadlines now and then.
