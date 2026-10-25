@@ -26,6 +26,15 @@ const RAW_TIMER_BAN = {
 
 const SOURCE_SYNTAX_BANS = [ENUM_BAN, ONE_EXPORTED_CLASS_PER_FILE, RAW_TIMER_BAN];
 
+/** Code lines per source file, at most: blank and comment lines do not count. */
+const MAX_FILE_LINES = { max: 300, skipBlankLines: true, skipComments: true };
+
+/** The store contract suite: a test suite shipped as functions of @relaybus/testing. */
+const CONTRACT_SUITE = [
+  'packages/testing/src/event-store-contract.ts',
+  'packages/testing/src/contract/**/*.ts',
+];
+
 export default tseslint.config(
   {
     ignores: [
@@ -59,10 +68,10 @@ export default tseslint.config(
     // limits), as errors: the published sources have no violations left.
     files: ['packages/*/src/**/*.ts'],
     // The store contract suite is a test suite shipped as a function; tests are exempt, as in the tag monorepo.
-    ignores: ['packages/testing/src/event-store-contract.ts'],
+    ignores: CONTRACT_SUITE,
     rules: {
-      'max-lines': ['error', { max: 800, skipBlankLines: true, skipComments: true }],
-      'max-lines-per-function': ['error', { max: 60, skipBlankLines: true, skipComments: true }],
+      'max-lines': ['error', MAX_FILE_LINES],
+      'max-lines-per-function': ['error', { max: 40, skipBlankLines: true, skipComments: true }],
       complexity: ['error', 10],
       'max-depth': ['error', 3],
       '@typescript-eslint/explicit-function-return-type': [
@@ -115,9 +124,10 @@ export default tseslint.config(
     rules: { 'relaybus/log-prefix': 'error', 'relaybus/max-two-params': 'error' },
   },
   {
-    // The store contract suite is a test suite shipped as a function: its test helpers keep their shape.
-    files: ['packages/testing/src/event-store-contract.ts'],
-    rules: { 'relaybus/max-two-params': 'off' },
+    // The store contract suite is a test suite shipped as a function: its test helpers keep their
+    // shape and its describe blocks are long, but its files keep the file size limit.
+    files: CONTRACT_SUITE,
+    rules: { 'relaybus/max-two-params': 'off', 'max-lines': ['error', MAX_FILE_LINES] },
   },
   {
     files: ['packages/*/test/**/*.ts'],
