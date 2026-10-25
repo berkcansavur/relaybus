@@ -144,16 +144,17 @@ export class ConnectionSupervisor {
 
   async #establish(): Promise<void> {
     const connection = await this.#settings.connect({ signal: this.#force.signal });
-    if (this.#closed) {
-      // Opened after the transport closed: nobody would use or close it.
-      await this.#closeConnection(connection);
-      throw new RabbitMqUnavailableError('[ConnectionSupervisor](establish) Transport is closed');
-    }
+    // Before anything can cut it: an 'error' nobody listens to would crash the process.
     connection.on('error', (error: Error) => {
       this.#settings.logger.warn(
         `[ConnectionSupervisor](establish) Connection error | error=${error.message}`,
       );
     });
+    if (this.#closed) {
+      // Opened after the transport closed: nobody would use or close it.
+      await this.#closeConnection(connection);
+      throw new RabbitMqUnavailableError('[ConnectionSupervisor](establish) Transport is closed');
+    }
     connection.on('close', (error?: Error) => {
       this.#handleLoss(connection, error?.message ?? 'closed by peer');
     });

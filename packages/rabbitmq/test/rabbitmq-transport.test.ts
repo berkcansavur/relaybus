@@ -694,6 +694,23 @@ describe('RabbitMqTransport forced close', () => {
     expect(connection.close).not.toHaveBeenCalled();
   });
 
+  it('listens for the error of a connection it cuts because it opened after a forced close', async () => {
+    const connection = hangingConnection();
+    // amqplib reports the destroyed socket as an 'error' of the connection at once.
+    Object.assign(connection, {
+      connection: { stream: { destroy: (error: Error) => connection.emit('error', error) } },
+    });
+    let open!: (opened: FakeConnection) => void;
+    const transport = new RabbitMqTransport({
+      connect: () => new Promise<FakeConnection>((resolve) => (open = resolve)),
+      logger: createLogger(),
+    });
+    const connecting = transport.connect();
+    await transport.close({ signal: AbortSignal.abort() });
+    open(connection);
+    await expect(connecting).rejects.toThrow('Transport is closed');
+  });
+
   it('closes a connection that opens only after a graceful close', async () => {
     const connection = new FakeConnection();
     let open!: (opened: FakeConnection) => void;
