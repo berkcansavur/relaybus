@@ -1,5 +1,6 @@
+import { adapterExecutor } from '../adapter-executor.js';
 import { sql as drizzleSql, type SQL } from 'drizzle-orm';
-import type { PostgresExecutor, PostgresParameter } from '../executor.js';
+import type { PostgresExecutor } from '../executor.js';
 import { splitPositionalSql } from '../positional-sql.js';
 
 /** What a Drizzle database and a Drizzle transaction have in common. */
@@ -17,17 +18,17 @@ export interface DrizzleLike extends DrizzleQueryable {
  * is a Drizzle transaction: pass `tx` from `db.transaction(async (tx) => ...)`.
  */
 export function createDrizzleExecutor(database: DrizzleLike): PostgresExecutor<DrizzleQueryable> {
-  return {
+  return adapterExecutor<DrizzleQueryable>({
+    root: database,
     transaction: (work) => database.transaction(work),
-    // eslint-disable-next-line relaybus/max-two-params -- PostgresExecutor port signature
-    async query(sql, parameters: readonly PostgresParameter[], transaction) {
+    async run(queryable, { sql, parameters }) {
       const chunks = splitPositionalSql(sql).map((part) =>
         typeof part === 'string'
           ? drizzleSql.raw(part)
           : drizzleSql.param(parameters[part.parameterIndex]),
       );
-      const result = await (transaction ?? database).execute(drizzleSql.join(chunks));
+      const result = await queryable.execute(drizzleSql.join(chunks));
       return result.rows;
     },
-  };
+  });
 }

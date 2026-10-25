@@ -1,4 +1,5 @@
 import { ConfigurationError, type RelayBusLogger } from '@relaybus/core';
+import type { HandedOutLedger } from '@relaybus/core/internal';
 import type { ClientSession, Collection, Db, MongoClient, TransactionOptions } from 'mongodb';
 import {
   type CompletedDeliveryDocument,
@@ -51,18 +52,16 @@ export type MongoStoreState = {
    * expire and takes them over like any other worker.
    */
   readonly instanceId: string;
-  /** The last claim of each owner still running on this instance; the next one waits for it. */
-  readonly claimsInProgress: Map<string, Promise<unknown>>;
   /**
    * Claims this instance handed out that are not settled yet, keyed by
-   * {@link leaseKey} (delivery id and exact lease token), with the owner. A
+   * delivery id and exact lease token, with the owner. A
    * claim is settled when a completion, retry, release or burial of exactly
    * that lease returned, or, for a completion inside the caller's transaction
    * (which may still retry or roll back), when a later claim of the owner finds
    * the delivery gone. After a failed claim, a listed delivery stays listed only
    * if one of these is its current claim (current lane epoch and claim generation).
    */
-  readonly handedOut: Map<string, HandedOutClaim>;
+  readonly handedOut: HandedOutLedger<HandedOutClaim>;
   /** Owners whose lanes on this instance still need reconciling after a failed claim. */
   readonly unreconciledOwners: Set<string>;
 };
@@ -119,11 +118,6 @@ async function runInTransactionWith<T>(
     }
     throw error;
   }
-}
-
-/** Key of a handed-out claim: the delivery and the exact lease token it was handed out with. */
-export function leaseKey(deliveryId: string, leaseToken: string): string {
-  return `${deliveryId}\u0000${leaseToken}`;
 }
 
 export function assertInTransaction(session: ClientSession, operation: string): void {

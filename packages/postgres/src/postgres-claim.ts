@@ -1,7 +1,9 @@
 import { type ClaimRequest, type ClaimedDelivery } from '@relaybus/core';
+import { OwnerSerializedClaims } from '@relaybus/core/internal';
 import { ReconcileFailedError } from './errors.js';
 import type { PostgresParameter, PostgresRow } from './executor.js';
-import { handedOutKey, type PostgresStoreState } from './postgres-store-state.js';
+import { type PostgresStoreState } from './postgres-store-state.js';
+import { compareDue, keepKeyHeads, leftWorkBehind } from './claim-rows.js';
 import { mapClaimedDelivery, parseLeaseToken, readCount } from './row-mapping.js';
 
 /** Lanes a claim takes in its first round; every further round takes twice as many. */
@@ -10,45 +12,20 @@ const INITIAL_LANES_PER_ROUND = 4;
 /** Attempts of the held-lane claim before a stale statement is given up for this call (a later claim finds the work). */
 const MAXIMUM_STALE_CLAIM_ATTEMPTS = 3;
 
-/** claims */
-export class PostgresClaims<TTransaction> {
+/**
+ * Claims for {@link PostgresEventStore.claim}, one claim per owner at a time: held lanes first
+ * when the owner is draining a backlog there, then free lanes round by round. A claim that fails
+ * after the database may have recorded it reconciles the owner's lanes.
+ */
+export class PostgresClaims<TTransaction> extends OwnerSerializedClaims {
   readonly #state: PostgresStoreState<TTransaction>;
 
   constructor(state: PostgresStoreState<TTransaction>) {
+    super();
     this.#state = state;
   }
 
-  /** Implements {@link PostgresEventStore.claim}. */
-  claim(request: ClaimRequest): Promise<ClaimedDelivery[]> {
-    if (request.handlers.length === 0 || !(request.limit > 0)) {
-      return Promise.resolve([]);
-    }
-    return this.#serialized(request.leaseOwner, () => this.#claim(request));
-  }
-
-  /**
-   * Runs `work` after the earlier claims of the same owner on this store settled. The
-   * bookkeeping of what was handed out and the reconciliation of a failed claim need
-   * one claim at a time per owner (the dispatcher claims one batch at a time anyway;
-   * `runOnce` next to a running dispatcher is what this guards against).
-   */
-  #serialized<T>(owner: string, work: () => Promise<T>): Promise<T> {
-    const previous = this.#state.ownerQueues.get(owner) ?? Promise.resolve();
-    const run = previous.then(work, work);
-    const tail = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    this.#state.ownerQueues.set(owner, tail);
-    void tail.then(() => {
-      if (this.#state.ownerQueues.get(owner) === tail) {
-        this.#state.ownerQueues.delete(owner);
-      }
-    });
-    return run;
-  }
-
-  async #claim(request: ClaimRequest): Promise<ClaimedDelivery[]> {
+  protected async claimInTurn(request: ClaimRequest): Promise<ClaimedDelivery[]> {
     await this.#assertReconciled(request.leaseOwner);
     // An owner whose last claim was filled from the lanes it held is draining a backlog there: those
     // lanes are asked first.
@@ -257,7 +234,7 @@ export class PostgresClaims<TTransaction> {
   #handOut(rows: readonly PostgresRow[], leaseOwner: string): void {
     for (const row of rows) {
       const claim = mapClaimedDelivery(row, new Date(0));
-      this.#state.handedOut.set(handedOutKey(claim.deliveryId, claim.leaseToken), {
+      this.#state.handedOut.register(claim, {
         owner: leaseOwner,
         deliveryId: claim.deliveryId,
         ...parseLeaseToken(claim.leaseToken)!,
@@ -283,15 +260,10 @@ export class PostgresClaims<TTransaction> {
       ...(JSON.parse(row['running_ids'] as string) as string[]),
       ...claimed.map((picked) => picked['delivery_id'] as string),
     ]);
-    for (const [key, entry] of this.#state.handedOut) {
-      if (
-        entry.owner === leaseOwner &&
-        heldLanes.has(entry.lane) &&
-        !running.has(entry.deliveryId)
-      ) {
-        this.#state.handedOut.delete(key);
-      }
-    }
+    this.#state.handedOut.forgetWhere(
+      (entry) =>
+        entry.owner === leaseOwner && heldLanes.has(entry.lane) && !running.has(entry.deliveryId),
+    );
   }
 
   /**
@@ -303,8 +275,8 @@ export class PostgresClaims<TTransaction> {
   async #reconcile(leaseOwner: string): Promise<boolean> {
     // Claim statements of the generation before are fenced off by the new one.
     const generation = this.#generation(leaseOwner, true);
-    const handedOut = [...this.#state.handedOut.values()]
-      .filter((entry) => entry.owner === leaseOwner)
+    const handedOut = this.#state.handedOut
+      .entriesOf(leaseOwner)
       .map(({ deliveryId, lane, epoch, claims }) => ({ id: deliveryId, lane, epoch, claims }));
     try {
       await this.#state.query({
@@ -350,18 +322,7 @@ export class PostgresClaims<TTransaction> {
       );
       // The two statements read at different moments: a dead letter requeued in between can put a key's
       // predecessor in one result and its successor in the other. Only the lowest of a key may run.
-      const seenKeys = new Set<string>();
-      const kept = [...picked]
-        .sort((left, right) => compareSequence(left, right))
-        .filter((row) => {
-          if (row['delivery_key'] === null) {
-            return true;
-          }
-          const group = `${row['handler'] as string}\u0000${row['delivery_key'] as string}`;
-          return !seenKeys.has(group) && Boolean(seenKeys.add(group));
-        });
-      kept.sort(compareDue);
-      return kept.slice(0, limit);
+      return keepKeyHeads(picked, limit);
     }
     return picked;
   }
@@ -403,34 +364,3 @@ export class PostgresClaims<TTransaction> {
 
 /** How far a reconciliation moves the generation at least. */
 const GENERATION_STEP = 1n;
-
-/** Whether the claim statement saw work it could not take: a takeover in progress, unexamined free lanes, or a stale snapshot. */
-function leftWorkBehind(row: PostgresRow): boolean {
-  return (
-    row['takeover_waiting'] === true ||
-    row['unexamined_free_lanes'] === true ||
-    row['stale'] === true
-  );
-}
-
-function compareSequence(left: PostgresRow, right: PostgresRow): number {
-  const first = sequenceOf(left);
-  const second = sequenceOf(right);
-  return Number(first > second) - Number(first < second);
-}
-
-/** The key sequence of a picked row; 0 for an unkeyed delivery, which has none. */
-function sequenceOf(row: PostgresRow): bigint {
-  return BigInt((row['sequence'] as string | null) ?? 0);
-}
-
-function compareDue(left: PostgresRow, right: PostgresRow): number {
-  return (
-    compareText(left['due_at'] as string, right['due_at'] as string) ||
-    compareText(left['delivery_id'] as string, right['delivery_id'] as string)
-  );
-}
-
-function compareText(left: string, right: string): number {
-  return Number(left > right) - Number(left < right);
-}

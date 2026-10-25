@@ -1,5 +1,5 @@
 import type { PurgeRequest, PurgeResult } from '@relaybus/core';
-import type { ClientSession, Collection, Filter } from 'mongodb';
+import type { ClientSession, Collection, Document, Filter } from 'mongodb';
 import { runInTransaction, type MongoStoreState } from './mongo-store-state.js';
 
 /** The fields purge reads from a delivery or a completion history record. */
@@ -22,6 +22,24 @@ export class MongoPurge {
   /** Implements {@link MongoEventStore.purge}. */
   async purge(request: PurgeRequest): Promise<PurgeResult> {
     const total = { deletedDeliveries: 0, deletedEvents: 0 };
+    const steps = this.#purgeSteps(request);
+    const { completedBefore, deadBefore } = request;
+    for (const step of steps) {
+      const result = await step();
+      total.deletedDeliveries += result.deletedDeliveries;
+      total.deletedEvents += result.deletedEvents;
+    }
+    const orphanCutoff = [completedBefore, deadBefore]
+      .filter((cutoff) => cutoff !== undefined)
+      .sort((first, second) => first.getTime() - second.getTime())[0];
+    if (orphanCutoff !== undefined) {
+      total.deletedEvents += await this.#purgeOrphanEvents(orphanCutoff, completedBefore);
+    }
+    return total;
+  }
+
+  /** The purges the request asks for, in the order they run. */
+  #purgeSteps(request: PurgeRequest): Array<() => Promise<PurgeResult>> {
     const steps: Array<() => Promise<PurgeResult>> = [];
     const { completedBefore, deadBefore } = request;
     if (completedBefore !== undefined) {
@@ -48,18 +66,7 @@ export class MongoPurge {
         }),
       );
     }
-    for (const step of steps) {
-      const result = await step();
-      total.deletedDeliveries += result.deletedDeliveries;
-      total.deletedEvents += result.deletedEvents;
-    }
-    const orphanCutoff = [completedBefore, deadBefore]
-      .filter((cutoff) => cutoff !== undefined)
-      .sort((first, second) => first.getTime() - second.getTime())[0];
-    if (orphanCutoff !== undefined) {
-      total.deletedEvents += await this.#purgeOrphanEvents(orphanCutoff, completedBefore);
-    }
-    return total;
+    return steps;
   }
 
   /**
@@ -81,43 +88,59 @@ export class MongoPurge {
     let deletedDeliveries = 0;
     let deletedEvents = 0;
     for (;;) {
-      const step = await runInTransaction(this.#state, async (session) => {
-        const batch = await collection
-          .find(filter, { session, projection: { eventId: 1 }, limit: this.#state.purgeBatchSize })
-          .toArray();
-        if (batch.length === 0) {
-          return { batchSize: 0, deletedDeliveries: 0, deletedEvents: 0 };
-        }
-        const eventIds = [...new Set(batch.map((document) => document.eventId))];
-        const deleted = await collection.deleteMany(
-          { _id: { $in: batch.map((document) => document._id) } },
-          { session },
-        );
-        const stillReferenced = await this.#referencedEventIds(eventIds, session);
-        const events = await this.#state.events.deleteMany(
-          {
-            _id: { $in: eventIds.filter((eventId) => !stillReferenced.has(eventId)) },
-            // An event a delivery of which completed stays as deduplication record until
-            // `completedBefore` passes its last completion, whatever this batch purged.
-            $or: [
-              { completedAt: { $exists: false } },
-              ...(completedBefore === undefined ? [] : [{ completedAt: { $lt: completedBefore } }]),
-            ],
-          },
-          { session },
-        );
-        return {
-          batchSize: batch.length,
-          deletedDeliveries: deleted.deletedCount,
-          deletedEvents: events.deletedCount,
-        };
-      });
+      const step = await runInTransaction(this.#state, (session) =>
+        this.#purgeBatch(collection, { filter, completedBefore, session }),
+      );
       deletedDeliveries += step.deletedDeliveries;
       deletedEvents += step.deletedEvents;
       if (step.batchSize < this.#state.purgeBatchSize) {
         return { deletedDeliveries, deletedEvents };
       }
     }
+  }
+
+  /** One batch of {@link MongoPurge.#purgeMatching}, inside the caller's transaction. */
+  async #purgeBatch(
+    collection: Collection<PurgeableDocument>,
+    {
+      filter,
+      completedBefore,
+      session,
+    }: {
+      readonly filter: Filter<PurgeableDocument>;
+      readonly completedBefore: Date | undefined;
+      readonly session: ClientSession;
+    },
+  ): Promise<{ batchSize: number; deletedDeliveries: number; deletedEvents: number }> {
+    const batch = await collection
+      .find(filter, { session, projection: { eventId: 1 }, limit: this.#state.purgeBatchSize })
+      .toArray();
+    if (batch.length === 0) {
+      return { batchSize: 0, deletedDeliveries: 0, deletedEvents: 0 };
+    }
+    const eventIds = [...new Set(batch.map((document) => document.eventId))];
+    const deleted = await collection.deleteMany(
+      { _id: { $in: batch.map((document) => document._id) } },
+      { session },
+    );
+    const stillReferenced = await this.#referencedEventIds(eventIds, session);
+    const events = await this.#state.events.deleteMany(
+      {
+        _id: { $in: eventIds.filter((eventId) => !stillReferenced.has(eventId)) },
+        // An event a delivery of which completed stays as deduplication record until
+        // `completedBefore` passes its last completion, whatever this batch purged.
+        $or: [
+          { completedAt: { $exists: false } },
+          ...(completedBefore === undefined ? [] : [{ completedAt: { $lt: completedBefore } }]),
+        ],
+      },
+      { session },
+    );
+    return {
+      batchSize: batch.length,
+      deletedDeliveries: deleted.deletedCount,
+      deletedEvents: events.deletedCount,
+    };
   }
 
   /** A view of a collection that purge deletes from: deliveries or completion history records. */
@@ -161,35 +184,12 @@ export class MongoPurge {
       const step = await runInTransaction(this.#state, async (session) => {
         const orphans = await this.#state.events
           .aggregate<{ _id: string }>(
-            [
-              {
-                $match: {
-                  $or: [
-                    // Never completed (no subscribers, or every delivery dead): by age.
-                    { completedAt: { $exists: false }, createdAt: { $lt: cutoff } },
-                    // Completed: by the time of its last completion, and only under the completed cutoff.
-                    ...(completedBefore === undefined
-                      ? []
-                      : [{ completedAt: { $lt: completedBefore } }]),
-                  ],
-                },
-              },
-              { $sort: { createdAt: 1, _id: 1 } },
-              ...references.flatMap((from) => [
-                {
-                  $lookup: {
-                    from,
-                    localField: '_id',
-                    foreignField: 'eventId',
-                    pipeline: [{ $limit: 1 }, { $project: { _id: 1 } }],
-                    as: 'references',
-                  },
-                },
-                { $match: { references: { $size: 0 } } },
-              ]),
-              { $limit: this.#state.purgeBatchSize },
-              { $project: { _id: 1 } },
-            ],
+            orphanPipeline({
+              cutoff,
+              completedBefore,
+              references,
+              limit: this.#state.purgeBatchSize,
+            }),
             { session },
           )
           .toArray();
@@ -205,4 +205,44 @@ export class MongoPurge {
       }
     }
   }
+}
+
+/**
+ * The aggregation that finds, oldest first, events without a reference in any of the `references`
+ * collections: never-completed ones by age (`cutoff`), completed ones by their last completion.
+ */
+function orphanPipeline(input: {
+  readonly cutoff: Date;
+  readonly completedBefore: Date | undefined;
+  readonly references: readonly string[];
+  readonly limit: number;
+}): Document[] {
+  const { cutoff, completedBefore, references, limit } = input;
+  return [
+    {
+      $match: {
+        $or: [
+          // Never completed (no subscribers, or every delivery dead): by age.
+          { completedAt: { $exists: false }, createdAt: { $lt: cutoff } },
+          // Completed: by the time of its last completion, and only under the completed cutoff.
+          ...(completedBefore === undefined ? [] : [{ completedAt: { $lt: completedBefore } }]),
+        ],
+      },
+    },
+    { $sort: { createdAt: 1, _id: 1 } },
+    ...references.flatMap((from) => [
+      {
+        $lookup: {
+          from,
+          localField: '_id',
+          foreignField: 'eventId',
+          pipeline: [{ $limit: 1 }, { $project: { _id: 1 } }],
+          as: 'references',
+        },
+      },
+      { $match: { references: { $size: 0 } } },
+    ]),
+    { $limit: limit },
+    { $project: { _id: 1 } },
+  ];
 }

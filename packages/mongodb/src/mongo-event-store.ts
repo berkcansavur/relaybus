@@ -1,5 +1,4 @@
 import {
-  createUuidV7,
   type AppendEntry,
   type AppendResult,
   type ClaimRequest,
@@ -16,7 +15,6 @@ import {
   type PurgeResult,
   type RelayBusLogger,
 } from '@relaybus/core';
-import { assertPositiveInteger } from '@relaybus/core/internal';
 import type { ClientSession, MongoClient, TransactionOptions } from 'mongodb';
 import { MongoAppend } from './mongo-append.js';
 import { MongoClaims } from './mongo-claim.js';
@@ -31,7 +29,7 @@ import {
   runInTransaction,
   type MongoStoreState,
 } from './mongo-store-state.js';
-import { assertCollectionPrefix, assertDatabaseName } from './naming.js';
+import { createMongoStoreState } from './mongo-store-factory.js';
 
 export interface MongoEventStoreOptions {
   /** Connected client. The store never closes it. */
@@ -63,13 +61,6 @@ export interface MongoEventStoreOptions {
    */
   readonly generateIdentifier?: IdentifierGenerator;
 }
-
-const DEFAULT_TRANSACTION_OPTIONS: TransactionOptions = {
-  readConcern: { level: 'snapshot' },
-  writeConcern: { w: 'majority' },
-  readPreference: 'primary',
-};
-const DEFAULT_PURGE_BATCH_SIZE = 500;
 
 /**
  * Event store on MongoDB 6+ multi-document transactions (replica set or sharded
@@ -148,38 +139,7 @@ export class MongoEventStore implements EventStore<ClientSession> {
   readonly #purger: MongoPurge;
 
   constructor(options: MongoEventStoreOptions) {
-    const prefix = options.collectionPrefix ?? 'relaybus_';
-    assertCollectionPrefix(prefix);
-    if (options.database !== undefined) {
-      assertDatabaseName(options.database);
-    }
-    const purgeBatchSize = assertPositiveInteger(
-      options.purgeBatchSize ?? DEFAULT_PURGE_BATCH_SIZE,
-      'purgeBatchSize',
-    );
-    const database = options.client.db(options.database);
-    // Majority writes make a lease durable; primary reads keep the ordering check fresh.
-    const collectionOptions = {
-      readPreference: 'primary',
-      writeConcern: { w: 'majority' },
-    } as const;
-    const state: MongoStoreState = {
-      client: options.client,
-      database,
-      events: database.collection(`${prefix}events`, collectionOptions),
-      deliveries: database.collection(`${prefix}deliveries`, collectionOptions),
-      keySequences: database.collection(`${prefix}key_sequences`, collectionOptions),
-      lanes: database.collection(`${prefix}lanes`, collectionOptions),
-      completions: database.collection(`${prefix}completed_deliveries`, collectionOptions),
-      completionHistory: options.completionHistory ?? false,
-      transactionOptions: options.transactionOptions ?? DEFAULT_TRANSACTION_OPTIONS,
-      purgeBatchSize,
-      logger: options.logger ?? console,
-      instanceId: createUuidV7(),
-      claimsInProgress: new Map(),
-      handedOut: new Map(),
-      unreconciledOwners: new Set(),
-    };
+    const state = createMongoStoreState(options);
     this.#state = state;
     const queries = new MongoQueries(state);
     const ordering = new MongoOrdering(state);
@@ -276,7 +236,8 @@ export class MongoEventStore implements EventStore<ClientSession> {
    */
   // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   extendLease(lease: LeaseReference, leaseExpiresAt: Date, _now?: Date): Promise<boolean> {
-    return this.#completion.extendLease(lease, leaseExpiresAt);
+    // A database answers with a promise; Promise.resolve returns it as it is.
+    return Promise.resolve(this.#completion.extendLease({ lease, leaseExpiresAt }));
   }
 
   /**
@@ -308,18 +269,27 @@ export class MongoEventStore implements EventStore<ClientSession> {
     error: ErrorInfo,
     now: Date,
   ): Promise<boolean> {
-    return this.#completion.reschedule(lease, { availableAt, error, now });
+    return Promise.resolve(
+      this.#completion.changeClaim({
+        lease,
+        change: { kind: 'reschedule', availableAt, error, now },
+      }),
+    );
   }
 
   /** Gives a running delivery back without counting the attempt: pending, due `now`. */
   release(lease: LeaseReference, now: Date): Promise<boolean> {
-    return this.#completion.release(lease, now);
+    return Promise.resolve(
+      this.#completion.changeClaim({ lease, change: { kind: 'release', now } }),
+    );
   }
 
   /** Moves a running delivery to dead and counts the attempt that ended. */
   // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   bury(lease: LeaseReference, error: ErrorInfo, now: Date): Promise<boolean> {
-    return this.#completion.bury(lease, { error, now });
+    return Promise.resolve(
+      this.#completion.changeClaim({ lease, change: { kind: 'bury', error, now } }),
+    );
   }
 
   /**

@@ -1,4 +1,11 @@
-import type { ErrorInfo, LeaseReference } from '@relaybus/core';
+import type { LeaseReference } from '@relaybus/core';
+import {
+  DeliveryLeaseIdentity,
+  LeaseSettlement,
+  type LeaseChange,
+  type LeaseExtension,
+  type SettlementChange,
+} from '@relaybus/core/internal';
 import type { ClientSession, Filter, UpdateFilter } from 'mongodb';
 import {
   toCompletedDeliveryDocument,
@@ -10,7 +17,6 @@ import { formatLeaseToken, parseLeaseToken, type LaneLease } from './lanes.js';
 import {
   assertInTransaction,
   atCount,
-  leaseKey,
   runInTransaction,
   type MongoStoreState,
 } from './mongo-store-state.js';
@@ -24,37 +30,12 @@ interface IssuedLease extends LaneLease {
 }
 
 /** Ends claims: completion, retry, release, burial and lease renewal, all fenced by the lane lease. */
-export class MongoCompletion {
+export class MongoCompletion extends LeaseSettlement<LaneLease> {
   readonly #state: MongoStoreState;
 
   constructor(state: MongoStoreState) {
+    super();
     this.#state = state;
-  }
-
-  /** Implements {@link MongoEventStore.extendLease}. */
-  async extendLease(lease: LeaseReference, leaseExpiresAt: Date): Promise<boolean> {
-    const held = parseLeaseToken(lease.leaseToken);
-    if (held === undefined) {
-      return false;
-    }
-    const deliveryId = String(lease.deliveryId);
-    // One transaction: a stale lease must not extend the lane of a newer claim of the delivery.
-    // A claim ending or starting meanwhile writes the delivery or the lane, so the two conflict.
-    return runInTransaction(this.#state, async (session) => {
-      const running = await this.#state.deliveries.findOne(ofClaim({ ...held, deliveryId }), {
-        session,
-        projection: { _id: 1 },
-      });
-      if (running === null) {
-        return false;
-      }
-      const renewed = await this.#state.lanes.updateOne(
-        { _id: held.laneId, epoch: held.epoch, inFlight: deliveryId },
-        { $max: { leaseExpiresAt } },
-        { session },
-      );
-      return renewed.matchedCount === 1;
-    });
   }
 
   /** Implements {@link MongoEventStore.complete}. */
@@ -73,38 +54,60 @@ export class MongoCompletion {
     return this.#completeLeases(leases, { now, session: undefined });
   }
 
-  /** Implements {@link MongoEventStore.reschedule}. */
-  async reschedule(
-    lease: LeaseReference,
-    {
-      availableAt,
-      error,
-      now,
-    }: { readonly availableAt: Date; readonly error: ErrorInfo; readonly now: Date },
+  /** A lease this store issued; any other token cannot be held. */
+  protected findHeld(lease: LeaseReference): LaneLease | undefined {
+    return parseLeaseToken(lease.leaseToken);
+  }
+
+  /**
+   * Renews the lane lease of a running claim. One transaction: a stale lease must not extend the
+   * lane of a newer claim of the delivery. A claim ending or starting meanwhile writes the delivery
+   * or the lane, so the two conflict.
+   */
+  protected writeExtension(
+    held: LaneLease,
+    { lease, leaseExpiresAt }: LeaseExtension,
   ): Promise<boolean> {
-    return this.#leaveFlight(lease, {
-      $set: { availableAt, dueAt: availableAt, lastError: toErrorInfo(error), updatedAt: now },
-      $inc: { attempts: 1, claims: 1 },
+    const deliveryId = String(lease.deliveryId);
+    return runInTransaction(this.#state, async (session) => {
+      const running = await this.#state.deliveries.findOne(ofClaim({ ...held, deliveryId }), {
+        session,
+        projection: { _id: 1 },
+      });
+      if (running === null) {
+        return false;
+      }
+      const renewed = await this.#state.lanes.updateOne(
+        { _id: held.laneId, epoch: held.epoch, inFlight: deliveryId },
+        { $max: { leaseExpiresAt } },
+        { session },
+      );
+      return renewed.matchedCount === 1;
     });
   }
 
-  /** Implements {@link MongoEventStore.release}. */
-  async release(lease: LeaseReference, now: Date): Promise<boolean> {
-    return this.#leaveFlight(lease, {
-      $set: { availableAt: now, dueAt: now, updatedAt: now },
-      $inc: { claims: 1 },
+  /**
+   * Applies the change to the running delivery and takes it out of its lane's in-flight list, if
+   * the lane still has the lease's epoch.
+   */
+  protected writeChange(held: LaneLease, { lease, change }: LeaseChange): Promise<boolean> {
+    const deliveryId = String(lease.deliveryId);
+    return this.#leaveFlightNow(held, {
+      deliveryId,
+      ofThisClaim: ofClaim({ ...held, deliveryId }),
+      update: updateFor(change),
     });
   }
 
-  /** Implements {@link MongoEventStore.bury}. */
-  async bury(
-    lease: LeaseReference,
-    { error, now }: { readonly error: ErrorInfo; readonly now: Date },
-  ): Promise<boolean> {
-    return this.#leaveFlight(lease, {
-      $set: { status: 'dead', lastError: toErrorInfo(error), updatedAt: now },
-      $unset: FINISHED_FIELDS,
-      $inc: { attempts: 1, claims: 1 },
+  protected forgetHandedOut(lease: LeaseReference): void {
+    this.#forget(lease);
+  }
+
+  /** Forgets a lease as handed out: its claim ended. */
+  #forget(lease: LeaseReference): void {
+    this.#state.handedOut.forget({
+      deliveryId: String(lease.deliveryId),
+      leaseToken: String(lease.leaseToken),
     });
   }
 
@@ -117,7 +120,7 @@ export class MongoCompletion {
   async #settle<T>(leases: readonly LeaseReference[], operation: () => Promise<T>): Promise<T> {
     const result = await operation();
     for (const lease of leases) {
-      this.#state.handedOut.delete(leaseKey(String(lease.deliveryId), String(lease.leaseToken)));
+      this.#forget(lease);
     }
     return result;
   }
@@ -295,26 +298,7 @@ export class MongoCompletion {
     );
   }
 
-  /**
-   * Applies `update` to a running delivery and takes it out of its lane's
-   * in-flight list, if the lane still has the lease's epoch. One transaction:
-   * the lane write fences the change against a takeover.
-   */
-  async #leaveFlight(
-    lease: LeaseReference,
-    update: UpdateFilter<DeliveryDocument>,
-  ): Promise<boolean> {
-    const held = parseLeaseToken(lease.leaseToken);
-    if (held === undefined) {
-      return false;
-    }
-    const deliveryId = String(lease.deliveryId);
-    const ofThisClaim = ofClaim({ ...held, deliveryId });
-    return this.#settle([lease], () =>
-      this.#leaveFlightNow(held, { deliveryId, ofThisClaim, update }),
-    );
-  }
-
+  /** One transaction: the lane write fences the change against a takeover. */
   async #leaveFlightNow(
     held: LaneLease,
     {
@@ -383,5 +367,28 @@ function ofClaim(lease: IssuedLease): Filter<DeliveryDocument> {
 }
 
 function leaseIdentity(lease: IssuedLease): string {
-  return `${lease.deliveryId}\u0000${formatLeaseToken(lease.laneId, { epoch: lease.epoch, claims: lease.claims })}`;
+  return DeliveryLeaseIdentity.of(
+    lease.deliveryId,
+    formatLeaseToken(lease.laneId, { epoch: lease.epoch, claims: lease.claims }),
+  );
+}
+
+/** The update a retry, a release or a burial applies to the delivery document. */
+function updateFor(change: SettlementChange): UpdateFilter<DeliveryDocument> {
+  if (change.kind === 'reschedule') {
+    const { availableAt, error, now } = change;
+    return {
+      $set: { availableAt, dueAt: availableAt, lastError: toErrorInfo(error), updatedAt: now },
+      $inc: { attempts: 1, claims: 1 },
+    };
+  }
+  if (change.kind === 'release') {
+    const { now } = change;
+    return { $set: { availableAt: now, dueAt: now, updatedAt: now }, $inc: { claims: 1 } };
+  }
+  return {
+    $set: { status: 'dead', lastError: toErrorInfo(change.error), updatedAt: change.now },
+    $unset: FINISHED_FIELDS,
+    $inc: { attempts: 1, claims: 1 },
+  };
 }

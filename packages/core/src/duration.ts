@@ -39,17 +39,3 @@ export function toMilliseconds(value: Duration, name: string): number {
 
 /** Largest delay Node.js timers support. Longer values fire after 1ms instead. */
 export const MAX_TIMER_DELAY_MS = 2_147_483_647;
-
-/** Converts a duration that drives a timer, rejecting zero and values timers cannot represent. */
-export function toTimerMilliseconds(value: Duration, name: string): number {
-  const milliseconds = toMilliseconds(value, name);
-  if (milliseconds === 0) {
-    throw new ConfigurationError(`${name} must be greater than zero`);
-  }
-  if (milliseconds > MAX_TIMER_DELAY_MS) {
-    throw new ConfigurationError(
-      `${name} must not exceed ${MAX_TIMER_DELAY_MS}ms (about 24.8 days), received ${milliseconds}ms`,
-    );
-  }
-  return milliseconds;
-}

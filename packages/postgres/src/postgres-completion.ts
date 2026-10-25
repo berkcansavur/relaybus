@@ -1,27 +1,24 @@
-import { type ErrorInfo, type LeaseReference } from '@relaybus/core';
+import { type LeaseReference } from '@relaybus/core';
+import {
+  DeliveryLeaseIdentity,
+  LeaseSettlement,
+  type LeaseChange,
+  type LeaseExtension,
+} from '@relaybus/core/internal';
 import type { PostgresParameter } from './executor.js';
-import { handedOutKey, type PostgresStoreState } from './postgres-store-state.js';
+import { type PostgresStoreState } from './postgres-store-state.js';
 import { parseLeaseToken, readCount, type LaneLease } from './row-mapping.js';
 
-/** completion */
-export class PostgresCompletion<TTransaction> {
+/**
+ * Ends and renews claims for {@link PostgresEventStore}: every statement is fenced by the lane
+ * lease the token names (lane, epoch and claim generation).
+ */
+export class PostgresCompletion<TTransaction> extends LeaseSettlement<LaneLease> {
   readonly #state: PostgresStoreState<TTransaction>;
 
   constructor(state: PostgresStoreState<TTransaction>) {
+    super();
     this.#state = state;
-  }
-
-  /** Implements {@link PostgresEventStore.extendLease}. */
-  extendLease(lease: LeaseReference, leaseExpiresAt: Date): Promise<boolean> {
-    return this.#whenIssued(lease, (held) =>
-      this.#changed(this.#state.statements.completion.extendLease, [
-        lease.deliveryId,
-        held.lane,
-        held.epoch,
-        held.claims,
-        leaseExpiresAt.toISOString(),
-      ]),
-    );
   }
 
   /** Implements {@link PostgresEventStore.complete}. */
@@ -37,86 +34,50 @@ export class PostgresCompletion<TTransaction> {
     return this.#completeLeases(leases, { now, transaction: undefined });
   }
 
-  /** Implements {@link PostgresEventStore.reschedule}. */
-  reschedule(
-    lease: LeaseReference,
-    {
-      availableAt,
-      error,
-      now,
-    }: { readonly availableAt: Date; readonly error: ErrorInfo; readonly now: Date },
-  ): Promise<boolean> {
-    return this.#settled(
-      lease,
-      this.#whenIssued(lease, (held) =>
-        this.#changed(this.#state.statements.completion.reschedule, [
-          lease.deliveryId,
-          held.lane,
-          held.epoch,
-          held.claims,
-          availableAt.toISOString(),
-          JSON.stringify(error),
-          now.toISOString(),
-        ]),
-      ),
-    );
+  /** A lease this store issued; any other token cannot be held. */
+  protected findHeld(lease: LeaseReference): LaneLease | undefined {
+    return parseLeaseToken(lease.leaseToken);
   }
 
-  /** Implements {@link PostgresEventStore.bury}. */
-  bury(
-    lease: LeaseReference,
-    { error, now }: { readonly error: ErrorInfo; readonly now: Date },
+  protected writeExtension(
+    held: LaneLease,
+    { lease, leaseExpiresAt }: LeaseExtension,
   ): Promise<boolean> {
-    return this.#settled(
-      lease,
-      this.#whenIssued(lease, (held) =>
-        this.#changed(this.#state.statements.completion.bury, [
-          lease.deliveryId,
-          held.lane,
-          held.epoch,
-          held.claims,
-          JSON.stringify(error),
-          now.toISOString(),
-        ]),
-      ),
-    );
+    return this.#changed(this.#state.statements.completion.extendLease, [
+      ...fenceOf(lease, held),
+      leaseExpiresAt.toISOString(),
+    ]);
   }
 
-  /** Implements {@link PostgresEventStore.release}. */
-  release(lease: LeaseReference, now: Date): Promise<boolean> {
-    return this.#settled(
-      lease,
-      this.#whenIssued(lease, (held) =>
-        this.#changed(this.#state.statements.completion.release, [
-          lease.deliveryId,
-          held.lane,
-          held.epoch,
-          held.claims,
-          now.toISOString(),
-        ]),
-      ),
-    );
+  protected writeChange(held: LaneLease, { lease, change }: LeaseChange): Promise<boolean> {
+    const { completion } = this.#state.statements;
+    const fence = fenceOf(lease, held);
+    if (change.kind === 'reschedule') {
+      return this.#changed(completion.reschedule, [
+        ...fence,
+        change.availableAt.toISOString(),
+        JSON.stringify(change.error),
+        change.now.toISOString(),
+      ]);
+    }
+    if (change.kind === 'bury') {
+      return this.#changed(completion.bury, [
+        ...fence,
+        JSON.stringify(change.error),
+        change.now.toISOString(),
+      ]);
+    }
+    return this.#changed(completion.release, [...fence, change.now.toISOString()]);
   }
 
   /** Forgets a handed-out lease once the store answered about it (any answer: the claim is over or fenced out). */
-  async #settled(lease: LeaseReference, work: Promise<boolean>): Promise<boolean> {
-    const result = await work;
-    this.#state.handedOut.delete(handedOutKey(lease.deliveryId, lease.leaseToken));
-    return result;
+  protected forgetHandedOut(lease: LeaseReference): void {
+    this.#state.handedOut.forget(lease);
   }
 
   async #changed(sql: string, parameters: readonly PostgresParameter[]): Promise<boolean> {
     const rows = await this.#state.query({ sql, parameters });
     return readCount(rows[0]!, 'count') > 0;
-  }
-
-  /** Runs `operation` for a lease this store issued; any other token cannot be held. */
-  async #whenIssued(
-    lease: LeaseReference,
-    operation: (held: LaneLease) => Promise<boolean>,
-  ): Promise<boolean> {
-    const held = parseLeaseToken(lease.leaseToken);
-    return held !== undefined && (await operation(held));
   }
 
   /**
@@ -129,16 +90,7 @@ export class PostgresCompletion<TTransaction> {
     leases: readonly LeaseReference[],
     { now, transaction }: { readonly now: Date; readonly transaction: TTransaction | undefined },
   ): Promise<boolean[]> {
-    const issued: Array<{ ord: number; id: string } & LaneLease> = [];
-    const seen = new Set<string>();
-    leases.forEach((lease, ord) => {
-      const held = parseLeaseToken(lease.leaseToken);
-      const identity = `${lease.deliveryId}\u0000${lease.leaseToken}`;
-      if (held !== undefined && !seen.has(identity)) {
-        seen.add(identity);
-        issued.push({ ord, id: lease.deliveryId, ...held });
-      }
-    });
+    const issued = issuedLeases(leases);
     const completed = new Set<number>();
     if (issued.length > 0) {
       const rows = await this.#state.query({
@@ -153,9 +105,31 @@ export class PostgresCompletion<TTransaction> {
     if (transaction === undefined) {
       // Inside the caller's transaction the completion is only provisional: it may roll back and retry.
       for (const lease of leases) {
-        this.#state.handedOut.delete(handedOutKey(lease.deliveryId, lease.leaseToken));
+        this.#state.handedOut.forget(lease);
       }
     }
     return leases.map((_, ord) => completed.has(ord));
   }
+}
+
+/** The first parameters of every fenced statement: the delivery and the lane lease of its claim. */
+function fenceOf(lease: LeaseReference, held: LaneLease): PostgresParameter[] {
+  return [lease.deliveryId, held.lane, held.epoch, held.claims];
+}
+
+/** The leases this store can have issued, each once, with their position in `leases`. */
+function issuedLeases(
+  leases: readonly LeaseReference[],
+): Array<{ ord: number; id: string } & LaneLease> {
+  const issued: Array<{ ord: number; id: string } & LaneLease> = [];
+  const seen = new Set<string>();
+  leases.forEach((lease, ord) => {
+    const held = parseLeaseToken(lease.leaseToken);
+    const identity = DeliveryLeaseIdentity.of(lease.deliveryId, lease.leaseToken);
+    if (held !== undefined && !seen.has(identity)) {
+      seen.add(identity);
+      issued.push({ ord, id: lease.deliveryId, ...held });
+    }
+  });
+  return issued;
 }

@@ -44,6 +44,11 @@ export function createPostgresSchemaStatements(options: PostgresSchemaOptions = 
 
 /** The event, key sequence and delivery tables, their upgrades and indexes. */
 function eventAndDeliveryStatements(names: PostgresNames): string[] {
+  return [...eventAndKeySequenceStatements(names), ...deliveryStatements(names)];
+}
+
+/** The event table with its index, and the key sequence table. */
+function eventAndKeySequenceStatements(names: PostgresNames): string[] {
   return [
     `CREATE TABLE IF NOT EXISTS ${names.events} (
   id text PRIMARY KEY,
@@ -64,6 +69,12 @@ function eventAndDeliveryStatements(names: PostgresNames): string[] {
   key text PRIMARY KEY,
   sequence bigint NOT NULL
 )`,
+  ];
+}
+
+/** The delivery table, the 0.1.0 upgrade, the obsolete index drops and the current indexes. */
+function deliveryStatements(names: PostgresNames): string[] {
+  return [
     `CREATE TABLE IF NOT EXISTS ${names.deliveries} (
   id text COLLATE "C" PRIMARY KEY,
   event_id text NOT NULL REFERENCES ${names.events} (id) ON DELETE CASCADE,

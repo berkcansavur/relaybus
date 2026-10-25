@@ -202,20 +202,12 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
     )) {
       const { name, entries } = describeCatalog(catalog);
       const label = name ?? 'catalog';
-      const handlers = selectedEntries ?? entries.filter((entry) => isMethod(lookup, entry));
-      const missing = handlers.filter((entry) => !isMethod(lookup, entry));
-      if (missing.length > 0) {
-        throw new ConfigurationError(
-          `${className} uses @RelayBusCatalogConsumer(${label}) but lacks the handler methods of events ` +
-            `it consumes: ${missing.map((entry) => entry.handlerName).join(', ')}`,
-        );
-      }
-      if (handlers.length === 0) {
-        throw new ConfigurationError(
-          `${className} uses @RelayBusCatalogConsumer(${label}) but defines none of its handler ` +
-            `methods (${entries.map((entry) => entry.handlerName).join(', ')})`,
-        );
-      }
+      const handlers = this.catalogHandlers(lookup, {
+        className,
+        label,
+        entries,
+        selected: selectedEntries,
+      });
       for (const entry of handlers) {
         const id = `${className}.${entry.handlerName}`;
         const previous = registeredBy.get(id);
@@ -234,6 +226,38 @@ export class RelayBusHandlerExplorer implements OnModuleInit {
         );
       }
     }
+  }
+
+  /** The catalog entries `lookup` handles: the selected ones, else every entry it has a method for. */
+  private catalogHandlers(
+    lookup: Record<string, unknown>,
+    {
+      className,
+      label,
+      entries,
+      selected,
+    }: {
+      readonly className: string;
+      readonly label: string;
+      readonly entries: readonly CatalogEntry[];
+      readonly selected: readonly CatalogEntry[] | undefined;
+    },
+  ): readonly CatalogEntry[] {
+    const handlers = selected ?? entries.filter((entry) => isMethod(lookup, entry));
+    const missing = handlers.filter((entry) => !isMethod(lookup, entry));
+    if (missing.length > 0) {
+      throw new ConfigurationError(
+        `${className} uses @RelayBusCatalogConsumer(${label}) but lacks the handler methods of events ` +
+          `it consumes: ${missing.map((entry) => entry.handlerName).join(', ')}`,
+      );
+    }
+    if (handlers.length === 0) {
+      throw new ConfigurationError(
+        `${className} uses @RelayBusCatalogConsumer(${label}) but defines none of its handler ` +
+          `methods (${entries.map((entry) => entry.handlerName).join(', ')})`,
+      );
+    }
+    return handlers;
   }
 
   private subscribedMethods(prototype: object): SubscribedMethod[] {

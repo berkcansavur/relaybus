@@ -1,5 +1,4 @@
 import {
-  ConfigurationError,
   type AppendEntry,
   type AppendResult,
   type ClaimRequest,
@@ -16,10 +15,10 @@ import {
   type PurgeResult,
   type RelayBusLogger,
 } from '@relaybus/core';
-import { assertPositiveInteger } from '@relaybus/core/internal';
-import { Client, Pool, type PoolClient, type PoolConfig } from 'pg';
-import type { PostgresExecutor, PostgresQueryOptions } from './executor.js';
-import { resolvePostgresNames, type PostgresSchemaOptions } from './names.js';
+import { HandedOutLedger } from '@relaybus/core/internal';
+import { Client, Pool, type PoolClient } from 'pg';
+import type { PostgresExecutor } from './executor.js';
+import { resolvePostgresNames } from './names.js';
 import { NotificationListener } from './notification-listener.js';
 import { PgExecutor } from './pg-executor.js';
 import { PostgresAppend } from './postgres-append.js';
@@ -28,81 +27,19 @@ import { PostgresCompletion } from './postgres-completion.js';
 import { OwnedConnections } from './owned-connections.js';
 import { PostgresMaintenance } from './postgres-maintenance.js';
 import type { PostgresStoreState } from './postgres-store-state.js';
+import { resolveStoreSettings, type PostgresEventStoreOptions } from './postgres-store-options.js';
 import { createPostgresSchemaStatements, postgresSchemaMarker } from './schema.js';
 import { PostgresStatements } from './statements.js';
 import { inBudgetedTransaction } from './transaction-timeouts.js';
 
-/** Options shared by every way of connecting. */
-export interface PostgresEventStoreSettings extends PostgresSchemaOptions {
-  /**
-   * Maximum deliveries deleted per transaction by `purge`. Smaller batches
-   * hold row locks for less time; `purge` keeps going until nothing is left.
-   * Default 1000.
-   */
-  readonly purgeBatchSize?: number;
-  /**
-   * Receives errors of idle connections in a pool the store creates itself
-   * (database failover, `pg_terminate_backend`, network resets). Default
-   * `console`. A pool you pass in is yours: attach `pool.on('error', ...)` to
-   * it, otherwise `pg` raises an unhandled `error` event and the process exits.
-   */
-  readonly logger?: RelayBusLogger;
-  /**
-   * Send the statements the store repeats (publish, claim, complete, renew) as named prepared
-   * statements, so each connection parses and plans their text once instead of on every call. Default
-   * `true`. Set `false` behind a pooler in transaction mode that does not keep prepared statements per
-   * client (PgBouncer before 1.21, or 1.21+ with `max_prepared_statements = 0`). Left on there, the
-   * first statement that lands on another server session fails once, then the store stops preparing
-   * and logs a warning. Only executors that support it prepare (`PgExecutor`, the default); the
-   * other adapters send every statement unprepared.
-   */
-  readonly preparedStatements?: boolean;
-  /**
-   * How dispatchers in other processes learn about new deliveries.
-   * - `'notify'` (default): a publishing transaction sends `NOTIFY` (at most one per 10 ms per store,
-   *   the rest merged into one trailing notification after the commit) and each dispatcher listens
-   *   with `LISTEN` on a connection of its own, so a delivery is picked up within milliseconds.
-   * - `'poll'`: no `NOTIFY`, no listening connection. Other processes find new deliveries when they
-   *   poll (`dispatcher.pollInterval`, default 1 s); a dispatcher in the publishing process is still
-   *   woken at once. Use it behind a pooler in transaction mode, where `LISTEN` does not work.
-   */
-  readonly wakeUp?: PostgresWakeUp;
-}
-
-/** See {@link PostgresEventStoreSettings.wakeUp}. */
-export type PostgresWakeUp = 'notify' | 'poll';
-
-const WAKE_UPS: readonly PostgresWakeUp[] = ['notify', 'poll'];
-
-/** Use an existing `pg` pool. The store never closes it. */
-export interface PostgresPoolOptions extends PostgresEventStoreSettings {
-  readonly pool: Pool;
-  readonly connectionString?: never;
-  readonly poolConfig?: never;
-  readonly executor?: never;
-}
-
-/** Let the store create (and on `close()` end) its own `pg` pool. */
-export interface PostgresConnectionOptions extends PostgresEventStoreSettings {
-  readonly connectionString: string;
-  /** Extra `pg` pool settings, for example `max`. */
-  readonly poolConfig?: Omit<PoolConfig, 'connectionString'>;
-  readonly pool?: never;
-  readonly executor?: never;
-}
-
-/** Use another database library through an adapter. The store never closes it. */
-export interface PostgresExecutorOptions<TTransaction> extends PostgresEventStoreSettings {
-  readonly executor: PostgresExecutor<TTransaction>;
-  readonly pool?: never;
-  readonly connectionString?: never;
-  readonly poolConfig?: never;
-}
-
-export type PostgresEventStoreOptions<TTransaction = PoolClient> =
-  PostgresPoolOptions | PostgresConnectionOptions | PostgresExecutorOptions<TTransaction>;
-
-const DEFAULT_PURGE_BATCH_SIZE = 1_000;
+export type {
+  PostgresConnectionOptions,
+  PostgresEventStoreOptions,
+  PostgresEventStoreSettings,
+  PostgresExecutorOptions,
+  PostgresPoolOptions,
+  PostgresWakeUp,
+} from './postgres-store-options.js';
 
 /**
  * PostgreSQL {@link EventStore} (PostgreSQL 13 or newer).
@@ -168,10 +105,9 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       notifies: wakeUp === 'notify',
       query: ({ sql, parameters, transaction }) =>
         executor.query(sql, parameters, transaction, queryOptions),
-      handedOut: new Map(),
+      handedOut: new HandedOutLedger(),
       unreconciled: new Set(),
       generations: new Map(),
-      ownerQueues: new Map(),
       drainingOwners: new Set(),
       ownedPool,
       pool,
@@ -294,7 +230,8 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   }
 
   extendLease(lease: LeaseReference, leaseExpiresAt: Date): Promise<boolean> {
-    return this.#completion.extendLease(lease, leaseExpiresAt);
+    // A database answers with a promise; Promise.resolve returns it as it is.
+    return Promise.resolve(this.#completion.extendLease({ lease, leaseExpiresAt }));
   }
 
   // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
@@ -313,17 +250,26 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     error: ErrorInfo,
     now: Date,
   ): Promise<boolean> {
-    return this.#completion.reschedule(lease, { availableAt, error, now });
+    return Promise.resolve(
+      this.#completion.changeClaim({
+        lease,
+        change: { kind: 'reschedule', availableAt, error, now },
+      }),
+    );
   }
 
   // eslint-disable-next-line relaybus/max-two-params -- EventStore port signature
   bury(lease: LeaseReference, error: ErrorInfo, now: Date): Promise<boolean> {
-    return this.#completion.bury(lease, { error, now });
+    return Promise.resolve(
+      this.#completion.changeClaim({ lease, change: { kind: 'bury', error, now } }),
+    );
   }
 
   /** Returns a leased delivery to pending, due now, without counting the attempt. */
   release(lease: LeaseReference, now: Date): Promise<boolean> {
-    return this.#completion.release(lease, now);
+    return Promise.resolve(
+      this.#completion.changeClaim({ lease, change: { kind: 'release', now } }),
+    );
   }
 
   /**
@@ -409,41 +355,6 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       signal?.removeEventListener('abort', force);
     }
   }
-}
-
-/** Validates the options that are not names, in declaration order. */
-function resolveStoreSettings<TTransaction>(options: PostgresEventStoreOptions<TTransaction>): {
-  purgeBatchSize: number;
-  wakeUp: PostgresWakeUp;
-  queryOptions: PostgresQueryOptions | undefined;
-} {
-  const sources = [options.pool, options.connectionString, options.executor].filter(
-    (source) => source !== undefined,
-  );
-  if (sources.length !== 1) {
-    throw new ConfigurationError(
-      'PostgresEventStore needs exactly one of pool, connectionString or executor',
-    );
-  }
-  const purgeBatchSize = assertPositiveInteger(
-    options.purgeBatchSize ?? DEFAULT_PURGE_BATCH_SIZE,
-    'purgeBatchSize',
-  );
-  const wakeUp = options.wakeUp ?? 'notify';
-  if (!WAKE_UPS.includes(wakeUp)) {
-    throw new ConfigurationError(`wakeUp must be 'notify' or 'poll', received ${String(wakeUp)}`);
-  }
-  const preparedStatements = options.preparedStatements ?? true;
-  if (typeof preparedStatements !== 'boolean') {
-    throw new ConfigurationError(
-      `preparedStatements must be a boolean, received ${String(preparedStatements)}`,
-    );
-  }
-  return {
-    purgeBatchSize,
-    wakeUp,
-    queryOptions: preparedStatements ? { prepare: true } : undefined,
-  };
 }
 
 /**

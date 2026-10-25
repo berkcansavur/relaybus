@@ -1,4 +1,10 @@
-import type { Document, IndexDescriptionInfo } from 'mongodb';
+import type {
+  AnyBulkWriteOperation,
+  Document,
+  IndexDescription,
+  IndexDescriptionInfo,
+} from 'mongodb';
+import type { EventDocument } from './documents.js';
 import { LANE_COUNT, laneOf } from './lanes.js';
 import { createTransactionsUnsupportedError } from './mongo-errors.js';
 import type { MongoStoreState } from './mongo-store-state.js';
@@ -56,55 +62,11 @@ export class MongoSchema {
 
   /** Creates the indexes of every collection; existing indexes are left as they are. */
   async #createIndexes(): Promise<void> {
-    await this.#state.deliveries.createIndexes([
-      // Idempotent appends and lookups by event.
-      { key: { eventId: 1, handler: 1 }, name: 'event_handler', unique: true },
-      // Claim: due work of a lane in due order. Holds ready deliveries only. The handler is
-      // last, so a query over many lanes and handlers stays a merge of one scan per lane.
-      { key: CLAIM_INDEX_KEY, name: 'claim', partialFilterExpression: { lane: 'ready' } },
-      // Ordering: unfinished predecessors of a keyed delivery, parked or not.
-      {
-        key: { handler: 1, key: 1, sequence: 1 },
-        name: 'ordering',
-        partialFilterExpression: { dueAt: { $exists: true }, sequence: { $exists: true } },
-      },
-      // Parked deliveries: the lowest parked delivery of each key, to move it back once it is next.
-      {
-        key: { handler: 1, key: 1, sequence: 1 },
-        name: 'parked',
-        partialFilterExpression: { lane: 'parked' },
-      },
-      // Statistics: oldest due delivery across handlers.
-      { key: { dueAt: 1 }, name: 'due', partialFilterExpression: { dueAt: { $exists: true } } },
-      // Purge of completed deliveries left by 0.1.0.
-      {
-        key: { completedAt: 1 },
-        name: 'completed',
-        partialFilterExpression: { completedAt: { $exists: true } },
-      },
-      // Listing and status counts.
-      { key: { status: 1, createdAt: 1 }, name: 'status_created' },
-      // Purge of dead deliveries.
-      { key: { status: 1, updatedAt: 1 }, name: 'status_updated' },
-      { key: { handler: 1, createdAt: 1 }, name: 'handler_created' },
-      { key: { eventType: 1, createdAt: 1 }, name: 'type_created' },
-    ]);
+    await this.#state.deliveries.createIndexes(deliveryIndexes());
     // Purge of events no delivery references any more.
-    await this.#state.events.createIndexes([
-      { key: { createdAt: 1, _id: 1 }, name: 'created' },
-      // Purge of events whose deliveries all completed: they are kept until `completedBefore` passes this.
-      {
-        key: { completedAt: 1, _id: 1 },
-        name: 'completed',
-        partialFilterExpression: { completedAt: { $exists: true } },
-      },
-    ]);
+    await this.#state.events.createIndexes(eventIndexes());
     if (this.#state.completionHistory) {
-      await this.#state.completions.createIndexes([
-        { key: { completedAt: 1, _id: 1 }, name: 'completed' },
-        { key: { eventId: 1 }, name: 'event' },
-        { key: { createdAt: 1, _id: 1 }, name: 'created' },
-      ]);
+      await this.#state.completions.createIndexes(completionIndexes());
     }
   }
 
@@ -171,41 +133,34 @@ export class MongoSchema {
         { projection: { occurredAt: 1 }, batchSize: UPGRADE_BATCH_SIZE },
       ),
       async (events) => {
-        const known = new Map(
-          (
-            await this.#state.deliveries
-              .aggregate<{ _id: string; handlers: string[]; createdAt: Date }>([
-                { $match: { eventId: { $in: events.map((event) => event._id) } } },
-                {
-                  $group: {
-                    _id: '$eventId',
-                    handlers: { $addToSet: '$handler' },
-                    createdAt: { $min: '$createdAt' },
-                  },
-                },
-              ])
-              .toArray()
-          ).map((group) => [group._id, group]),
-        );
+        const known = await this.#legacyEventGroups(events.map((event) => event._id));
         await this.#state.events.bulkWrite(
-          events.map((event) => {
-            const group = known.get(event._id);
-            return {
-              updateOne: {
-                // Only an event nobody converted yet: another process may have finished and subscribed a handler.
-                filter: { _id: event._id, handlers: { $exists: false } },
-                update: {
-                  $set:
-                    group === undefined
-                      ? { handlers: [], createdAt: event.occurredAt }
-                      : { handlers: group.handlers, createdAt: group.createdAt },
-                },
-              },
-            };
-          }),
+          events.map((event) => convertEvent(event, known.get(event._id))),
           { ordered: false },
         );
       },
+    );
+  }
+
+  /** The handlers and first creation time of the deliveries of each of `eventIds`, by event id. */
+  async #legacyEventGroups(
+    eventIds: readonly string[],
+  ): Promise<Map<string, { _id: string; handlers: string[]; createdAt: Date }>> {
+    return new Map(
+      (
+        await this.#state.deliveries
+          .aggregate<{ _id: string; handlers: string[]; createdAt: Date }>([
+            { $match: { eventId: { $in: [...eventIds] } } },
+            {
+              $group: {
+                _id: '$eventId',
+                handlers: { $addToSet: '$handler' },
+                createdAt: { $min: '$createdAt' },
+              },
+            },
+          ])
+          .toArray()
+      ).map((group) => [group._id, group]),
     );
   }
 
@@ -251,6 +206,84 @@ export class MongoSchema {
       }
     }
   }
+}
+
+/** Indexes of the deliveries collection. */
+function deliveryIndexes(): IndexDescription[] {
+  return [
+    // Idempotent appends and lookups by event.
+    { key: { eventId: 1, handler: 1 }, name: 'event_handler', unique: true },
+    // Claim: due work of a lane in due order. Holds ready deliveries only. The handler is
+    // last, so a query over many lanes and handlers stays a merge of one scan per lane.
+    { key: CLAIM_INDEX_KEY, name: 'claim', partialFilterExpression: { lane: 'ready' } },
+    // Ordering: unfinished predecessors of a keyed delivery, parked or not.
+    {
+      key: { handler: 1, key: 1, sequence: 1 },
+      name: 'ordering',
+      partialFilterExpression: { dueAt: { $exists: true }, sequence: { $exists: true } },
+    },
+    // Parked deliveries: the lowest parked delivery of each key, to move it back once it is next.
+    {
+      key: { handler: 1, key: 1, sequence: 1 },
+      name: 'parked',
+      partialFilterExpression: { lane: 'parked' },
+    },
+    // Statistics: oldest due delivery across handlers.
+    { key: { dueAt: 1 }, name: 'due', partialFilterExpression: { dueAt: { $exists: true } } },
+    // Purge of completed deliveries left by 0.1.0.
+    {
+      key: { completedAt: 1 },
+      name: 'completed',
+      partialFilterExpression: { completedAt: { $exists: true } },
+    },
+    // Listing and status counts.
+    { key: { status: 1, createdAt: 1 }, name: 'status_created' },
+    // Purge of dead deliveries.
+    { key: { status: 1, updatedAt: 1 }, name: 'status_updated' },
+    { key: { handler: 1, createdAt: 1 }, name: 'handler_created' },
+    { key: { eventType: 1, createdAt: 1 }, name: 'type_created' },
+  ];
+}
+
+/** Indexes of the events collection. */
+function eventIndexes(): IndexDescription[] {
+  return [
+    { key: { createdAt: 1, _id: 1 }, name: 'created' },
+    // Purge of events whose deliveries all completed: they are kept until `completedBefore` passes this.
+    {
+      key: { completedAt: 1, _id: 1 },
+      name: 'completed',
+      partialFilterExpression: { completedAt: { $exists: true } },
+    },
+  ];
+}
+
+/** Indexes of the completion history collection. */
+function completionIndexes(): IndexDescription[] {
+  return [
+    { key: { completedAt: 1, _id: 1 }, name: 'completed' },
+    { key: { eventId: 1 }, name: 'event' },
+    { key: { createdAt: 1, _id: 1 }, name: 'created' },
+  ];
+}
+
+/** The conversion of one 0.1.0 event: the handlers it has deliveries for, and when it was created. */
+function convertEvent(
+  event: { readonly _id: string; readonly occurredAt: Date },
+  group: { readonly handlers: string[]; readonly createdAt: Date } | undefined,
+): AnyBulkWriteOperation<EventDocument> {
+  return {
+    updateOne: {
+      // Only an event nobody converted yet: another process may have finished and subscribed a handler.
+      filter: { _id: event._id, handlers: { $exists: false } },
+      update: {
+        $set:
+          group === undefined
+            ? { handlers: [], createdAt: event.occurredAt }
+            : { handlers: group.handlers, createdAt: group.createdAt },
+      },
+    },
+  };
 }
 
 function isObsoleteIndex(index: IndexDescriptionInfo): boolean {

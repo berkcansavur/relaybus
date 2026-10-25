@@ -1,4 +1,5 @@
-import type { PostgresExecutor, PostgresParameter, PostgresRow } from '../executor.js';
+import { adapterExecutor } from '../adapter-executor.js';
+import type { PostgresExecutor, PostgresRow } from '../executor.js';
 
 /** What a TypeORM `DataSource` and an `EntityManager` have in common. */
 export interface TypeOrmQueryable {
@@ -19,11 +20,11 @@ export interface TypeOrmDataSourceLike extends TypeOrmQueryable {
 export function createTypeOrmExecutor(
   dataSource: TypeOrmDataSourceLike,
 ): PostgresExecutor<TypeOrmQueryable> {
-  return {
+  return adapterExecutor<TypeOrmQueryable>({
+    root: dataSource,
     transaction: (work) => dataSource.transaction(work),
-    // eslint-disable-next-line relaybus/max-two-params -- PostgresExecutor port signature
-    async query(sql, parameters: readonly PostgresParameter[], transaction) {
-      return (await (transaction ?? dataSource).query(sql, [...parameters])) as PostgresRow[];
+    async run(queryable, { sql, parameters }) {
+      return (await queryable.query(sql, [...parameters])) as PostgresRow[];
     },
-  };
+  });
 }

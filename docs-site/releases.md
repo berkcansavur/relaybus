@@ -5,12 +5,23 @@ description: What is new in relaybus 0.3.0 (code-quality overhaul, per-key order
 
 # Releases
 
-- [0.3.0](#_0-3-0-unreleased): code quality, per-key order across event types, codecs, transactions in NestJS, bounded shutdown, ESLint rules, OpenTelemetry
+- [0.3.1](#_0-3-1-2026-10-25): internal readability refactor, same behaviour
+- [0.3.0](#_0-3-0-2026-10-25): code quality, per-key order across event types, codecs, transactions in NestJS, bounded shutdown, ESLint rules, OpenTelemetry
 - [0.2.0](#_0-2-0-2026-10-24): high-throughput delivery, event catalogs, decoding of foreign messages
 - [0.1.x](#_0-1-x): first public release
 - [How versioning works](#how-versioning-works)
 
-## 0.3.0 (unreleased)
+## 0.3.1 (2026-10-25)
+
+A readability release: no behaviour, API, SQL or wire-format change. Nothing to do when upgrading from 0.3.0.
+
+- Every source file is now at most 300 code lines and every function at most 40 (enforced by lint). The largest files shrank from 794 to 294 lines (`relay-bus.ts`) and from 772 to 173 lines (`dispatcher.ts`).
+- Shared skeletons moved into abstract base classes: one lease settlement flow for the PostgreSQL, MongoDB and in-memory stores, one claim flow for PostgreSQL and MongoDB, and one subscription lifecycle for Kafka and RabbitMQ. Value objects replace repeated primitives with rules (durations, backoff, lease identity, composite keys, bounded integers).
+- Proof of no behaviour change: the public API snapshot, the SQL snapshot of every statement and the performance budgets are unchanged; 2,798 tests with 100% coverage.
+- Additive type change: `KafkaTransport` and `RabbitMqTransport` now extend the internal `SubscribingTransport` base class.
+- Benchmark against 0.3.0 (quick gate, 3 interleaved pairs per cell): publish 0.99–1.02x, dispatch 0.98–1.04x, every interval spans 1.0, so speed is unchanged. The 4-instance PostgreSQL dispatch cell was not valid on either side (its template drains before the measurement window ends); that is a harness sizing issue, not a regression.
+
+## 0.3.0 (2026-10-25)
 
 Follow [Upgrading from 0.2 to 0.3](/upgrading). Nothing has to be migrated in the database; read [Breaking changes](#breaking-changes) first. What stays stable between releases is described in [Stability](/stability), what is tested in [Compatibility](/compatibility).
 
@@ -118,7 +129,7 @@ First public release: the transactional outbox, per-handler deliveries, retries,
 Every push to `main` with releasable [Conventional Commits](https://www.conventionalcommits.org/) publishes all seven `@relaybus/*` packages to npm with **one shared version**, computed by semantic-release. There is no committed changelog: the [GitHub Releases](https://github.com/berkcansavur/relaybus/releases) page is the changelog.
 
 - Current release line: **0.2.x**. While the version is below 1.0.0, a breaking change bumps the minor version.
-- `feat` commits bump the minor version; `fix`, `perf` and `revert` bump the patch version. `docs`, `chore`, `ci`, `test`, `build`, `refactor` and `style` do not release.
+- `feat` commits bump the minor version; `fix`, `perf`, `refactor` and `revert` bump the patch version (a refactor changes the published code, never its behaviour). `docs`, `chore`, `ci`, `test`, `build` and `style` do not release.
 - Prereleases are published from the `next` and `beta` branches under the matching npm dist-tags.
 - Releases are published by CI with npm Trusted Publishing (OIDC) and provenance, so a tarball links back to the workflow run that built it.
 

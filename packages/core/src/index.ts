@@ -97,8 +97,8 @@ export type {
   RelayBusObserver,
   TransportSentEvent,
 } from './observer.js';
+export { RelayBus } from './relay-bus.js';
 export {
-  RelayBus,
   type DispatcherOptions,
   type InboundSubscriptionOptions,
   type PublishOneOptions,
@@ -109,7 +109,7 @@ export {
   type RouteOptions,
   type TransactionMode,
   type UnroutedEventPolicy,
-} from './relay-bus.js';
+} from './relay-bus-options.js';
 export {
   DEFAULT_RETRY_POLICY,
   DEFAULT_ROUTE_RETRY_POLICY,

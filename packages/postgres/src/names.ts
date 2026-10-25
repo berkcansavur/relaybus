@@ -71,6 +71,28 @@ const MAXIMUM_CHANNEL_LENGTH = 63;
 const DEFAULT_TABLE_PREFIX = 'relaybus_';
 const TABLE_PREFIX_PATTERN = /^[a-z0-9_]*$/;
 
+/** Derives the names of every index, current and obsolete, from the index-name builder. */
+function indexNames(index: (suffix: string) => string): PostgresNames['indexes'] {
+  return {
+    deliveryEventHandler: index('deliveries_event_handler_unique'),
+    deliveryLaneDue: index('deliveries_lane_due_idx'),
+    deliveryKeyPending: index('deliveries_key_pending_idx'),
+    eventCreated: index('events_created_idx'),
+    deliveryCompleted: index('deliveries_completed_idx'),
+    deliveryDead: index('deliveries_dead_idx'),
+    completionCompleted: index('completed_deliveries_completed_idx'),
+    eventCompletionsCompleted: index('event_completions_completed_idx'),
+    obsolete: [
+      index('deliveries_due_idx'),
+      index('deliveries_due_unkeyed_idx'),
+      index('deliveries_handler_created_idx'),
+      index('deliveries_key_unfinished_idx'),
+      index('deliveries_key_processing_idx'),
+      index('deliveries_status_created_idx'),
+    ],
+  };
+}
+
 /**
  * Validates the options and derives every name the store uses. Every name,
  * including the longest index name, is checked against the PostgreSQL 63
@@ -106,24 +128,7 @@ export function resolvePostgresNames(options: PostgresSchemaOptions = {}): Postg
     completions: table('completed_deliveries'),
     completionHistory: options.completionHistory ?? false,
     notificationChannel: channelName(`${schema}.${tablePrefix}deliveries`),
-    indexes: {
-      deliveryEventHandler: index('deliveries_event_handler_unique'),
-      deliveryLaneDue: index('deliveries_lane_due_idx'),
-      deliveryKeyPending: index('deliveries_key_pending_idx'),
-      eventCreated: index('events_created_idx'),
-      deliveryCompleted: index('deliveries_completed_idx'),
-      deliveryDead: index('deliveries_dead_idx'),
-      completionCompleted: index('completed_deliveries_completed_idx'),
-      eventCompletionsCompleted: index('event_completions_completed_idx'),
-      obsolete: [
-        index('deliveries_due_idx'),
-        index('deliveries_due_unkeyed_idx'),
-        index('deliveries_handler_created_idx'),
-        index('deliveries_key_unfinished_idx'),
-        index('deliveries_key_processing_idx'),
-        index('deliveries_status_created_idx'),
-      ],
-    },
+    indexes: indexNames(index),
   };
 }
 

@@ -1,11 +1,11 @@
 import { hostname } from 'node:os';
 import type { DispatcherSettings } from './dispatcher.js';
-import { toMilliseconds, toTimerMilliseconds } from './duration.js';
+import { Milliseconds } from './values/milliseconds.js';
 import { ConfigurationError } from './errors.js';
 import type { RegistrationDefaults } from './handler-registry.js';
 import type { IdentifierGenerator } from './identifier.js';
-import { assertPositiveInteger } from './internal/validation.js';
-import type { DispatcherOptions, RelayBusOptions, RetentionOptions } from './relay-bus.js';
+import { PositiveInteger } from './values/positive-integer.js';
+import type { DispatcherOptions, RelayBusOptions, RetentionOptions } from './relay-bus-options.js';
 import { createRetryPolicy } from './retry-policy.js';
 
 // Option resolution of RelayBus: defaults and validation, in the order the options are read.
@@ -46,13 +46,13 @@ export function resolveBacklogInterval<TTransaction>(
 ): number | undefined {
   return options.backlogInterval === undefined
     ? undefined
-    : toTimerMilliseconds(options.backlogInterval, 'backlogInterval');
+    : Milliseconds.forTimer(options.backlogInterval, 'backlogInterval');
 }
 
 export function resolveTransactionTimeout<TTransaction>(
   options: RelayBusOptions<TTransaction>,
 ): number {
-  return toTimerMilliseconds(
+  return Milliseconds.forTimer(
     options.transactionTimeout ?? DEFAULTS.transactionTimeout,
     'transactionTimeout',
   );
@@ -66,7 +66,7 @@ export function createHandlerDefaults<TTransaction>(
     timeoutMs:
       options.handlerTimeout === undefined || options.handlerTimeout === false
         ? null
-        : toTimerMilliseconds(options.handlerTimeout, 'handlerTimeout'),
+        : Milliseconds.forTimer(options.handlerTimeout, 'handlerTimeout'),
   };
 }
 
@@ -75,14 +75,14 @@ export function createDispatcherSettings(
   generateIdentifier: IdentifierGenerator,
 ): DispatcherSettings {
   const dispatcher: DispatcherOptions = options ?? {};
-  const concurrency = assertPositiveInteger(
+  const concurrency = PositiveInteger.of(
     dispatcher.concurrency ?? DEFAULTS.concurrency,
     'dispatcher.concurrency',
   );
   return {
     owner: `${hostname()}:${process.pid}:${generateIdentifier()}`,
     concurrency,
-    batchSize: assertPositiveInteger(dispatcher.batchSize ?? concurrency, 'dispatcher.batchSize'),
+    batchSize: PositiveInteger.of(dispatcher.batchSize ?? concurrency, 'dispatcher.batchSize'),
     ...createDispatcherTimings(dispatcher),
   };
 }
@@ -92,23 +92,23 @@ export function createDispatcherTimings(
   dispatcher: DispatcherOptions,
 ): Omit<DispatcherSettings, 'owner' | 'concurrency' | 'batchSize'> {
   return {
-    pollIntervalMs: toTimerMilliseconds(
+    pollIntervalMs: Milliseconds.forTimer(
       dispatcher.pollInterval ?? DEFAULTS.pollInterval,
       'dispatcher.pollInterval',
     ),
-    leaseDurationMs: toTimerMilliseconds(
+    leaseDurationMs: Milliseconds.forTimer(
       dispatcher.leaseDuration ?? DEFAULTS.leaseDuration,
       'dispatcher.leaseDuration',
     ),
-    shutdownTimeoutMs: toTimerMilliseconds(
+    shutdownTimeoutMs: Milliseconds.forTimer(
       dispatcher.shutdownTimeout ?? DEFAULTS.shutdownTimeout,
       'dispatcher.shutdownTimeout',
     ),
-    completionBatchWindowMs: toMilliseconds(
+    completionBatchWindowMs: Milliseconds.of(
       dispatcher.completionBatchWindow ?? DEFAULTS.completionBatchWindow,
       'dispatcher.completionBatchWindow',
     ),
-    completionBatchSize: assertPositiveInteger(
+    completionBatchSize: PositiveInteger.of(
       dispatcher.completionBatchSize ?? DEFAULTS.completionBatchSize,
       'dispatcher.completionBatchSize',
     ),
@@ -123,9 +123,9 @@ export function createRetentionSettings(options: RetentionOptions | undefined): 
   const completed = options?.completed ?? DEFAULTS.completedRetention;
   const dead = options?.dead ?? false;
   return {
-    completedMs: completed === false ? null : toMilliseconds(completed, 'retention.completed'),
-    deadMs: dead === false ? null : toMilliseconds(dead, 'retention.dead'),
-    intervalMs: toTimerMilliseconds(
+    completedMs: completed === false ? null : Milliseconds.of(completed, 'retention.completed'),
+    deadMs: dead === false ? null : Milliseconds.of(dead, 'retention.dead'),
+    intervalMs: Milliseconds.forTimer(
       options?.interval ?? DEFAULTS.retentionInterval,
       'retention.interval',
     ),

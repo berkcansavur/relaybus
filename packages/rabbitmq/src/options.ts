@@ -1,14 +1,13 @@
 import {
   ConfigurationError,
   createRetryPolicy,
-  toMilliseconds,
   type Duration,
   type EventEnvelope,
   type RelayBusLogger,
   type RetryPolicy,
   type RetryPolicyOptions,
 } from '@relaybus/core';
-import { assertPositiveInteger } from '@relaybus/core/internal';
+import { Milliseconds, NonEmptyText, PositiveInteger } from '@relaybus/core/internal';
 import type { AmqpConnection, AmqpMessage } from './amqp-types.js';
 import { cloudEventsBinary, type RabbitMqCodec } from './codecs.js';
 import { completeDecodedEvent, type RabbitMqMessageDecoder } from './inbound-decoders.js';
@@ -245,7 +244,7 @@ type BasicSettings = Pick<
 >;
 
 function resolveBasics(options: RabbitMqTransportOptions): BasicSettings {
-  const exchange = nonEmpty(options.exchange ?? 'relaybus', 'exchange');
+  const exchange = NonEmptyText.of(options.exchange ?? 'relaybus', 'exchange');
   const failOnConnectError = options.failOnConnectError ?? true;
   if (!failOnConnectError && options.reconnect === false) {
     throw new ConfigurationError(
@@ -253,7 +252,7 @@ function resolveBasics(options: RabbitMqTransportOptions): BasicSettings {
     );
   }
   const ordered = options.ordered ?? false;
-  const prefetch = assertPositiveInteger(
+  const prefetch = PositiveInteger.of(
     options.prefetch ?? (ordered ? 1 : DEFAULT_PREFETCH),
     'prefetch',
   );
@@ -282,19 +281,19 @@ function resolveTopology(
   | 'deliveryLimit'
 > {
   return {
-    name: nonEmpty(options.name ?? 'rabbitmq', 'name'),
+    name: NonEmptyText.of(options.name ?? 'rabbitmq', 'name'),
     connect: resolveConnect(options),
     exchange,
     prefetch,
-    queuePrefix: nonEmpty(options.queuePrefix ?? 'relaybus', 'queuePrefix'),
-    consumerGroup: optionalNonEmpty(options.consumerGroup, 'consumerGroup'),
-    queue: optionalNonEmpty(options.queue, 'queue'),
-    deadLetterExchange: nonEmpty(
+    queuePrefix: NonEmptyText.of(options.queuePrefix ?? 'relaybus', 'queuePrefix'),
+    consumerGroup: NonEmptyText.optional(options.consumerGroup, 'consumerGroup'),
+    queue: NonEmptyText.optional(options.queue, 'queue'),
+    deadLetterExchange: NonEmptyText.of(
       options.deadLetterExchange ?? `${exchange}.dead`,
       'deadLetterExchange',
     ),
-    deadLetterQueue: optionalNonEmpty(options.deadLetterQueue, 'deadLetterQueue'),
-    deliveryLimit: assertPositiveInteger(
+    deadLetterQueue: NonEmptyText.optional(options.deadLetterQueue, 'deadLetterQueue'),
+    deliveryLimit: PositiveInteger.of(
       options.deliveryLimit ?? DEFAULT_DELIVERY_LIMIT,
       'deliveryLimit',
     ),
@@ -313,7 +312,7 @@ function resolveRetries(
     handlerRetry: createRetryPolicy(options.handlerRetry, DEFAULT_HANDLER_RETRY),
     redelivery,
     retryLadder: ordered ? [] : buildRetryLadder(redelivery),
-    redeliveryMaxAgeMs: positiveDuration(
+    redeliveryMaxAgeMs: Milliseconds.positive(
       options.redelivery?.maxAge ?? DEFAULT_REDELIVERY_MAX_AGE,
       'redelivery.maxAge',
     ),
@@ -341,8 +340,8 @@ function resolveRuntime(
     reconnect: resolveReconnect(options.reconnect),
     failOnConnectError,
     allowUnroutable: options.allowUnroutable ?? false,
-    publishTimeoutMs: positiveDuration(options.publishTimeout ?? '30s', 'publishTimeout'),
-    shutdownTimeoutMs: toMilliseconds(options.shutdownTimeout ?? '30s', 'shutdownTimeout'),
+    publishTimeoutMs: Milliseconds.positive(options.publishTimeout ?? '30s', 'publishTimeout'),
+    shutdownTimeoutMs: Milliseconds.of(options.shutdownTimeout ?? '30s', 'shutdownTimeout'),
     ...resolveCodec(options),
     logger: options.logger ?? console,
     random: options.random ?? Math.random,
@@ -406,23 +405,4 @@ function resolveReconnect(
     return undefined;
   }
   return createRetryPolicy({ ...reconnect, attempts: 1 }, DEFAULT_RECONNECT);
-}
-
-function nonEmpty(value: string, name: string): string {
-  if (value.length === 0) {
-    throw new ConfigurationError(`${name} must not be empty`);
-  }
-  return value;
-}
-
-function optionalNonEmpty(value: string | undefined, name: string): string | undefined {
-  return value === undefined ? undefined : nonEmpty(value, name);
-}
-
-function positiveDuration(value: Duration, name: string): number {
-  const milliseconds = toMilliseconds(value, name);
-  if (milliseconds === 0) {
-    throw new ConfigurationError(`${name} must be greater than zero`);
-  }
-  return milliseconds;
 }

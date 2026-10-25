@@ -1,6 +1,7 @@
-import { toTimerMilliseconds, type Duration } from './duration.js';
+import { type Duration } from './duration.js';
+import { Milliseconds } from './values/milliseconds.js';
 import { ConfigurationError } from './errors.js';
-import { assertPositiveInteger } from './internal/validation.js';
+import { PositiveInteger } from './values/positive-integer.js';
 import type { EventEnvelope } from './event.js';
 import { createRetryPolicy, type RetryPolicy, type RetryPolicyOptions } from './retry-policy.js';
 import type { StandardSchemaV1 } from './standard-schema.js';
@@ -108,7 +109,7 @@ export class HandlerRegistry {
     const claimIds = [options.id, ...(input.legacyIds ?? [])];
     this.#assertUnregistered(claimIds);
     if (options.concurrency !== undefined) {
-      assertPositiveInteger(options.concurrency, `Concurrency of handler '${options.id}'`);
+      PositiveInteger.of(options.concurrency, `Concurrency of handler '${options.id}'`);
     }
     const registration: HandlerRegistration = {
       id: options.id,
@@ -173,5 +174,5 @@ function resolveTimeout(
   if (timeout === false) {
     return null;
   }
-  return toTimerMilliseconds(timeout, `Timeout of handler '${handlerId}'`);
+  return Milliseconds.forTimer(timeout, `Timeout of handler '${handlerId}'`);
 }

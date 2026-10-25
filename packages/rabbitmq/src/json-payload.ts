@@ -53,35 +53,50 @@ function visitObject(
   }
   ancestors.add(value);
   if (Array.isArray(value)) {
-    for (let index = 0; index < value.length; index += 1) {
-      if (!(index in value)) {
-        throw refuse(eventId, {
-          path: `${path}[${index}]`,
-          reason: 'is an array hole, which JSON turns into null',
-        });
-      }
-      visit(value[index], { path: `${path}[${index}]`, ancestors, eventId });
-    }
+    visitArray(value, { path, ancestors, eventId });
   } else {
-    const prototype = Object.getPrototypeOf(value) as object | null;
-    if (prototype !== Object.prototype && prototype !== null) {
-      throw refuse(eventId, {
-        path,
-        reason: 'is not a plain object (class instance, Date, Map or Set)',
-      });
-    }
-    if (Object.getOwnPropertySymbols(value).length > 0) {
-      throw refuse(eventId, { path, reason: 'has a symbol key, which JSON drops' });
-    }
-    for (const key of Object.keys(value)) {
-      visit((value as Record<string, unknown>)[key], {
-        path: `${path}.${key}`,
-        ancestors,
-        eventId,
-      });
-    }
+    visitPlainObject(value, { path, ancestors, eventId });
   }
   ancestors.delete(value);
+}
+
+/** Where a visit is: the path so far, the objects above it and the event it belongs to. */
+type VisitPlace = {
+  readonly path: string;
+  readonly ancestors: Set<object>;
+  readonly eventId: string;
+};
+
+function visitArray(value: unknown[], { path, ancestors, eventId }: VisitPlace): void {
+  for (let index = 0; index < value.length; index += 1) {
+    if (!(index in value)) {
+      throw refuse(eventId, {
+        path: `${path}[${index}]`,
+        reason: 'is an array hole, which JSON turns into null',
+      });
+    }
+    visit(value[index], { path: `${path}[${index}]`, ancestors, eventId });
+  }
+}
+
+function visitPlainObject(value: object, { path, ancestors, eventId }: VisitPlace): void {
+  const prototype = Object.getPrototypeOf(value) as object | null;
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw refuse(eventId, {
+      path,
+      reason: 'is not a plain object (class instance, Date, Map or Set)',
+    });
+  }
+  if (Object.getOwnPropertySymbols(value).length > 0) {
+    throw refuse(eventId, { path, reason: 'has a symbol key, which JSON drops' });
+  }
+  for (const key of Object.keys(value)) {
+    visit((value as Record<string, unknown>)[key], {
+      path: `${path}.${key}`,
+      ancestors,
+      eventId,
+    });
+  }
 }
 
 function refuse(

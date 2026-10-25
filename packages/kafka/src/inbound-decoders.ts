@@ -1,5 +1,11 @@
 import { assertEventType, type EventEnvelope, type EventHeaders } from '@relaybus/core';
-import { createCloudEventReaders, isJsonObject, mediaTypeOf } from '@relaybus/core/internal';
+import {
+  DecodedEventReader,
+  createCloudEventReaders,
+  isJsonObject,
+  mediaTypeOf,
+  observeRejection,
+} from '@relaybus/core/internal';
 import {
   CONTENT_TYPE,
   collectUserHeaders,
@@ -203,30 +209,22 @@ export function plainJsonDecoder(options: PlainJsonDecoderOptions): KafkaMessage
     ) {
       return decodeCloudEvent(record);
     }
-    const plain: PlainJsonRecord = {
-      topic: record.topic,
-      partition: record.partition,
-      offset: record.offset,
-      key: readKeyLeniently(record.key),
-      headers,
-      payload: parsePayload(record.value),
-      timestamp: record.timestamp,
-    };
-    const type = resolveText(options.type, { record: plain, name: 'type' });
+    const plain = plainRecordOf(record, headers);
+    const type = KAFKA_EVENTS.text(options.type, { plain, name: 'type' });
     if (type === undefined) {
       throw invalid('Record has no event type: the type option found none');
     }
     assertValidType(type, 'The event type');
     return {
       id:
-        resolveText(options.id, { record: plain, name: 'id' }) ??
+        KAFKA_EVENTS.text(options.id, { plain, name: 'id' }) ??
         `kafka:${record.topic}:${record.partition}:${record.offset}`,
       type,
-      source: resolveText(options.source, { record: plain, name: 'source' }) ?? record.topic,
+      source: KAFKA_EVENTS.text(options.source, { plain, name: 'source' }) ?? record.topic,
       key:
         options.key === undefined
           ? plain.key
-          : (resolveText(options.key, { record: plain, name: 'key' }) ?? null),
+          : (KAFKA_EVENTS.text(options.key, { plain, name: 'key' }) ?? null),
       payload: plain.payload,
       headers,
       correlationId: null,
@@ -236,31 +234,50 @@ export function plainJsonDecoder(options: PlainJsonDecoderOptions): KafkaMessage
   };
 }
 
+/** A record as the extractor options of {@link plainJsonDecoder} see it. */
+function plainRecordOf(record: KafkaInboundRecord, headers: EventHeaders): PlainJsonRecord {
+  return {
+    topic: record.topic,
+    partition: record.partition,
+    offset: record.offset,
+    key: readKeyLeniently(record.key),
+    headers,
+    payload: parsePayload(record.value),
+    timestamp: record.timestamp,
+  };
+}
+
+/** The inbound plumbing of Kafka records: malformed records and the record's own defaults. */
+class KafkaDecodedEvents extends DecodedEventReader<KafkaInboundRecord, PlainJsonRecord> {
+  invalid(reason: string): Error {
+    return invalid(reason);
+  }
+
+  /** The topic. */
+  protected defaultSource(record: KafkaInboundRecord): string {
+    return record.topic;
+  }
+
+  /** The record key as UTF-8 text. */
+  protected defaultKey(record: KafkaInboundRecord): string | null {
+    return readRecordKey(record.key);
+  }
+
+  /** The record timestamp; a record without a usable one is malformed. */
+  protected defaultTime(record: KafkaInboundRecord): Date {
+    return requireRecordTimestamp(record);
+  }
+}
+
+const KAFKA_EVENTS = new KafkaDecodedEvents();
+
 /**
  * Fills the fields a decoder left out (see {@link DecodedEvent}) and guards
  * against a decoder that returned no object, which would otherwise surface as
  * a retried `TypeError` instead of a malformed record.
  */
 export function completeDecodedEvent(decoded: unknown, record: KafkaInboundRecord): EventEnvelope {
-  if (typeof decoded !== 'object' || decoded === null) {
-    throw invalid('The decoder must return an event object synchronously');
-  }
-  if ('then' in decoded) {
-    observeRejection(decoded);
-    throw invalid('The decoder must return an event object synchronously');
-  }
-  const event = decoded as DecodedEvent;
-  return {
-    id: event.id,
-    type: event.type,
-    source: event.source ?? record.topic,
-    key: event.key === undefined ? readRecordKey(record.key) : event.key,
-    payload: event.payload,
-    headers: event.headers ?? {},
-    correlationId: event.correlationId ?? null,
-    causationId: event.causationId ?? null,
-    occurredAt: event.occurredAt ?? requireRecordTimestamp(record),
-  };
+  return KAFKA_EVENTS.complete(decoded, record);
 }
 
 function extensionAttributes(body: Record<string, unknown>): Record<string, string> {
@@ -321,21 +338,6 @@ function readKeyLeniently(key: KafkaBytes | null): string | null {
   }
 }
 
-function resolveText<TValue extends string | null>(
-  option: TValue | ((record: PlainJsonRecord) => TValue | undefined) | undefined,
-  { record, name }: { readonly record: PlainJsonRecord; readonly name: string },
-): string | undefined {
-  const value: unknown = typeof option === 'function' ? option(record) : option;
-  if (value === undefined || value === null) {
-    return undefined;
-  }
-  if (typeof value !== 'string') {
-    observeRejection(value);
-    throw invalid(`The ${name} option returned ${typeof value}, expected a string`);
-  }
-  return value.length === 0 ? undefined : value;
-}
-
 function resolveOccurredAt(
   option: PlainJsonDecoderOptions['occurredAt'],
   { plain, record }: { readonly plain: PlainJsonRecord; readonly record: KafkaInboundRecord },
@@ -349,15 +351,4 @@ function resolveOccurredAt(
     throw invalid('The occurredAt option returned no valid Date');
   }
   return value;
-}
-
-/**
- * Observes the rejection of a promise an async decoder or extractor returned by
- * mistake: the value is refused as malformed, and an unobserved rejection would
- * otherwise crash the process.
- */
-function observeRejection(value: unknown): void {
-  if (typeof value === 'object' && value !== null && 'then' in value) {
-    Promise.resolve(value).catch(() => undefined);
-  }
 }

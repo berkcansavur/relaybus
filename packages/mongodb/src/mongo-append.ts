@@ -1,5 +1,5 @@
 import type { AppendEntry, AppendResult, EventEnvelope } from '@relaybus/core';
-import type { ClientSession, WithId } from 'mongodb';
+import type { AnyBulkWriteOperation, ClientSession, WithId } from 'mongodb';
 import {
   toDeliveryDocument,
   toEventDocument,
@@ -84,21 +84,10 @@ export class MongoAppend {
     const newEvents: Array<{ readonly event: EventEnvelope; readonly sequence: number | null }> =
       [];
     const newDeliveries: DeliveryDocument[] = [];
-    /** Handlers every event of the call has, or gets in this call. */
-    const knownHandlers = new Map<string, Set<string>>();
     /** Handlers this call adds, per event. */
     const addedHandlers = new Map<string, string[]>();
-    const orderingByEventId = new Map<
-      string,
-      { readonly key: string | null; readonly sequence: number | null }
-    >();
-    for (const [eventId, stored] of storedEvents) {
-      orderingByEventId.set(eventId, {
-        key: stored.key ?? null,
-        sequence: stored.sequence ?? null,
-      });
-      knownHandlers.set(eventId, new Set(stored.handlers));
-    }
+    /** `knownHandlers`: handlers every event of the call has, or gets in this call. */
+    const { orderingByEventId, knownHandlers } = indexStoredEvents(storedEvents);
 
     for (const { event, deliveries } of entries) {
       let ordering = orderingByEventId.get(event.id);
@@ -132,47 +121,23 @@ export class MongoAppend {
     if (newEvents.length > 0) {
       // Upserts, not inserts: a duplicate-key error would abort the whole transaction,
       // whereas a concurrent writer of the same id surfaces as a retryable write conflict.
-      await this.#state.events.bulkWrite(
-        newEvents.map(({ event, sequence }) => {
-          const document = toEventDocument(event, {
-            sequence,
-            handlers: addedHandlers.get(event.id) ?? [],
-            createdAt: now,
-          });
-          return {
-            updateOne: {
-              filter: { _id: document._id },
-              update: { $setOnInsert: document },
-              upsert: true,
-            },
-          };
-        }),
-        { session, ordered: true },
-      );
+      await this.#state.events.bulkWrite(newEventOperations({ newEvents, addedHandlers, now }), {
+        session,
+        ordered: true,
+      });
     }
     const extendedEvents = [...addedHandlers].filter(([eventId]) => storedEvents.has(eventId));
     if (extendedEvents.length > 0) {
-      await this.#state.events.bulkWrite(
-        extendedEvents.map(([eventId, handlers]) => ({
-          updateOne: {
-            filter: { _id: eventId },
-            update: { $inc: { revision: 1 }, $push: { handlers: { $each: handlers } } },
-          },
-        })),
-        { session, ordered: true },
-      );
+      await this.#state.events.bulkWrite(extendedEventOperations(extendedEvents), {
+        session,
+        ordered: true,
+      });
     }
     if (newDeliveries.length > 0) {
-      await this.#state.deliveries.bulkWrite(
-        newDeliveries.map((document) => ({
-          updateOne: {
-            filter: { eventId: document.eventId, handler: document.handler },
-            update: { $setOnInsert: document },
-            upsert: true,
-          },
-        })),
-        { session, ordered: true },
-      );
+      await this.#state.deliveries.bulkWrite(newDeliveryOperations(newDeliveries), {
+        session,
+        ordered: true,
+      });
     }
   }
 
@@ -185,4 +150,75 @@ export class MongoAppend {
     );
     return counter!.value;
   }
+}
+
+/** The ordering (key and sequence) and the handlers of the events that already exist. */
+function indexStoredEvents(storedEvents: StoredEvents): {
+  readonly orderingByEventId: Map<
+    string,
+    { readonly key: string | null; readonly sequence: number | null }
+  >;
+  readonly knownHandlers: Map<string, Set<string>>;
+} {
+  const orderingByEventId = new Map<
+    string,
+    { readonly key: string | null; readonly sequence: number | null }
+  >();
+  const knownHandlers = new Map<string, Set<string>>();
+  for (const [eventId, stored] of storedEvents) {
+    orderingByEventId.set(eventId, {
+      key: stored.key ?? null,
+      sequence: stored.sequence ?? null,
+    });
+    knownHandlers.set(eventId, new Set(stored.handlers));
+  }
+  return { orderingByEventId, knownHandlers };
+}
+
+/** The upsert of every new event, carrying the handlers this call adds to it. */
+function newEventOperations(input: {
+  readonly newEvents: AppendWritePlan['newEvents'];
+  readonly addedHandlers: Map<string, string[]>;
+  readonly now: Date;
+}): AnyBulkWriteOperation<EventDocument>[] {
+  const { newEvents, addedHandlers, now } = input;
+  return newEvents.map(({ event, sequence }) => {
+    const document = toEventDocument(event, {
+      sequence,
+      handlers: addedHandlers.get(event.id) ?? [],
+      createdAt: now,
+    });
+    return {
+      updateOne: {
+        filter: { _id: document._id },
+        update: { $setOnInsert: document },
+        upsert: true,
+      },
+    };
+  });
+}
+
+/** The revision bump and handler push of every existing event that gains handlers. */
+function extendedEventOperations(
+  extendedEvents: ReadonlyArray<readonly [string, string[]]>,
+): AnyBulkWriteOperation<EventDocument>[] {
+  return extendedEvents.map(([eventId, handlers]) => ({
+    updateOne: {
+      filter: { _id: eventId },
+      update: { $inc: { revision: 1 }, $push: { handlers: { $each: handlers } } },
+    },
+  }));
+}
+
+/** The upsert of every new delivery, keyed by its event and handler. */
+function newDeliveryOperations(
+  newDeliveries: readonly DeliveryDocument[],
+): AnyBulkWriteOperation<DeliveryDocument>[] {
+  return newDeliveries.map((document) => ({
+    updateOne: {
+      filter: { eventId: document.eventId, handler: document.handler },
+      update: { $setOnInsert: document },
+      upsert: true,
+    },
+  }));
 }

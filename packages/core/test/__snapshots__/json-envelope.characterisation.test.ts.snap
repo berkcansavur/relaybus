@@ -1,0 +1,132 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`jsonEnvelope (characterisation) > reads malformed messages with the same refusals 1`] = `
+{
+  "badTime": "{"error":"invalid: The event time is not an RFC 3339 timestamp: 'yesterday'"}",
+  "badType": "{"error":"invalid: The event type is not a valid event type: Event type 'Not A Type' must be 1-255 characters of letters, digits, '.', '_', ':', '/' or '-', starting with a letter or digit"}",
+  "emptyKey": "{"value":{"id":"m","type":"a.b","payload":{},"headers":{},"correlationId":null,"causationId":null}}",
+  "noPayload": "{"error":"invalid: The message has no payload at 'data'"}",
+  "noType": "{"error":"invalid: The message has no type at 'eventName'"}",
+  "notAnObject": "{"error":"invalid: The message body must be a JSON object"}",
+  "numericId": "{"value":{"id":"42","type":"a.b","payload":{},"headers":{},"correlationId":null,"causationId":null}}",
+  "objectId": "{"error":"invalid: The id at 'messageId' must be a string"}",
+}
+`;
+
+exports[`jsonEnvelope (characterisation) > refuses the same mappings with the same messages 1`] = `
+{
+  "badFixedType": "{"error":"Event type 'Bad Type' must be 1-255 characters of letters, digits, '.', '_', ':', '/' or '-', starting with a letter or digit"}",
+  "badHeaders": "{"error":"jsonEnvelope headers must be { body: '<path>' } or 'message-headers'"}",
+  "badLocation": "{"error":"jsonEnvelope type must be { body: '<path>' } or { header: '<name>' }"}",
+  "emptySegment": "{"error":"jsonEnvelope type needs a dotted path of non-empty names, received 'a..b'"}",
+  "headerTwice": "{"error":"jsonEnvelope maps header 'h' twice"}",
+  "mixed": "{"error":"jsonEnvelope body paths 'm.0' and 'm.name' mix an array index and a name"}",
+  "nested": "{"error":"jsonEnvelope body paths 'meta' and 'meta.id' overlap"}",
+  "noId": "{"error":"jsonEnvelope needs an id: { body }, { header } or one of 'transport-id', 'other-id'"}",
+  "noPayload": "{"error":"jsonEnvelope needs a payload: { body: '<path>' } or 'whole-body'"}",
+  "noType": "{"error":"jsonEnvelope needs a type: { body }, { header } or { fixed }"}",
+  "notAnObject": "{"error":"jsonEnvelope needs a mapping object"}",
+  "same": "{"error":"jsonEnvelope body paths 'd' and 'd' overlap"}",
+}
+`;
+
+exports[`jsonEnvelope (characterisation) > writes and reads every envelope with every mapping the same way 1`] = `
+{
+  "arrayIndexes / badTime": {
+    "read": undefined,
+    "written": "{"error":"unencodable: Event evt-1 has an occurredAt that is not an RFC 3339 instant (invalid date or year outside 0..9999)"}",
+  },
+  "arrayIndexes / full": {
+    "read": "{"value":{"id":"evt-1","type":"order.placed.v1","payload":{"orderId":"1","lines":[{"sku":"a","quantity":2}]},"key":"order-1","headers":{"traceparent":"00-abc-def-01","tenant":"t-1"},"correlationId":null,"causationId":null}}",
+    "written": "{"value":{"body":{"messageType":["order.placed.v1"],"ids":["evt-1","order-1"],"message":{"orderId":"1","lines":[{"sku":"a","quantity":2}]}},"headers":{"traceparent":"00-abc-def-01","tenant":"t-1"}}}",
+  },
+  "arrayIndexes / headerClash": {
+    "read": "{"value":{"id":"evt-1","type":"order.placed.v1","payload":{"orderId":"1","lines":[{"sku":"a","quantity":2}]},"key":"order-1","headers":{"x-type":"clash","x-id":"clash"},"correlationId":null,"causationId":null}}",
+    "written": "{"value":{"body":{"messageType":["order.placed.v1"],"ids":["evt-1","order-1"],"message":{"orderId":"1","lines":[{"sku":"a","quantity":2}]}},"headers":{"x-type":"clash","x-id":"clash"}}}",
+  },
+  "arrayIndexes / otherType": {
+    "read": "{"value":{"id":"evt-1","type":"order.shipped.v1","payload":{"orderId":"1","lines":[{"sku":"a","quantity":2}]},"key":"order-1","headers":{"traceparent":"00-abc-def-01","tenant":"t-1"},"correlationId":null,"causationId":null}}",
+    "written": "{"value":{"body":{"messageType":["order.shipped.v1"],"ids":["evt-1","order-1"],"message":{"orderId":"1","lines":[{"sku":"a","quantity":2}]}},"headers":{"traceparent":"00-abc-def-01","tenant":"t-1"}}}",
+  },
+  "arrayIndexes / protoField": {
+    "read": "{"value":{"id":"evt-1","type":"order.placed.v1","payload":{"__proto__":{"polluted":true}},"key":"order-1","headers":{"traceparent":"00-abc-def-01","tenant":"t-1"},"correlationId":null,"causationId":null}}",
+    "written": "{"value":{"body":{"messageType":["order.placed.v1"],"ids":["evt-1","order-1"],"message":{"__proto__":{"polluted":true}}},"headers":{"traceparent":"00-abc-def-01","tenant":"t-1"}}}",
+  },
+  "arrayIndexes / unkeyed": {
+    "read": "{"value":{"id":"evt-1","type":"order.placed.v1","payload":{"orderId":"1","lines":[{"sku":"a","quantity":2}]},"headers":{},"correlationId":null,"causationId":null}}",
+    "written": "{"value":{"body":{"messageType":["order.placed.v1"],"ids":["evt-1"],"message":{"orderId":"1","lines":[{"sku":"a","quantity":2}]}},"headers":{}}}",
+  },
+  "bodyEnvelope / badTime": {
+    "read": undefined,
+    "written": "{"error":"unencodable: Event evt-1 has an occurredAt that is not an RFC 3339 instant (invalid date or year outside 0..9999)"}",
+  },
+  "bodyEnvelope / full": {
+    "read": "{"value":{"id":"evt-1","type":"order.placed.v1","payload":{"orderId":"1","lines":[{"sku":"a","quantity":2}]},"key":"order-1","source":"orders","headers":{"traceparent":"00-abc-def-01","tenant":"t-1"},"correlationId":"flow-1","causationId":"cause-1","occurredAt":"2026-01-01T10:20:30.456Z"}}",
+    "written": "{"value":{"body":{"eventName":"order.placed.v1","messageId":"evt-1","meta":{"key":"order-1","source":"orders","occurredAt":"2026-01-01T10:20:30.456Z","correlationId":"flow-1","causationId":"cause-1","headers":{"traceparent":"00-abc-def-01","tenant":"t-1"}},"data":{"orderId":"1","lines":[{"sku":"a","quantity":2}]}},"headers":{}}}",
+  },
+  "bodyEnvelope / headerClash": {
+    "read": "{"value":{"id":"evt-1","type":"order.placed.v1","payload":{"orderId":"1","lines":[{"sku":"a","quantity":2}]},"key":"order-1","source":"orders","headers":{"x-type":"clash","x-id":"clash"},"correlationId":"flow-1","causationId":"cause-1","occurredAt":"2026-01-01T10:20:30.456Z"}}",
+    "written": "{"value":{"body":{"eventName":"order.placed.v1","messageId":"evt-1","meta":{"key":"order-1","source":"orders","occurredAt":"2026-01-01T10:20:30.456Z","correlationId":"flow-1","causationId":"cause-1","headers":{"x-type":"clash","x-id":"clash"}},"data":{"orderId":"1","lines":[{"sku":"a","quantity":2}]}},"headers":{}}}",
+  },
+  "bodyEnvelope / otherType": {
+    "read": "{"value":{"id":"evt-1","type":"order.shipped.v1","payload":{"orderId":"1","lines":[{"sku":"a","quantity":2}]},"key":"order-1","source":"orders","headers":{"traceparent":"00-abc-def-01","tenant":"t-1"},"correlationId":"flow-1","causationId":"cause-1","occurredAt":"2026-01-01T10:20:30.456Z"}}",
+    "written": "{"value":{"body":{"eventName":"order.shipped.v1","messageId":"evt-1","meta":{"key":"order-1","source":"orders","occurredAt":"2026-01-01T10:20:30.456Z","correlationId":"flow-1","causationId":"cause-1","headers":{"traceparent":"00-abc-def-01","tenant":"t-1"}},"data":{"orderId":"1","lines":[{"sku":"a","quantity":2}]}},"headers":{}}}",
+  },
+  "bodyEnvelope / protoField": {
+    "read": "{"value":{"id":"evt-1","type":"order.placed.v1","payload":{"__proto__":{"polluted":true}},"key":"order-1","source":"orders","headers":{"traceparent":"00-abc-def-01","tenant":"t-1"},"correlationId":"flow-1","causationId":"cause-1","occurredAt":"2026-01-01T10:20:30.456Z"}}",
+    "written": "{"value":{"body":{"eventName":"order.placed.v1","messageId":"evt-1","meta":{"key":"order-1","source":"orders","occurredAt":"2026-01-01T10:20:30.456Z","correlationId":"flow-1","causationId":"cause-1","headers":{"traceparent":"00-abc-def-01","tenant":"t-1"}},"data":{"__proto__":{"polluted":true}}},"headers":{}}}",
+  },
+  "bodyEnvelope / unkeyed": {
+    "read": "{"value":{"id":"evt-1","type":"order.placed.v1","payload":{"orderId":"1","lines":[{"sku":"a","quantity":2}]},"source":"orders","headers":{},"correlationId":"flow-1","causationId":null,"occurredAt":"2026-01-01T10:20:30.456Z"}}",
+    "written": "{"value":{"body":{"eventName":"order.placed.v1","messageId":"evt-1","meta":{"source":"orders","occurredAt":"2026-01-01T10:20:30.456Z","correlationId":"flow-1","headers":{}},"data":{"orderId":"1","lines":[{"sku":"a","quantity":2}]}},"headers":{}}}",
+  },
+  "headerFields / badTime": {
+    "read": undefined,
+    "written": "{"error":"unencodable: Event evt-1 has an occurredAt that is not an RFC 3339 instant (invalid date or year outside 0..9999)"}",
+  },
+  "headerFields / full": {
+    "read": "{"value":{"type":"order.placed.v1","payload":{"orderId":"1","lines":[{"sku":"a","quantity":2}]},"source":"orders","headers":{"traceparent":"00-abc-def-01","tenant":"t-1"},"correlationId":"flow-1","causationId":null,"occurredAt":"2026-01-01T10:20:30.456Z"}}",
+    "written": "{"value":{"body":{"payload":{"orderId":"1","lines":[{"sku":"a","quantity":2}]}},"headers":{"traceparent":"00-abc-def-01","tenant":"t-1","x-type":"order.placed.v1","x-source":"orders","x-time":"2026-01-01T10:20:30.456Z","x-correlation":"flow-1"}}}",
+  },
+  "headerFields / headerClash": {
+    "read": undefined,
+    "written": "{"error":"unencodable: Event evt-1 has a header 'x-type', which the mapping uses for another field"}",
+  },
+  "headerFields / otherType": {
+    "read": "{"value":{"type":"order.shipped.v1","payload":{"orderId":"1","lines":[{"sku":"a","quantity":2}]},"source":"orders","headers":{"traceparent":"00-abc-def-01","tenant":"t-1"},"correlationId":"flow-1","causationId":null,"occurredAt":"2026-01-01T10:20:30.456Z"}}",
+    "written": "{"value":{"body":{"payload":{"orderId":"1","lines":[{"sku":"a","quantity":2}]}},"headers":{"traceparent":"00-abc-def-01","tenant":"t-1","x-type":"order.shipped.v1","x-source":"orders","x-time":"2026-01-01T10:20:30.456Z","x-correlation":"flow-1"}}}",
+  },
+  "headerFields / protoField": {
+    "read": "{"value":{"type":"order.placed.v1","payload":{"__proto__":{"polluted":true}},"source":"orders","headers":{"traceparent":"00-abc-def-01","tenant":"t-1"},"correlationId":"flow-1","causationId":null,"occurredAt":"2026-01-01T10:20:30.456Z"}}",
+    "written": "{"value":{"body":{"payload":{"__proto__":{"polluted":true}}},"headers":{"traceparent":"00-abc-def-01","tenant":"t-1","x-type":"order.placed.v1","x-source":"orders","x-time":"2026-01-01T10:20:30.456Z","x-correlation":"flow-1"}}}",
+  },
+  "headerFields / unkeyed": {
+    "read": "{"value":{"type":"order.placed.v1","payload":{"orderId":"1","lines":[{"sku":"a","quantity":2}]},"source":"orders","headers":{},"correlationId":"flow-1","causationId":null,"occurredAt":"2026-01-01T10:20:30.456Z"}}",
+    "written": "{"value":{"body":{"payload":{"orderId":"1","lines":[{"sku":"a","quantity":2}]}},"headers":{"x-type":"order.placed.v1","x-source":"orders","x-time":"2026-01-01T10:20:30.456Z","x-correlation":"flow-1"}}}",
+  },
+  "payloadOnly / badTime": {
+    "read": undefined,
+    "written": "{"error":"unencodable: Event evt-1 has an occurredAt that is not an RFC 3339 instant (invalid date or year outside 0..9999)"}",
+  },
+  "payloadOnly / full": {
+    "read": "{"value":{"id":"evt-1","type":"order.placed.v1","payload":{"orderId":"1","lines":[{"sku":"a","quantity":2}]},"key":"order-1","headers":{"traceparent":"00-abc-def-01","tenant":"t-1"},"correlationId":null,"causationId":"cause-1"}}",
+    "written": "{"value":{"body":{"orderId":"1","lines":[{"sku":"a","quantity":2}]},"headers":{"traceparent":"00-abc-def-01","tenant":"t-1","x-id":"evt-1","x-key":"order-1","x-cause":"cause-1"}}}",
+  },
+  "payloadOnly / headerClash": {
+    "read": undefined,
+    "written": "{"error":"unencodable: Event evt-1 has a header 'x-id', which the mapping uses for another field"}",
+  },
+  "payloadOnly / otherType": {
+    "read": undefined,
+    "written": "{"error":"unencodable: Event evt-1 has type 'order.shipped.v1', but this route carries only 'order.placed.v1'"}",
+  },
+  "payloadOnly / protoField": {
+    "read": "{"value":{"id":"evt-1","type":"order.placed.v1","payload":{"__proto__":{"polluted":true}},"key":"order-1","headers":{"traceparent":"00-abc-def-01","tenant":"t-1"},"correlationId":null,"causationId":"cause-1"}}",
+    "written": "{"value":{"body":{"__proto__":{"polluted":true}},"headers":{"traceparent":"00-abc-def-01","tenant":"t-1","x-id":"evt-1","x-key":"order-1","x-cause":"cause-1"}}}",
+  },
+  "payloadOnly / unkeyed": {
+    "read": "{"value":{"id":"evt-1","type":"order.placed.v1","payload":{"orderId":"1","lines":[{"sku":"a","quantity":2}]},"headers":{},"correlationId":null,"causationId":null}}",
+    "written": "{"value":{"body":{"orderId":"1","lines":[{"sku":"a","quantity":2}]},"headers":{"x-id":"evt-1"}}}",
+  },
+}
+`;

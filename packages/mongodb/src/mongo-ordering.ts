@@ -43,33 +43,12 @@ export class MongoOrdering {
   async pickCandidates(input: PickCandidatesInput): Promise<void> {
     const { lanes, request, scan, running, picked } = input;
     const pageSize = Math.max((request.limit - picked.length) * 2, MINIMUM_CANDIDATE_BATCH_SIZE);
-    const filter: Filter<DeliveryDocument> = {
-      laneId: { $in: lanes.map((lane) => lane.laneId) },
-      handler: { $in: [...request.handlers] },
-      lane: 'ready',
-      dueAt: { $lte: request.now },
-      _id: { $nin: lanes.flatMap((lane) => lane.listed) },
-    };
+    const filter = candidateFilter(lanes, request);
     let after: DeliveryDocument | undefined;
     for (;;) {
       const [page, { keys }] = await Promise.all([
         this.#state.deliveries
-          .find(
-            after === undefined
-              ? filter
-              : {
-                  $and: [
-                    filter,
-                    {
-                      $or: [
-                        { dueAt: { $gt: after.dueAt! } },
-                        { dueAt: after.dueAt!, _id: { $gt: after._id } },
-                      ],
-                    },
-                  ],
-                },
-            { sort: { dueAt: 1, _id: 1 }, limit: pageSize },
-          )
+          .find(pageAfter(filter, after), { sort: { dueAt: 1, _id: 1 }, limit: pageSize })
           .toArray(),
         running,
       ]);
@@ -204,25 +183,7 @@ export class MongoOrdering {
     if (anyParked === null) {
       return;
     }
-    // The lowest parked delivery of every key, one aggregation per handler in parallel. With the
-    // handler fixed and one group field, the server answers it with a distinct scan of the small
-    // partial index: one index probe per parked key, not one per parked delivery.
-    const lowest = (
-      await Promise.all(
-        [...new Set(handlers)].map((handler) =>
-          this.#state.deliveries
-            .aggregate<{ _id: string; id: string; sequence: number }>([
-              { $match: { handler, lane: 'parked' } },
-              { $sort: { handler: 1, key: 1, sequence: 1 } },
-              {
-                $group: { _id: '$key', id: { $first: '$_id' }, sequence: { $first: '$sequence' } },
-              },
-            ])
-            .toArray()
-            .then((groups) => groups.map((group) => ({ ...group, handler }))),
-        ),
-      )
-    ).flat();
+    const lowest = await this.#lowestParkedPerKey(handlers);
     const next = await Promise.all(
       lowest.map(async (parked) =>
         (await this.#findUnfinishedPredecessor(parked.handler, {
@@ -241,6 +202,67 @@ export class MongoOrdering {
       );
     }
   }
+
+  /**
+   * The lowest parked delivery of every parked key of `handlers`, one aggregation per handler in
+   * parallel.
+   */
+  async #lowestParkedPerKey(
+    handlers: readonly string[],
+  ): Promise<Array<{ _id: string; id: string; sequence: number; handler: string }>> {
+    // With the handler fixed and one group field, the server answers it with a distinct scan of the
+    // small partial index: one index probe per parked key, not one per parked delivery.
+    return (
+      await Promise.all(
+        [...new Set(handlers)].map((handler) =>
+          this.#state.deliveries
+            .aggregate<{ _id: string; id: string; sequence: number }>([
+              { $match: { handler, lane: 'parked' } },
+              { $sort: { handler: 1, key: 1, sequence: 1 } },
+              {
+                $group: { _id: '$key', id: { $first: '$_id' }, sequence: { $first: '$sequence' } },
+              },
+            ])
+            .toArray()
+            .then((groups) => groups.map((group) => ({ ...group, handler }))),
+        ),
+      )
+    ).flat();
+  }
+}
+
+/** The ready, due deliveries of `lanes` for `request.handlers` that are not in flight in their lane. */
+function candidateFilter(
+  lanes: readonly ScopeLane[],
+  request: ClaimRequest,
+): Filter<DeliveryDocument> {
+  return {
+    laneId: { $in: lanes.map((lane) => lane.laneId) },
+    handler: { $in: [...request.handlers] },
+    lane: 'ready',
+    dueAt: { $lte: request.now },
+    _id: { $nin: lanes.flatMap((lane) => lane.listed) },
+  };
+}
+
+/** `filter` restricted to the deliveries after `after` in (dueAt, id) order; `filter` itself for the first page. */
+function pageAfter(
+  filter: Filter<DeliveryDocument>,
+  after: DeliveryDocument | undefined,
+): Filter<DeliveryDocument> {
+  return after === undefined
+    ? filter
+    : {
+        $and: [
+          filter,
+          {
+            $or: [
+              { dueAt: { $gt: after.dueAt! } },
+              { dueAt: after.dueAt!, _id: { $gt: after._id } },
+            ],
+          },
+        ],
+      };
 }
 
 /**

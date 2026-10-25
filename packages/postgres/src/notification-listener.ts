@@ -15,6 +15,21 @@ export interface ListeningConnection {
 }
 
 /**
+ * Returns a function that ends the connection once, however often it is called. `ended` is set
+ * first because ending can report the end synchronously, which calls back into the loss handler.
+ */
+function endOnce(connection: ListeningConnection, ended: { value: boolean }): () => Promise<void> {
+  let ending: Promise<void> = Promise.resolve();
+  return () => {
+    if (!ended.value) {
+      ended.value = true;
+      ending = connection.end().catch(() => undefined);
+    }
+    return ending;
+  };
+}
+
+/**
  * Holds one connection of its own (outside any pool, so it never takes a connection the store needs)
  * that `LISTEN`s on a channel, and calls a listener for every notification. The notifications are hints
  * for the dispatcher, never needed for correctness: when the connection is lost it is replaced after a
@@ -45,17 +60,8 @@ export class NotificationListener {
   /** Connects and listens. Rejects when that fails; a connection lost later is replaced. */
   async start(): Promise<void> {
     const connection = await this.#connect();
-    let ended = false;
-    let ending: Promise<void> = Promise.resolve();
-    // Idempotent: a loss, a failed start and closing may all end the same connection. `ended` is set
-    // first because ending can report the end synchronously, which calls back into `onLost`.
-    const end = (): Promise<void> => {
-      if (!ended) {
-        ended = true;
-        ending = connection.end().catch(() => undefined);
-      }
-      return ending;
-    };
+    const ended = { value: false };
+    const end = endOnce(connection, ended);
     if (this.#closed) {
       await end();
       return;
@@ -64,7 +70,7 @@ export class NotificationListener {
     this.#drop = end;
     let listening = false;
     const onLost = (error?: Error): void => {
-      if (!listening || ended) {
+      if (!listening || ended.value) {
         // While starting, a failure surfaces as the rejection of LISTEN, which ends the connection.
         return;
       }
@@ -82,21 +88,27 @@ export class NotificationListener {
     try {
       await connection.query(`LISTEN "${this.#channel}"`);
     } catch (error) {
-      if (this.#drop === end) {
-        this.#drop = undefined;
-      }
-      await end();
-      if (this.#closed) {
-        // Closing ended the connection while LISTEN was pending: not a failure to report.
-        return;
-      }
-      throw error;
+      await this.#abandonFailedListen(end, error);
+      return;
     }
     if (this.#closed) {
       await end();
       return;
     }
     listening = true;
+  }
+
+  /** Forgets and ends a connection whose LISTEN failed; rethrows the failure unless closing caused it. */
+  async #abandonFailedListen(end: () => Promise<void>, error: unknown): Promise<void> {
+    if (this.#drop === end) {
+      this.#drop = undefined;
+    }
+    await end();
+    if (this.#closed) {
+      // Closing ended the connection while LISTEN was pending: not a failure to report.
+      return;
+    }
+    throw error;
   }
 
   #scheduleReconnect(): void {

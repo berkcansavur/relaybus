@@ -1,26 +1,14 @@
+import { ConfigurationError, type CloseOptions, type EventEnvelope } from '@relaybus/core';
+import { SubscribingTransport, type TransportSubscription } from '@relaybus/core/internal';
+import type { AmqpConnection, AmqpMessage } from './amqp-types.js';
 import {
-  ConfigurationError,
-  systemClock,
-  toErrorInfo,
-  type CloseOptions,
-  type EventEnvelope,
-  type Transport,
-  type TransportMessageHandler,
-  type TransportSubscriptionHooks,
-} from '@relaybus/core';
-import { schedule } from '@relaybus/core/internal';
-import type {
-  AmqpConfirmChannel,
-  AmqpConnection,
-  AmqpMessage,
-  AmqpPublishOptions,
-} from './amqp-types.js';
+  ConfirmedPublishing,
+  recordUnroutable,
+  unroutableKey,
+  type Publisher,
+} from './confirmed-publishing.js';
 import { ConnectionSupervisor } from './connection-supervisor.js';
-import {
-  RabbitMqPublishRejectedError,
-  RabbitMqUnavailableError,
-  UnroutableMessageError,
-} from './errors.js';
+import { RabbitMqUnavailableError } from './errors.js';
 import {
   resolveQueueName,
   resolveSettings,
@@ -32,14 +20,6 @@ import { SerialQueue } from './serial-queue.js';
 import { assertConsumerTopology, assertExchange, type ConsumerTopology } from './topology.js';
 import { assertShortString } from './wire-format.js';
 
-/** Publisher channel plus the broker returns not yet matched with their confirm. */
-interface Publisher {
-  readonly channel: AmqpConfirmChannel;
-  readonly unroutable: Map<string, number>;
-  /** Set when the channel closed, also while the transport was still being set up. */
-  closed: boolean;
-}
-
 interface LiveConnection {
   readonly connection: AmqpConnection;
   readonly publisher: Publisher;
@@ -49,19 +29,6 @@ interface Subscription {
   readonly topology: ConsumerTopology;
   readonly consumer: QueueConsumer;
 }
-
-/** amqplib reports a negative acknowledgement with this exact message. */
-const NACK_MESSAGE = 'message nacked';
-
-/** One message to publish and wait for the broker's confirm. */
-type PublishConfirmedInput = {
-  readonly exchange: string;
-  readonly routingKey: string;
-  readonly content: Buffer;
-  readonly options: AmqpPublishOptions;
-  /** Ask the broker to return the message when no queue is bound to its routing key. */
-  readonly mandatory: boolean;
-};
 
 /**
  * RabbitMQ {@link Transport} built on amqplib.
@@ -85,11 +52,12 @@ type PublishConfirmedInput = {
  * consumer. Events published meanwhile are rejected, and therefore retried by
  * the outbox, rather than buffered in memory.
  */
-export class RabbitMqTransport implements Transport {
+export class RabbitMqTransport extends SubscribingTransport {
   readonly name: string;
   readonly system = 'rabbitmq';
   readonly #settings: ResolvedTransportSettings;
   readonly #supervisor: ConnectionSupervisor;
+  readonly #publishing: ConfirmedPublishing;
   /** Serializes topology work so a subscription never races a reconnect. */
   readonly #topologyWork = new SerialQueue();
   #live: LiveConnection | undefined;
@@ -97,8 +65,10 @@ export class RabbitMqTransport implements Transport {
   #closing: Promise<void> | undefined;
 
   constructor(options: RabbitMqTransportOptions) {
+    super();
     this.#settings = resolveSettings(options);
     this.name = this.#settings.name;
+    this.#publishing = new ConfirmedPublishing(this.name, this.#settings.publishTimeoutMs);
     this.#supervisor = new ConnectionSupervisor({
       connect: this.#settings.connect,
       reconnect: this.#settings.reconnect,
@@ -148,7 +118,7 @@ export class RabbitMqTransport implements Transport {
   async publish(envelope: EventEnvelope, destination: string): Promise<void> {
     assertShortString('Destination (routing key)', destination);
     const { content, options } = this.#settings.encode(envelope);
-    await this.#publishConfirmed({
+    await this.#publishing.publish(this.#live?.publisher, {
       exchange: this.#settings.exchange,
       routingKey: destination,
       content,
@@ -157,68 +127,16 @@ export class RabbitMqTransport implements Transport {
     });
   }
 
-  async #publishConfirmed(input: PublishConfirmedInput): Promise<void> {
-    const { exchange, routingKey, content, options, mandatory } = input;
-    const publisher = this.#live?.publisher;
-    const eventId = options.messageId ?? 'unknown';
-    if (publisher === undefined) {
-      throw new RabbitMqUnavailableError(
-        `[RabbitMqTransport](publish) Not connected to the broker | transport=${this.name} destination=${routingKey}`,
-      );
-    }
-    const returnKey = unroutableKey(options.messageId, routingKey);
-    await new Promise<void>((resolve, reject) => {
-      const cancelTimeout = schedule(systemClock, {
-        run: () => {
-          reject(
-            new RabbitMqUnavailableError(
-              `[RabbitMqTransport](publish) No broker confirm within ${this.#settings.publishTimeoutMs}ms | transport=${this.name} eventId=${eventId} destination=${routingKey}`,
-            ),
-          );
-        },
-        delayMs: this.#settings.publishTimeoutMs,
-      });
-      const onConfirm = (error: Error | null | undefined): void => {
-        cancelTimeout();
-        const returned = takeUnroutable(publisher.unroutable, returnKey);
-        if (error) {
-          reject(this.#toPublishError(error, { eventId, destination: routingKey }));
-        } else if (returned) {
-          reject(
-            new UnroutableMessageError(
-              `[RabbitMqTransport](publish) No queue is bound to the routing key | transport=${this.name} eventId=${eventId} destination=${routingKey}`,
-            ),
-          );
-        } else {
-          resolve();
-        }
-      };
-      try {
-        publisher.channel.publish(
-          exchange,
-          routingKey,
-          content,
-          { ...options, mandatory },
-          onConfirm,
-        );
-      } catch (error) {
-        cancelTimeout();
-        reject(this.#toPublishError(error, { eventId, destination: routingKey }));
-      }
-    });
-  }
-
   /**
    * Binds one durable quorum queue to `destinations` and delivers its messages
    * to `onMessage`. Call it once per transport; give each subscription its own
    * transport instance, with its own `name` and `consumerGroup`.
    */
-  // eslint-disable-next-line relaybus/max-two-params -- the Transport.subscribe signature
-  async subscribe(
-    destinations: readonly string[],
-    onMessage: TransportMessageHandler,
-    hooks?: TransportSubscriptionHooks,
-  ): Promise<void> {
+  protected async openSubscription({
+    destinations,
+    onMessage,
+    hooks,
+  }: TransportSubscription): Promise<void> {
     if (this.#subscription !== undefined) {
       throw new ConfigurationError(
         `Transport '${this.name}' already has a subscription; create another transport for another consumer group`,
@@ -229,41 +147,58 @@ export class RabbitMqTransport implements Transport {
     }
     const queue = resolveQueueName(this.#settings);
     const subscription: Subscription = {
-      topology: {
-        exchange: this.#settings.exchange,
-        queue,
-        deadLetterExchange: this.#settings.deadLetterExchange,
-        deadLetterQueue: this.#settings.deadLetterQueue ?? `${queue}.dead`,
-        deliveryLimit: this.#settings.deliveryLimit,
-        ordered: this.#settings.ordered,
-        retryDelaysMs: this.#settings.retryLadder,
-        destinations,
-      },
-      consumer: new QueueConsumer({
-        queue,
-        prefetch: this.#settings.prefetch,
-        handlerRetry: this.#settings.handlerRetry,
-        redelivery: this.#settings.redelivery,
-        retryLadder: this.#settings.retryLadder,
-        redeliveryMaxAgeMs: this.#settings.redeliveryMaxAgeMs,
-        ordered: this.#settings.ordered,
-        deadLetterExchange: this.#settings.deadLetterExchange,
-        republish: ({ exchange, routingKey }, { content, options }) =>
-          this.#publishConfirmed({ exchange, routingKey, content, options, mandatory: true }),
-        shutdownTimeoutMs: this.#settings.shutdownTimeoutMs,
-        onMessage,
-        ...(hooks === undefined ? {} : { onInvalidMessage: hooks.onInvalidMessage }),
-        decode: this.#settings.decode,
-        onConsumerLost: (reason) => this.#supervisor.recover(reason),
-        logger: this.#settings.logger,
-        random: this.#settings.random,
-      }),
+      topology: this.#topologyOf(queue, destinations),
+      consumer: this.#createConsumer(queue, { onMessage, hooks }),
     };
     await this.#topologyWork.run(async () => {
       this.#subscription = subscription;
       if (this.#live !== undefined) {
         await this.#startConsuming(this.#live.connection, subscription);
       }
+    });
+  }
+
+  #topologyOf(queue: string, destinations: readonly string[]): ConsumerTopology {
+    return {
+      exchange: this.#settings.exchange,
+      queue,
+      deadLetterExchange: this.#settings.deadLetterExchange,
+      deadLetterQueue: this.#settings.deadLetterQueue ?? `${queue}.dead`,
+      deliveryLimit: this.#settings.deliveryLimit,
+      ordered: this.#settings.ordered,
+      retryDelaysMs: this.#settings.retryLadder,
+      destinations,
+    };
+  }
+
+  #createConsumer(
+    queue: string,
+    { onMessage, hooks }: Pick<TransportSubscription, 'onMessage' | 'hooks'>,
+  ): QueueConsumer {
+    return new QueueConsumer({
+      queue,
+      prefetch: this.#settings.prefetch,
+      handlerRetry: this.#settings.handlerRetry,
+      redelivery: this.#settings.redelivery,
+      retryLadder: this.#settings.retryLadder,
+      redeliveryMaxAgeMs: this.#settings.redeliveryMaxAgeMs,
+      ordered: this.#settings.ordered,
+      deadLetterExchange: this.#settings.deadLetterExchange,
+      republish: ({ exchange, routingKey }, { content, options }) =>
+        this.#publishing.publish(this.#live?.publisher, {
+          exchange,
+          routingKey,
+          content,
+          options,
+          mandatory: true,
+        }),
+      shutdownTimeoutMs: this.#settings.shutdownTimeoutMs,
+      onMessage,
+      ...(hooks === undefined ? {} : { onInvalidMessage: hooks.onInvalidMessage }),
+      decode: this.#settings.decode,
+      onConsumerLost: (reason) => this.#supervisor.recover(reason),
+      logger: this.#settings.logger,
+      random: this.#settings.random,
     });
   }
 
@@ -341,41 +276,4 @@ export class RabbitMqTransport implements Transport {
     this.#live = undefined;
     this.#subscription?.consumer.detach();
   }
-
-  #toPublishError(
-    error: unknown,
-    { eventId, destination }: { readonly eventId: string; readonly destination: string },
-  ): Error {
-    const { message } = toErrorInfo(error);
-    const detail = `transport=${this.name} eventId=${eventId} destination=${destination} error=${message}`;
-    return message === NACK_MESSAGE
-      ? new RabbitMqPublishRejectedError(
-          `[RabbitMqTransport](publish) Broker nacked the message | ${detail}`,
-          { cause: error },
-        )
-      : new RabbitMqUnavailableError(`[RabbitMqTransport](publish) Publish failed | ${detail}`, {
-          cause: error,
-        });
-  }
-}
-
-function unroutableKey(messageId: unknown, routingKey: string): string {
-  return `${String(messageId)}\n${routingKey}`;
-}
-
-function recordUnroutable(unroutable: Map<string, number>, key: string): void {
-  unroutable.set(key, (unroutable.get(key) ?? 0) + 1);
-}
-
-function takeUnroutable(unroutable: Map<string, number>, key: string): boolean {
-  const count = unroutable.get(key);
-  if (count === undefined) {
-    return false;
-  }
-  if (count === 1) {
-    unroutable.delete(key);
-  } else {
-    unroutable.set(key, count - 1);
-  }
-  return true;
 }
