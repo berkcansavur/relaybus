@@ -40,6 +40,37 @@ claimer that keeps claiming drains the workload. Pass `keepsCompletedRecords:
 true` when the store keeps a completion history; run the suite once per mode the
 store supports.
 
+## Codec contract
+
+Before adopting a wire format that other services already use, prove that a codec writes and reads it exactly. Give
+`kafkaCodecContract` or `rabbitMqCodecContract` captured messages and the events they carry; each case is one test that
+checks `encode(event)` against the captured message (value or body byte for byte or as canonical JSON, key, headers,
+timestamp or properties) and that decoding the captured message gives the event:
+
+```ts
+import { kafkaCodecContract } from '@relaybus/testing';
+import { decodeKafkaRecord } from '@relaybus/kafka';
+
+kafkaCodecContract('orders format', {
+  encode: orderCodec.encode,
+  decode: (record) => decodeKafkaRecord(orderCodec, record),
+  compare: 'bytes', // or 'json' to ignore key order and spacing
+  ignoreHeaders: ['traceparent'],
+  cases: [
+    {
+      name: 'order placed',
+      envelope, // the event
+      record: { topic: 'orders', key: 'order-1', headers: {}, value: '{"orderId":"1"}' }, // the captured record
+      // only: 'decode', // for a message only other producers write
+    },
+  ],
+});
+```
+
+`rabbitMqCodecContract` takes the same shape with `decodeRabbitMqMessage` from `@relaybus/rabbitmq` and captured messages
+(routing key, properties, headers, body). `kafkaCodecMismatches` and `rabbitMqCodecMismatches` return the differences as
+text lines instead of registering tests.
+
 ## FakeClock
 
 ```ts

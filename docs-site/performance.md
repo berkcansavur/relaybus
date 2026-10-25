@@ -16,6 +16,7 @@ Read the numbers as ratios on one laptop, not as capacity planning. Where a cell
 - [Mixed load and latency](#mixed-load-and-latency)
 - [What the database does per delivery](#what-the-database-does-per-delivery)
 - [Where it is not better](#where-it-is-not-better)
+- [0.4.0 vs 0.3.1](#_0-4-0-vs-0-3-1)
 - [0.3.0 vs 0.2.0](#_0-3-0-vs-0-2-0)
 - [Deep dives](#deep-dives)
 - [Reproduce it](#reproduce-it)
@@ -164,6 +165,39 @@ In 0.1.0 a delivery row was updated three times (claim, lease renewals, completi
 - **MongoDB batch-100 publish:** 31,600 to 31,167 events/s (0.98x, three samples): no change, and a higher p99 for the transaction (79 ms to 126 ms, interval inconclusive).
 - **Mixed load near saturation:** p99 can be higher than 0.1.0's, see above.
 - **Single sample cells** may move by 10 % or more in either direction on a re-run. The directions are consistent with the exact counters, which is why they are listed.
+
+## 0.4.0 vs 0.3.1
+
+0.4.0 adds features (a `pool` for ORM stores, wake-up at the caller's commit, new Kafka options) and leaves the delivery path alone, and the numbers agree: publish and dispatch are within noise of 0.3.1 on PostgreSQL and MongoDB, and the statements per delivery are identical. Every sample was valid (6 of 6 per cell).
+
+Same machine as above (fingerprint `f2d136dc9ad0`), candidate `a3b56bc` against `v0.3.1`, interleaved, **3 samples per side**. Throughput is candidate / base:
+
+| Scenario                                     | Ratio | Interval (95 %) | Verdict      |
+| -------------------------------------------- | ----: | --------------- | ------------ |
+| PostgreSQL publish, P=8, 1 event per call    | 1.011 | 0.96 to 1.05    | no change    |
+| PostgreSQL publish, P=8, 100 per call        | 1.005 | 1.00 to 1.37    | inconclusive |
+| PostgreSQL publish, 100 per call, 5 handlers | 1.033 | 0.55 to 1.88    | inconclusive |
+| MongoDB publish, P=8, 100 per call           | 0.984 | 0.97 to 1.17    | within noise |
+| PostgreSQL dispatch, 1 instance, `tuned`     | 1.062 | 1.00 to 1.47    | inconclusive |
+| PostgreSQL dispatch, 4 instances, `tuned`    | 1.048 | 0.91 to 1.13    | inconclusive |
+| PostgreSQL dispatch, 10 hot keys, `tuned`    | 0.996 | 0.99 to 1.00    | no change    |
+| MongoDB dispatch, 1 instance, `tuned`        | 1.009 | 0.97 to 1.20    | inconclusive |
+
+Database counters per delivery: one delivery delete and one completion insert, as in 0.3.1. The PostgreSQL dispatch cells show `lanes` updates per delivery at 0.97x (1 instance) and 0.92x (4 instances) and WAL bytes at 0.95x and 0.88x; hot keys show WAL bytes at 1.04x and WAL records at 1.03x. Publish counters (18 per PostgreSQL cell, 6 per MongoDB cell) are all within 3 %.
+
+### About the two counter flags
+
+The benchmark gate flagged the 10 hot keys cell for WAL bytes (4.0 %) and WAL records (3.1 %) per delivery, so the run is reported as a gate failure. We do not read that as a regression, for this reason: the gate compares counters of two databases that the harness generates randomly, one preloaded for each side, and each side dispatches its own. To see how large that difference is on identical code, the harness ran `v0.3.1` against itself (A/A, `2026-10-25T18-59-07-978Z`). That run also failed the gate, with `lanes.updPerUnit` 9.5 % higher (1.09x) on a side that has no change at all. A separate candidate run of the same two dispatch cells (`2026-10-25T18-55-40-858Z`) passed: `lanes.updPerUnit` 0.90x and 18 counters within 3 % on the hot keys cell.
+
+So in the one A/A run the counter gate moved by 9.5 % on identical code, well above its 3 % threshold; that is one run, not a measured noise floor. What this does and does not show: a 3 to 4 % difference in one cell is inside that floor and cannot be told from noise with 3 samples, and the statements per delivery, which do not depend on the preloaded data, are identical. It does not prove that WAL per delivery is exactly the same, only that nothing here separates it from 0.3.1.
+
+### Reports
+
+The raw reports, samples and environment of the three runs are in `benchmarks/results/runs/`:
+
+- `2026-10-25T19-02-48-248Z`: the interleaved run of all the cells above (the quick gate set).
+- `2026-10-25T18-59-07-978Z`: the A/A run, `v0.3.1` against `v0.3.1`, two dispatch cells.
+- `2026-10-25T18-55-40-858Z`: the candidate against `v0.3.1` on the same two dispatch cells.
 
 ## 0.3.0 vs 0.2.0
 
