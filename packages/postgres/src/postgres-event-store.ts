@@ -30,7 +30,7 @@ import { PostgresMaintenance } from './postgres-maintenance.js';
 import type { PostgresStoreState } from './postgres-store-state.js';
 import { createPostgresSchemaStatements, postgresSchemaMarker } from './schema.js';
 import { PostgresStatements } from './statements.js';
-import { applyTransactionTimeout } from './transaction-timeouts.js';
+import { inBudgetedTransaction } from './transaction-timeouts.js';
 
 /** Options shared by every way of connecting. */
 export interface PostgresEventStoreSettings extends PostgresSchemaOptions {
@@ -231,24 +231,25 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
    * Runs `work` in a transaction of the executor. With `options.timeoutMs` (from `bus.transaction`)
    * the server holds the transaction to the budget: `statement_timeout`, and for executors with
    * `sessionTimeouts` (`pg`) also `idle_in_transaction_session_timeout` and, on PostgreSQL 17+,
-   * `transaction_timeout`, all scoped to the transaction.
+   * `transaction_timeout`, all scoped to the transaction. An executor with `transactionWithSettings`
+   * (`PgExecutor`) sends them with `BEGIN`, so the budget costs no round trip.
    */
   async transaction<T>(
     work: (transaction: TTransaction) => Promise<T>,
     options?: EventStoreTransactionOptions,
   ): Promise<T> {
     const own = { wake: false };
-    const result = await this.#state.executor.transaction(async (transaction) => {
+    const tracked = async (transaction: TTransaction): Promise<T> => {
       this.#state.ownTransactions.set(transaction, own);
       try {
-        if (options !== undefined) {
-          await applyTransactionTimeout(this.#state, { transaction, timeoutMs: options.timeoutMs });
-        }
         return await work(transaction);
       } finally {
         this.#state.ownTransactions.delete(transaction);
       }
-    });
+    };
+    const result = await (options === undefined
+      ? this.#state.executor.transaction(tracked)
+      : inBudgetedTransaction(this.#state, { work: tracked, timeoutMs: options.timeoutMs }));
     if (own.wake) {
       this.#appender.wakeAfterCommit();
     }

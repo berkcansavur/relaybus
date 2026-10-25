@@ -52,7 +52,22 @@ export class PgExecutor implements PostgresExecutor<PoolClient> {
   /** The connection listens for `error` during the transaction, so a server-ended session fails the transaction instead of the process. */
   readonly sessionTimeouts = true;
 
-  async transaction<T>(work: (transaction: PoolClient) => Promise<T>): Promise<T> {
+  transaction<T>(work: (transaction: PoolClient) => Promise<T>): Promise<T> {
+    return this.#transaction(work, 'BEGIN');
+  }
+
+  /**
+   * Sends `BEGIN` and `settings` as one simple query: the transaction starts with them in one round
+   * trip. `settings` carries no parameters, the simple query protocol has none.
+   */
+  transactionWithSettings<T>(
+    work: (transaction: PoolClient) => Promise<T>,
+    settings: string,
+  ): Promise<T> {
+    return this.#transaction(work, `BEGIN; ${settings}`);
+  }
+
+  async #transaction<T>(work: (transaction: PoolClient) => Promise<T>, begin: string): Promise<T> {
     const client = await this.#pool.connect();
     let released = false;
     const release = (destroy: boolean): void => {
@@ -79,7 +94,7 @@ export class PgExecutor implements PostgresExecutor<PoolClient> {
     };
     client.on('error', onSessionEnded);
     try {
-      await client.query('BEGIN');
+      await client.query(begin);
       const result = await work(client);
       await client.query('COMMIT');
       release(false);

@@ -87,7 +87,9 @@ connection while the transaction runs) also get `idle_in_transaction_session_tim
 `transaction_timeout`, so a transaction left idle by a slow external call is ended by the server and its locks are
 released. The other adapters keep only `statement_timeout`, because a server-ended session would emit an unhandled
 `error` on their checked-out `pg` connection; the bus still rolls back an overrun before the commit. The caller gets a
-`TransactionTimeoutError` with the server error as `cause`.
+`TransactionTimeoutError` with the server error as `cause`. `PgExecutor` sends the settings in the round trip of `BEGIN`
+(the optional executor method `transactionWithSettings`), so the budget costs no extra round trip; executors without it
+send them as the first statement of the transaction.
 
 **Prisma is not integration-tested yet.** The adapter is typed structurally (no Prisma dependency) and unit-tested
 against a fake client only. Prisma interactive transactions default to a 5 s timeout, so pass

@@ -41,6 +41,16 @@ export interface PostgresExecutor<TTransaction> {
    */
   readonly sessionTimeouts?: boolean;
   transaction<T>(work: (transaction: TTransaction) => Promise<T>): Promise<T>;
+  /**
+   * Optional. Opens a transaction like {@link PostgresExecutor.transaction} and runs `settings` (one
+   * statement without parameters) in the same round trip as its `BEGIN`. The store holds
+   * `bus.transaction` to its budget with it; an executor without it gets a statement of its own,
+   * one round trip more per transaction. `PgExecutor` implements it.
+   */
+  transactionWithSettings?<T>(
+    work: (transaction: TTransaction) => Promise<T>,
+    settings: string,
+  ): Promise<T>;
   query(
     sql: string,
     parameters: readonly PostgresParameter[],

@@ -46,6 +46,8 @@ export function startPerfDatabase(): Promise<TestDatabase> {
 export class CountingExecutor implements PostgresExecutor<PoolClient> {
   readonly #inner: PgExecutor;
   statements = 0;
+  /** Messages the client sent and waited on: every `client.query` of a transaction or a statement. */
+  roundTrips = 0;
   /** Statements the server had to parse and plan from their text: sent unnamed, or named for the first time on the connection. */
   parsed = 0;
   explaining: PlanNode[] | undefined;
@@ -64,6 +66,7 @@ export class CountingExecutor implements PostgresExecutor<PoolClient> {
         const [first] = arguments_;
         const name = typeof first === 'object' ? (first as { name?: string }).name : undefined;
         const text = typeof first === 'string' ? first : (first as { text: string }).text;
+        this.roundTrips += 1;
         if (name === undefined ? !TRANSACTION_CONTROL.has(text) : !prepared.has(name)) {
           this.parsed += 1;
         }
@@ -78,6 +81,14 @@ export class CountingExecutor implements PostgresExecutor<PoolClient> {
   transaction<T>(work: (transaction: PoolClient) => Promise<T>): Promise<T> {
     this.statements += 2;
     return this.#inner.transaction(work);
+  }
+
+  transactionWithSettings<T>(
+    work: (transaction: PoolClient) => Promise<T>,
+    settings: string,
+  ): Promise<T> {
+    this.statements += 2;
+    return this.#inner.transactionWithSettings(work, settings);
   }
 
   async query(
@@ -113,6 +124,16 @@ export class CountingExecutor implements PostgresExecutor<PoolClient> {
     const before = this.statements;
     await operation();
     return this.statements - before;
+  }
+
+  /** Statements and round trips on the wire of `operation`, counted apart. */
+  async countBoth(
+    operation: () => Promise<unknown>,
+  ): Promise<{ readonly statements: number; readonly roundTrips: number }> {
+    const statements = this.statements;
+    const roundTrips = this.roundTrips;
+    await operation();
+    return { statements: this.statements - statements, roundTrips: this.roundTrips - roundTrips };
   }
 }
 
@@ -177,18 +198,38 @@ export async function publish(
   handlers: readonly string[] = ['h'],
   now: Date = at(0),
 ): Promise<void> {
-  await store.transaction((transaction) =>
-    store.append(
-      transaction,
-      events.map((event) => ({
-        event,
-        deliveries: handlers.map((handler) => ({
-          ...createDelivery(handler, now),
-          id: nextId('delivery'),
+  await publishWith(store, { events, handlers, now, options: undefined });
+}
+
+/** {@link publish} with the transaction options of `bus.transaction` (its time budget). */
+export async function publishWith(
+  store: PostgresEventStore,
+  {
+    events,
+    handlers = ['h'],
+    now = at(0),
+    options,
+  }: {
+    readonly events: readonly EventEnvelope[];
+    readonly handlers?: readonly string[];
+    readonly now?: Date;
+    readonly options: { readonly timeoutMs: number } | undefined;
+  },
+): Promise<void> {
+  await store.transaction(
+    (transaction) =>
+      store.append(
+        transaction,
+        events.map((event) => ({
+          event,
+          deliveries: handlers.map((handler) => ({
+            ...createDelivery(handler, now),
+            id: nextId('delivery'),
+          })),
         })),
-      })),
-      now,
-    ),
+        now,
+      ),
+    options,
   );
 }
 
