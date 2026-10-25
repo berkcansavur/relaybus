@@ -231,8 +231,9 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
    * Runs `work` in a transaction of the executor. With `options.timeoutMs` (from `bus.transaction`)
    * the server holds the transaction to the budget: `statement_timeout`, and for executors with
    * `sessionTimeouts` (`pg`) also `idle_in_transaction_session_timeout` and, on PostgreSQL 17+,
-   * `transaction_timeout`, all scoped to the transaction. An executor with `transactionWithSettings`
-   * (`PgExecutor`) sends them with `BEGIN`, so the budget costs no round trip.
+   * `transaction_timeout`, all scoped to the transaction. An executor with `transactionWithBudget`
+   * (`PgExecutor`) sets them with `BEGIN`, so the budget costs no round trip; on a pool the store
+   * created they are kept per connection and sent only when the connection does not have them yet.
    */
   async transaction<T>(
     work: (transaction: TTransaction) => Promise<T>,
@@ -478,8 +479,10 @@ function connect<TTransaction>(
     ownedPool = pool;
   }
   // Without an executor the transaction type is PoolClient, as the default type argument states.
+  // A pool of its own keeps the budget per connection; a pooler is what preparedStatements: false is for.
   const executor = new PgExecutor(pool, {
     logger,
+    sessionBudget: ownedPool !== undefined && options.preparedStatements !== false,
   }) as unknown as PostgresExecutor<TTransaction>;
   return { executor, pool, ownedPool };
 }

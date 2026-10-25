@@ -7,6 +7,7 @@ import type {
   PostgresQueryOptions,
   PostgresRow,
 } from './executor.js';
+import { SESSION_DEFAULTS_SQL, budgetSettingsSql, budgetValue } from './transaction-timeouts.js';
 
 /**
  * SQLSTATEs of a named statement the server does not know (26000) or already has under that name
@@ -18,7 +19,24 @@ const FOREIGN_SESSION_ERRORS = new Set(['26000', '42P05']);
 export interface PgExecutorOptions {
   /** Receives the warning sent when prepared statements are switched off. Default `console`. */
   readonly logger?: RelayBusLogger;
+  /**
+   * The pool is this executor's alone (the store sets it for the pool it creates from
+   * `connectionString`). A transaction budget then becomes a session setting of the connection, sent
+   * with `BEGIN` only when the connection does not have it yet, and a transaction without a budget on
+   * such a connection puts the session defaults back in its `BEGIN`. Statements outside a
+   * transaction run under the budget the connection last got. Never set it for a pool other code
+   * uses, or behind a pooler in transaction mode (session settings would reach other clients); the
+   * executor stops it by itself when it notices a pooler (see prepared statements). Default `false`.
+   */
+  readonly sessionBudget?: boolean;
 }
+
+/** How a transaction starts on one connection, and what its commit tells about the session. */
+type TransactionStart = {
+  readonly begin: string;
+  /** The budget the session keeps once the transaction committed; `null` for the defaults. */
+  readonly sessionValue?: string | null;
+};
 
 /** Hex digits of the statement hash in a prepared statement name. */
 const STATEMENT_NAME_DIGITS = 24;
@@ -43,31 +61,67 @@ export class PgExecutor implements PostgresExecutor<PoolClient> {
   readonly #logger: RelayBusLogger;
   readonly #names = new Map<string, string>();
   #preparing = true;
+  readonly #sessionBudget: boolean;
+  /** The budget each connection keeps at session level (`sessionBudget`); absent for the defaults. */
+  readonly #sessionValues = new WeakMap<PoolClient, string>();
 
   constructor(pool: Pool, options: PgExecutorOptions = {}) {
     this.#pool = pool;
     this.#logger = options.logger ?? console;
+    this.#sessionBudget = options.sessionBudget === true;
   }
 
   /** The connection listens for `error` during the transaction, so a server-ended session fails the transaction instead of the process. */
   readonly sessionTimeouts = true;
 
   transaction<T>(work: (transaction: PoolClient) => Promise<T>): Promise<T> {
-    return this.#transaction(work, 'BEGIN');
+    // Once a pooler was noticed, which session a connection reaches is unknown: every transaction resets.
+    return this.#transaction(work, (client) =>
+      this.#sessionBudget && (!this.#preparing || this.#sessionValues.has(client))
+        ? { begin: `BEGIN; ${SESSION_DEFAULTS_SQL}`, sessionValue: null }
+        : { begin: 'BEGIN' },
+    );
   }
 
   /**
-   * Sends `BEGIN` and `settings` as one simple query: the transaction starts with them in one round
-   * trip. `settings` carries no parameters, the simple query protocol has none.
+   * Sends `BEGIN` and the budget settings as one simple query (the value as a literal: the simple
+   * query protocol has no parameters), so the budget costs no round trip. With `sessionBudget` a
+   * connection that already keeps this budget only gets `BEGIN`.
    */
-  transactionWithSettings<T>(
+  transactionWithBudget<T>(
     work: (transaction: PoolClient) => Promise<T>,
-    settings: string,
+    timeoutMs: number,
   ): Promise<T> {
-    return this.#transaction(work, `BEGIN; ${settings}`);
+    const value = budgetValue(timeoutMs);
+    const settings = (scope: 'transaction' | 'session'): string =>
+      budgetSettingsSql({ value: `'${value}'`, sessionTimeouts: true, scope });
+    return this.#transaction(work, (client) => {
+      if (!this.#keepsSessionBudget()) {
+        return { begin: `BEGIN; ${settings('transaction')}` };
+      }
+      return this.#sessionValues.get(client) === value
+        ? { begin: 'BEGIN' }
+        : { begin: `BEGIN; ${settings('session')}`, sessionValue: value };
+    });
   }
 
-  async #transaction<T>(work: (transaction: PoolClient) => Promise<T>, begin: string): Promise<T> {
+  #recordSession(client: PoolClient, sessionValue: string | null | undefined): void {
+    if (sessionValue === null) {
+      this.#sessionValues.delete(client);
+    } else if (sessionValue !== undefined) {
+      this.#sessionValues.set(client, sessionValue);
+    }
+  }
+
+  /** A pooler that hands out other server sessions (noticed by prepared statements) shares session settings. */
+  #keepsSessionBudget(): boolean {
+    return this.#sessionBudget && this.#preparing;
+  }
+
+  async #transaction<T>(
+    work: (transaction: PoolClient) => Promise<T>,
+    start: (client: PoolClient) => TransactionStart,
+  ): Promise<T> {
     const client = await this.#pool.connect();
     let released = false;
     const release = (destroy: boolean): void => {
@@ -93,10 +147,16 @@ export class PgExecutor implements PostgresExecutor<PoolClient> {
       release(true);
     };
     client.on('error', onSessionEnded);
+    const { begin, sessionValue } = start(client);
     try {
       await client.query(begin);
       const result = await work(client);
-      await client.query('COMMIT');
+      const { command } = await client.query('COMMIT');
+      // Settings changed in a transaction that rolls back (a failed one answers COMMIT with ROLLBACK)
+      // return to what the session had before.
+      if (command === 'COMMIT') {
+        this.#recordSession(client, sessionValue);
+      }
       release(false);
       return result;
     } catch (error) {

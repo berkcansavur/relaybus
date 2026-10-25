@@ -48,6 +48,8 @@ export class CountingExecutor implements PostgresExecutor<PoolClient> {
   statements = 0;
   /** Messages the client sent and waited on: every `client.query` of a transaction or a statement. */
   roundTrips = 0;
+  /** SQL statements in those messages (`BEGIN; SELECT ...` is two). The server also counts trigger queries such as a foreign key check. */
+  sqlStatements = 0;
   /** Statements the server had to parse and plan from their text: sent unnamed, or named for the first time on the connection. */
   parsed = 0;
   explaining: PlanNode[] | undefined;
@@ -56,9 +58,12 @@ export class CountingExecutor implements PostgresExecutor<PoolClient> {
 
   readonly #getDatabase: () => TestDatabase;
 
-  constructor(pool: Pool, getDatabase: () => TestDatabase) {
+  constructor(
+    pool: Pool,
+    { getDatabase, sessionBudget }: { getDatabase: () => TestDatabase; sessionBudget: boolean },
+  ) {
     this.#getDatabase = getDatabase;
-    this.#inner = new PgExecutor(pool);
+    this.#inner = new PgExecutor(pool, { sessionBudget });
     pool.on('connect', (client) => {
       const prepared = new Set<string>();
       const query = client.query.bind(client) as (...arguments_: unknown[]) => unknown;
@@ -67,6 +72,7 @@ export class CountingExecutor implements PostgresExecutor<PoolClient> {
         const name = typeof first === 'object' ? (first as { name?: string }).name : undefined;
         const text = typeof first === 'string' ? first : (first as { text: string }).text;
         this.roundTrips += 1;
+        this.sqlStatements += text.split(';').filter((part) => part.trim().length > 0).length;
         if (name === undefined ? !TRANSACTION_CONTROL.has(text) : !prepared.has(name)) {
           this.parsed += 1;
         }
@@ -83,12 +89,12 @@ export class CountingExecutor implements PostgresExecutor<PoolClient> {
     return this.#inner.transaction(work);
   }
 
-  transactionWithSettings<T>(
+  transactionWithBudget<T>(
     work: (transaction: PoolClient) => Promise<T>,
-    settings: string,
+    timeoutMs: number,
   ): Promise<T> {
     this.statements += 2;
-    return this.#inner.transactionWithSettings(work, settings);
+    return this.#inner.transactionWithBudget(work, timeoutMs);
   }
 
   async query(
@@ -126,14 +132,19 @@ export class CountingExecutor implements PostgresExecutor<PoolClient> {
     return this.statements - before;
   }
 
-  /** Statements and round trips on the wire of `operation`, counted apart. */
-  async countBoth(
-    operation: () => Promise<unknown>,
-  ): Promise<{ readonly statements: number; readonly roundTrips: number }> {
-    const statements = this.statements;
-    const roundTrips = this.roundTrips;
+  /** Executor statements, round trips on the wire and SQL statements in them of `operation`. */
+  async countBoth(operation: () => Promise<unknown>): Promise<{
+    readonly statements: number;
+    readonly roundTrips: number;
+    readonly sqlStatements: number;
+  }> {
+    const { statements, roundTrips, sqlStatements } = this;
     await operation();
-    return { statements: this.statements - statements, roundTrips: this.roundTrips - roundTrips };
+    return {
+      statements: this.statements - statements,
+      roundTrips: this.roundTrips - roundTrips,
+      sqlStatements: this.sqlStatements - sqlStatements,
+    };
   }
 }
 
@@ -385,7 +396,8 @@ export function expectPlanWithinBudget(
 export interface PerfHelpers {
   readonly pools: Pool[];
   closePools(): Promise<void>;
-  createFixture(): Promise<Fixture>;
+  /** `sessionBudget`: the executor of a pool the store created itself (`connectionString`). */
+  createFixture(options?: { readonly sessionBudget?: boolean }): Promise<Fixture>;
   tupleCounters(fixture: Fixture): Promise<Record<Table, TableCounters>>;
   walPosition(): Promise<string>;
   walBytesSince(start: string): Promise<number>;
@@ -400,11 +412,11 @@ export function createPerfHelpers(getDatabase: () => TestDatabase): PerfHelpers 
   }
 
   /** A store on a fresh schema whose statements all run on one connection, so its statistics flush together. */
-  async function createFixture(): Promise<Fixture> {
+  async function createFixture({ sessionBudget = false } = {}): Promise<Fixture> {
     const schema = uniqueSchema();
     const pool = createTestPool(getDatabase().connectionString, 1);
     pools.push(pool);
-    const executor = new CountingExecutor(pool, getDatabase);
+    const executor = new CountingExecutor(pool, { getDatabase, sessionBudget });
     const store = new PostgresEventStore({ executor, schema });
     await store.setup();
     return { schema, store, executor, pool };

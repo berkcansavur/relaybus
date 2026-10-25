@@ -13,6 +13,7 @@ import {
   publishWith,
   events,
   difference,
+  type Fixture,
 } from './support/perf-design.js';
 
 class Probe extends defineEvent<{ index: number }>('perf.probe.v1') {}
@@ -163,25 +164,28 @@ describe('round trips per publish and completion', () => {
   it('publishes in a transaction held to a time budget with no more statements or round trips', async () => {
     const fixture = await createFixture();
     // bus.transaction passes its transactionTimeout; the store must not pay for it with a round trip.
-    const budgeted = { timeoutMs: 5_000 };
-    const count = async (
-      key: string | null,
-    ): Promise<{ readonly statements: number; readonly roundTrips: number }> => {
-      // Past the interval of the previous publish, so no trailing wake-up lands in the count.
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      return fixture.executor.countBoth(() =>
-        publishWith(fixture.store, {
-          events: events(1, () => key),
-          options: budgeted,
-        }),
-      );
-    };
-    const unkeyed = await count(null);
+    const unkeyed = await countBudgetedPublish(fixture, null);
     expectWithinBudget('postgres.publish.unkeyedSingle.statements', unkeyed.statements);
     expectWithinBudget('postgres.publish.unkeyedSingle.statements', unkeyed.roundTrips);
-    const keyed = await count('k');
+    expectWithinBudget('postgres.publish.budgetedSingle.sqlStatements', unkeyed.sqlStatements);
+    const keyed = await countBudgetedPublish(fixture, 'k');
     expectWithinBudget('postgres.publish.keyedSingle.statements', keyed.statements);
     expectWithinBudget('postgres.publish.keyedSingle.statements', keyed.roundTrips);
+    expectWithinBudget('postgres.publish.budgetedSingle.sqlStatements', keyed.sqlStatements);
+  });
+
+  it('publishes on a pool of its own with no budget statement once the connection keeps the budget', async () => {
+    const fixture = await createFixture({ sessionBudget: true });
+    // The first budgeted transaction on the connection sets the budget for the session, with BEGIN.
+    expect((await countBudgetedPublish(fixture, null)).roundTrips).toBe(3);
+    for (const key of [null, 'k']) {
+      const measured = await countBudgetedPublish(fixture, key);
+      expectWithinBudget('postgres.publish.unkeyedSingle.statements', measured.roundTrips);
+      expectWithinBudget(
+        'postgres.publish.ownedPoolBudgetedSingle.sqlStatements',
+        measured.sqlStatements,
+      );
+    }
   });
 
   it('keeps each bus.transaction publish within the budgeted round trips on a saturated pool', async () => {
@@ -264,3 +268,19 @@ describe('round trips per publish and completion', () => {
     );
   });
 });
+
+/** Statements and round trips of a publish of one event in a transaction held to a 5 s budget, as bus.transaction runs it. */
+async function countBudgetedPublish(
+  fixture: Fixture,
+  key: string | null,
+): Promise<{
+  readonly statements: number;
+  readonly roundTrips: number;
+  readonly sqlStatements: number;
+}> {
+  // Past the interval of the previous publish, so no trailing wake-up lands in the count.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  return fixture.executor.countBoth(() =>
+    publishWith(fixture.store, { events: events(1, () => key), options: { timeoutMs: 5_000 } }),
+  );
+}

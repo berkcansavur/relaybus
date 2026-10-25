@@ -148,6 +148,139 @@ describe.each(POSTGRES_IMAGES)('transaction time budget on %s', (image) => {
     expect(await store.listDeliveries({})).toEqual([]);
   });
 
+  describe('on a pool the store created', () => {
+    async function createOwnedBus(
+      options: { readonly preparedStatements?: boolean } = {},
+    ): Promise<{ bus: RelayBus<PoolClient>; store: PostgresEventStore<PoolClient> }> {
+      // One connection, so every transaction below runs on the same session.
+      const store = new PostgresEventStore<PoolClient>({
+        connectionString: database.connectionString,
+        poolConfig: { max: 1 },
+        schema: uniqueSchema(),
+        logger: quiet,
+        ...options,
+      });
+      await store.setup();
+      const bus = new RelayBus<PoolClient>({
+        store,
+        transactionTimeout: BUDGET,
+        dispatcher: { enabled: false },
+        logger: quiet,
+      });
+      bus.subscribe(OrderPlaced, () => undefined, { id: 'h' });
+      return { bus, store };
+    }
+
+    const sessionSettings = (
+      store: PostgresEventStore<PoolClient>,
+    ): Promise<Record<string, unknown>> =>
+      store.transaction(async (client) => {
+        const { rows } = await client.query<Record<string, unknown>>(
+          "SELECT current_setting('statement_timeout') AS statement, " +
+            "current_setting('idle_in_transaction_session_timeout') AS idle",
+        );
+        return rows[0]!;
+      });
+
+    it('keeps the budget on the connection and still cancels a statement past it', async () => {
+      const { bus, store } = await createOwnedBus();
+      try {
+        expect(await settingsInside(bus)).toEqual({
+          statement: '400ms',
+          idle: '400ms',
+          total: supportsTransactionTimeout ? '400ms' : null,
+        });
+        // The connection keeps the budget: this transaction only sends BEGIN, and is still held to it.
+        const error = await bus
+          .transaction(async (client) => {
+            await bus.publish(new OrderPlaced({ orderId: 'o-1' }));
+            await client.query('SELECT pg_sleep(5)');
+          })
+          .catch((caught: unknown) => caught);
+
+        expect(error).toBeInstanceOf(TransactionTimeoutError);
+        expect(['57014', '25P04']).toContain(((error as Error).cause as { code?: string }).code);
+        expect(await store.listDeliveries({})).toEqual([]);
+        expect(await settingsInside(bus)).toMatchObject({ statement: '400ms', idle: '400ms' });
+      } finally {
+        await store.close();
+      }
+    });
+
+    it('gives a transaction without a budget the session defaults, and the next budget back', async () => {
+      const { bus, store } = await createOwnedBus();
+      try {
+        await settingsInside(bus);
+        // A transactional handler or setup() runs without a budget, as it did before.
+        expect(await sessionSettings(store)).toEqual({ statement: '0', idle: '0' });
+        expect(await sessionSettings(store)).toEqual({ statement: '0', idle: '0' });
+        expect(await settingsInside(bus)).toMatchObject({ statement: '400ms', idle: '400ms' });
+      } finally {
+        await store.close();
+      }
+    });
+
+    it('sets the budget again after a transaction that set it rolled back', async () => {
+      const { bus, store } = await createOwnedBus();
+      try {
+        await expect(
+          bus.transaction(() => Promise.reject(new Error('rolled back'))),
+        ).rejects.toThrow('rolled back');
+        expect(await settingsInside(bus)).toMatchObject({ statement: '400ms', idle: '400ms' });
+      } finally {
+        await store.close();
+      }
+    });
+
+    it('sets the budget again after a transaction whose COMMIT answered ROLLBACK', async () => {
+      const { bus, store } = await createOwnedBus();
+      try {
+        // The work swallows a failed statement: the transaction is aborted and COMMIT rolls it back.
+        await bus.transaction(async (client) => {
+          await client.query('SELECT 1 / 0').catch(() => undefined);
+        });
+        expect(await settingsInside(bus)).toMatchObject({ statement: '400ms', idle: '400ms' });
+      } finally {
+        await store.close();
+      }
+    });
+
+    it('resets every transaction without a budget once a pooler was noticed', async () => {
+      const pool = createTestPool(database.connectionString, 1);
+      try {
+        const executor = new PgExecutor(pool, { logger: quiet, sessionBudget: true });
+        await executor.transactionWithBudget(() => Promise.resolve(), 400);
+        // A server session that lost the prepared statement looks like a pooler in transaction mode.
+        await executor.query('SELECT 1', [], undefined, { prepare: true });
+        await pool.query('DEALLOCATE ALL');
+        await executor.query('SELECT 1', [], undefined, { prepare: true });
+        const settings = (): Promise<unknown> =>
+          executor.transaction(async (client) => {
+            const { rows } = await client.query<{ s: string }>(
+              "SELECT current_setting('statement_timeout') AS s",
+            );
+            return rows[0];
+          });
+        expect(await settings()).toEqual({ s: '0' });
+        // The budget is transaction-scoped from now on, and the next transaction resets again.
+        await pool.query("SET statement_timeout = '7s'");
+        expect(await settings()).toEqual({ s: '0' });
+      } finally {
+        await pool.end();
+      }
+    });
+
+    it('scopes the budget to the transaction with preparedStatements: false (a pooler)', async () => {
+      const { bus, store } = await createOwnedBus({ preparedStatements: false });
+      try {
+        expect(await settingsInside(bus)).toMatchObject({ statement: '400ms', idle: '400ms' });
+        expect(await sessionSettings(store)).toEqual({ statement: '0', idle: '0' });
+      } finally {
+        await store.close();
+      }
+    });
+  });
+
   it('sets only statement_timeout for an executor that does not survive a server-ended session', async () => {
     const pg = new PgExecutor(database.pool, { logger: quiet });
     const executor: PostgresExecutor<PoolClient> = {
