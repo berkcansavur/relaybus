@@ -2,7 +2,6 @@
 // It loads the packages of the side named by BENCH_SIDE_ROOT, so a base and a candidate checkout run the same worker code.
 import { monitorEventLoopDelay, type IntervalHistogram } from 'node:perf_hooks';
 import type { EventStore, RelayBus, RelayBusObserver, Transport } from '@relaybus/core';
-import type { Pool } from 'pg';
 import type { MongoClient } from 'mongodb';
 import { loadSide } from './lib/deps.ts';
 import { Hist } from './lib/hist.ts';
@@ -106,7 +105,7 @@ function adapt<TTransaction>(
 
 let init: WorkerInit | undefined;
 let bus: BenchBus | undefined;
-let pool: Pool | undefined;
+let pgStore: { close(): Promise<void> } | undefined;
 let client: MongoClient | undefined;
 let loopDelay: IntervalHistogram | undefined;
 let stopping = false;
@@ -162,9 +161,14 @@ async function setup(message: WorkerInit): Promise<void> {
       )
     : undefined;
   if (backend === 'pg') {
-    pool = new side.pg.Pool({ connectionString: url, max: cfg.pool });
-    pool.on('error', () => undefined);
-    bus = adapt(new side.postgres.PostgresEventStore({ pool }), {
+    // The store creates and owns its pool, the usual deployment: both releases accept these options.
+    const store = new side.postgres.PostgresEventStore({
+      connectionString: url,
+      poolConfig: { max: cfg.pool },
+      logger: { log: () => undefined, warn: () => undefined, error: () => undefined },
+    });
+    pgStore = store;
+    bus = adapt(store, {
       dispatcher,
       observer,
       ...(transport === undefined ? {} : { transport }),
@@ -192,7 +196,7 @@ async function setup(message: WorkerInit): Promise<void> {
 }
 
 async function closeClients(): Promise<void> {
-  await pool?.end().catch(() => undefined);
+  await pgStore?.close().catch(() => undefined);
   await client?.close().catch(() => undefined);
 }
 
