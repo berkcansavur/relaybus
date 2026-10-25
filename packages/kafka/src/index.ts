@@ -36,6 +36,8 @@ export {
   type KafkaCodec,
   type KafkaEncodedRecord,
   type KafkaJsonEnvelopeMapping,
+  type KafkaRecordKey,
+  type KafkaRecordOptions,
 } from './codecs.js';
 export {
   KafkaTransport,

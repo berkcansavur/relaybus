@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   attempt,
   compareBodies,
+  type Attempt,
   compareDecoded,
   compareObjects,
   toBuffer,
@@ -54,6 +55,12 @@ export interface KafkaCodecCase {
    * example a record written without a key). Default `envelope`.
    */
   readonly decoded?: EventEnvelope;
+  /**
+   * Checks one direction only: `'decode'` for a message only other producers write (for
+   * example one without an id, which relaybus would add), `'encode'` for one only other
+   * consumers read. Default both.
+   */
+  readonly only?: 'encode' | 'decode';
 }
 
 export interface KafkaCodecContractOptions {
@@ -78,9 +85,15 @@ export async function kafkaCodecMismatches(
   testCase: KafkaCodecCase,
 ): Promise<string[]> {
   const { record } = testCase;
-  const encoding = await attempt('encode', () => options.encode(testCase.envelope));
+  const encoding: Attempt<KafkaWrittenRecord> =
+    testCase.only === 'decode'
+      ? { mismatches: [] }
+      : await attempt('encode', () => options.encode(testCase.envelope));
   const encoded = encoding.result;
-  const decoding = await attempt('decode', () => options.decode(delivered(record)));
+  const decoding: Attempt<EventEnvelope> =
+    testCase.only === 'encode'
+      ? { mismatches: [] }
+      : await attempt('decode', () => options.decode(delivered(record)));
   return [
     ...encoding.mismatches,
     ...(encoded === undefined ? [] : compareRecords(options, { record, encoded })),

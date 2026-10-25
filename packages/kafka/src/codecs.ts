@@ -1,4 +1,4 @@
-import type { EventEnvelope } from '@relaybus/core';
+import { ConfigurationError, type EventEnvelope } from '@relaybus/core';
 import {
   createJsonEnvelopeFormat,
   type JsonEnvelopeFormat,
@@ -71,7 +71,23 @@ export const cloudEventsStructured: KafkaCodec = Object.freeze({
  * event id in a `relaybus-event-id` header, which wins on read, so an outbox
  * retry that sends an event twice is still deduplicated.
  */
-export type KafkaJsonEnvelopeMapping = JsonEnvelopeMapping<'record-position'>;
+export type KafkaJsonEnvelopeMapping = JsonEnvelopeMapping<'record-position'> & KafkaRecordOptions;
+
+/**
+ * The record key of an event: `'event-key'` (the event key, default), `'none'` (no key) or a
+ * function of the event. The event key itself, and with it the outbox's per-key order, is
+ * unchanged: only the wire key differs. Records without a key are spread over partitions by the
+ * producer, so the per-key order holds up to the broker but not across partitions.
+ */
+export type KafkaRecordKey = 'event-key' | 'none' | ((envelope: EventEnvelope) => string | null);
+
+/** Record-level choices of {@link jsonEnvelope} besides the mapping. */
+export interface KafkaRecordOptions {
+  /** Default `'event-key'`. */
+  readonly recordKey?: KafkaRecordKey;
+  /** Whether the record gets a `content-type` header. Default true. */
+  readonly contentTypeHeader?: boolean;
+}
 
 const RECORD_POSITION = 'record-position';
 /** Carries the event id of a record relaybus wrote under `'record-position'`. */
@@ -82,8 +98,8 @@ const DEFAULT_CONTENT_TYPE = 'application/json';
  * A JSON wire format declared by a mapping, in both directions: for topics
  * shared with services that wrap events in their own envelope
  * (`{ "eventName": ..., "data": {...} }`, MassTransit) or send the bare
- * payload. The record key is always the event key; when `occurredAt` is not
- * mapped, the record timestamp carries it. Event headers that are message
+ * payload. The record key is the event key unless `recordKey` says otherwise;
+ * when `occurredAt` is not mapped, the record timestamp carries it. Event headers that are message
  * headers are written as they are, so a name the mapping uses for another
  * field is refused with {@link UnencodableEventError}, as are `content-type`
  * and `relaybus-event-id`.
@@ -104,16 +120,37 @@ export function jsonEnvelope(mapping: KafkaJsonEnvelopeMapping): KafkaCodec {
     transportIds: [RECORD_POSITION],
     failures: { invalid, unencodable: (reason) => new UnencodableEventError(reason) },
   });
-  const contentType = mapping.contentType ?? DEFAULT_CONTENT_TYPE;
+  const contentType: Record<string, string> =
+    mapping.contentTypeHeader === false
+      ? {}
+      : { [CONTENT_TYPE]: mapping.contentType ?? DEFAULT_CONTENT_TYPE };
   const stampsTime = mapping.occurredAt === undefined;
   const ownHeaders = (envelope: EventEnvelope): Record<string, string> =>
     mapping.id === RECORD_POSITION
-      ? { [CONTENT_TYPE]: contentType, [EVENT_ID_HEADER]: envelope.id }
-      : { [CONTENT_TYPE]: contentType };
+      ? { ...contentType, [EVENT_ID_HEADER]: envelope.id }
+      : contentType;
+  const recordKey = resolveRecordKey(mapping.recordKey);
   return {
-    encode: (envelope) => encodeJson(envelope, { format, stampsTime, ownHeaders }),
+    encode: (envelope) => encodeJson(envelope, { format, stampsTime, ownHeaders, recordKey }),
     decode: (record) => decodeJson(record, format),
   };
+}
+
+function resolveRecordKey(
+  recordKey: KafkaRecordKey | undefined,
+): (envelope: EventEnvelope) => string | null {
+  if (recordKey === undefined || recordKey === 'event-key') {
+    return (envelope) => envelope.key;
+  }
+  if (recordKey === 'none') {
+    return () => null;
+  }
+  if (typeof recordKey === 'function') {
+    return recordKey;
+  }
+  throw new ConfigurationError(
+    `jsonEnvelope recordKey must be 'event-key', 'none' or a function, received '${String(recordKey)}'`,
+  );
 }
 
 /** How {@link jsonEnvelope} writes: by the format, with its own headers, and the time as timestamp when unmapped. */
@@ -121,11 +158,12 @@ type JsonEncoding = {
   readonly format: JsonEnvelopeFormat;
   readonly stampsTime: boolean;
   readonly ownHeaders: (envelope: EventEnvelope) => Record<string, string>;
+  readonly recordKey: (envelope: EventEnvelope) => string | null;
 };
 
 function encodeJson(
   envelope: EventEnvelope,
-  { format, stampsTime, ownHeaders }: JsonEncoding,
+  { format, stampsTime, ownHeaders, recordKey }: JsonEncoding,
 ): KafkaEncodedRecord {
   assertRepresentable(envelope);
   const { body, headers } = format.write(envelope);
@@ -136,7 +174,7 @@ function encodeJson(
     );
   }
   return {
-    key: envelope.key,
+    key: recordKey(envelope),
     value: serializeJson(envelope, body),
     headers: { ...headers, ...ownHeaders(envelope) },
     ...(stampsTime ? { timestamp: recordTimestamp(envelope) } : {}),

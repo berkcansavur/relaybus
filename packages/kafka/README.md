@@ -78,7 +78,8 @@ const consuming = transport.isConsuming();
 
 ## Wire format
 
-Value: the JSON payload. Key: the envelope key (`null` means no key).
+Value: the JSON payload. Key: the event key (`null` means no key); `jsonEnvelope` can write
+another key or none (`recordKey`).
 
 | Header                               | Content                                                   |
 | ------------------------------------ | --------------------------------------------------------- |
@@ -172,8 +173,10 @@ indexes an array) or a header (`{ header: 'event-type' }`) for `type`, `id`, `pa
 `'whole-body'`), `key`, `source`, `occurredAt`, `correlationId`, `causationId` and `headers`, plus a
 `contentType`. `type`, `id` and `payload` are required by the types; `id: 'record-position'` uses the
 record position (records relaybus writes carry the event id in a `relaybus-event-id` header, which
-wins on read, so outbox retries stay deduplicated). The record key is always the event key, and when `occurredAt` is not mapped the
-record timestamp carries it. Event headers that are record headers keep their names, so a name the
+wins on read, so outbox retries stay deduplicated); `{ body: 'id', whenMissing: 'record-position' }`
+uses the body id when a record has one. The record key is the event key unless `recordKey` says
+otherwise (`'none'` or `(event) => string | null`), `contentTypeHeader: false` writes no
+`content-type` header, and when `occurredAt` is not mapped the record timestamp carries it. Event headers that are record headers keep their names, so a name the
 mapping uses, `content-type` or `relaybus-event-id`, is refused with `UnencodableEventError`. The
 [interoperability recipe](https://berkcansavur.github.io/relaybus/recipes/interoperating-with-other-services)
 has a full table and a MassTransit example.
@@ -225,6 +228,14 @@ The key decides the partition. Events with the same key are consumed in publish 
 without a key (`key: null`) are spread over partitions and have no ordering. Use the aggregate id
 as the key where order matters. Use the same partitioner in every producer of a topic, otherwise
 one key can map to different partitions depending on who wrote it.
+
+The record key is the event key by default. A `jsonEnvelope` codec with `recordKey: 'none'`
+writes records without a key, as many existing producers do, and `recordKey: (event) => ...`
+derives another one. The event key, and the outbox's per-key order, stay as they are: relaybus
+still publishes events of one key one after the other. But a record without a key is placed on a
+partition by the producer (round-robin or sticky), so events of one key can land on different
+partitions and consumers may see them out of order. Keep the event key on the wire wherever
+consumers rely on per-key order.
 
 ## Guarantees
 

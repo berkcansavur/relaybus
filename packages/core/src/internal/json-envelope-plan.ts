@@ -29,11 +29,17 @@ export type Plan = {
   readonly type: Location | FixedType;
   /** Undefined when the transport supplies the id. */
   readonly id: Location | undefined;
+  /** Whether a message without the mapped id gets the transport's own id instead. */
+  readonly idWhenMissing: boolean;
   readonly optional: Readonly<Partial<Record<OptionalName, Location>>>;
   /** Undefined when the payload is the whole body. */
   readonly payload: readonly string[] | undefined;
-  /** Undefined when event headers are the unmapped message headers. */
+  /** Undefined when event headers are the unmapped message headers or top-level fields. */
   readonly headers: readonly string[] | undefined;
+  /** Whether event headers are spread over the top level of the body. */
+  readonly topLevelHeaders: boolean;
+  /** Top-level body names a mapped, payload, headers or extra value uses. */
+  readonly topLevelNames: ReadonlySet<string>;
   /** Headers the mapping writes itself: the mapped ones and the extra ones. */
   readonly mappedHeaders: ReadonlySet<string>;
   readonly timeFormat: TimeFormat;
@@ -70,12 +76,19 @@ export function compile(
     }
   }
   const payload = compilePayload(mapping.payload);
+  const topLevelHeaders = mapping.headers === 'top-level-fields';
+  if (topLevelHeaders && payload === undefined) {
+    throw new ConfigurationError("jsonEnvelope headers 'top-level-fields' needs a body payload");
+  }
   const plan: Plan = {
     type: compileType(mapping.type),
     id: compileId(mapping.id, transportIds),
+    idWhenMissing: isJsonObject(mapping.id) && 'whenMissing' in mapping.id,
     optional,
     payload,
-    headers: compileHeaders(mapping.headers),
+    headers: topLevelHeaders ? undefined : compileHeaders(mapping.headers),
+    topLevelHeaders,
+    topLevelNames: new Set(),
     mappedHeaders: new Set(),
     timeFormat: compileTimeFormat(mapping.occurredAt),
     ...compileExtras(mapping, payload !== undefined),
@@ -136,10 +149,14 @@ function compileId(id: unknown, transportIds: readonly string[]): Location | und
   if (typeof id === 'string' && transportIds.includes(id)) {
     return undefined;
   }
+  const names = transportIds.map((name) => `'${name}'`).join(', ');
   if (!isJsonObject(id)) {
     throw new ConfigurationError(
-      `jsonEnvelope needs an id: { body }, { header } or one of ${transportIds.map((name) => `'${name}'`).join(', ')}`,
+      `jsonEnvelope needs an id: { body }, { header } or one of ${names}`,
     );
+  }
+  if ('whenMissing' in id && !transportIds.includes(id['whenMissing'] as string)) {
+    throw new ConfigurationError(`jsonEnvelope id whenMissing must be one of ${names}`);
   }
   return toLocation(id, 'id');
 }
@@ -209,7 +226,11 @@ function assertDisjoint(plan: Plan): Plan {
     ...plan.extraBody.map(({ path }) => path),
   ];
   assertNoNestedPaths(paths);
-  return { ...plan, mappedHeaders: new Set(headers) };
+  return {
+    ...plan,
+    mappedHeaders: new Set(headers),
+    topLevelNames: new Set(paths.map((path) => path[0]!)),
+  };
 }
 
 function assertNoNestedPaths(paths: readonly (readonly string[])[]): void {

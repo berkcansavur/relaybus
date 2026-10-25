@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   attempt,
   compareBodies,
+  type Attempt,
   compareDecoded,
   compareObjects,
   toBuffer,
@@ -46,6 +47,12 @@ export interface RabbitMqCodecCase {
   readonly message: RabbitMqCapturedMessage;
   /** The event decoding the message gives, when the wire does not carry all of `envelope`. */
   readonly decoded?: EventEnvelope;
+  /**
+   * Checks one direction only: `'decode'` for a message only other producers write (for
+   * example one without an id, which relaybus would add), `'encode'` for one only other
+   * consumers read. Default both.
+   */
+  readonly only?: 'encode' | 'decode';
 }
 
 export interface RabbitMqCodecContractOptions {
@@ -74,9 +81,15 @@ export async function rabbitMqCodecMismatches(
   testCase: RabbitMqCodecCase,
 ): Promise<string[]> {
   const { message } = testCase;
-  const encoding = await attempt('encode', () => options.encode(testCase.envelope));
+  const encoding: Attempt<RabbitMqWrittenMessage> =
+    testCase.only === 'decode'
+      ? { mismatches: [] }
+      : await attempt('encode', () => options.encode(testCase.envelope));
   const encoded = encoding.result;
-  const decoding = await attempt('decode', () => options.decode(delivered(message)));
+  const decoding: Attempt<EventEnvelope> =
+    testCase.only === 'encode'
+      ? { mismatches: [] }
+      : await attempt('decode', () => options.decode(delivered(message)));
   return [
     ...encoding.mismatches,
     ...(encoded === undefined ? [] : compareMessages(options, { message, encoded })),

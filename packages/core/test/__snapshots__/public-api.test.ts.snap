@@ -233,6 +233,8 @@ exports[`public API > @relaybus/kafka keeps its exported surface 1`] = `
   "KafkaProducerConfig: type",
   "KafkaProducerLike: type",
   "KafkaProducerRecord: type",
+  "KafkaRecordKey: type",
+  "KafkaRecordOptions: type",
   "KafkaRestartOptions: type",
   "KafkaRunConfig: type",
   "KafkaTransport: value+type",

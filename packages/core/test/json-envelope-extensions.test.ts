@@ -186,3 +186,81 @@ describe('jsonEnvelope body order', () => {
     ).toThrow(ConfigurationError);
   });
 });
+
+describe('jsonEnvelope id when missing', () => {
+  const json = format({
+    ...BASE,
+    id: { body: 'id', whenMissing: 'transport-id' },
+  });
+
+  it('writes the id at its location and reads it back', () => {
+    const message = json.write(envelope());
+    expect(message.body).toMatchObject({ id: 'evt-1' });
+    expect(json.read(message).id).toBe('evt-1');
+  });
+
+  it("leaves the id to the transport's own id when the message has none", () => {
+    expect(json.read({ body: { type: 'a.b', data: {} }, headers: {} })).not.toHaveProperty('id');
+  });
+
+  it('refuses a fallback that is not a transport id', () => {
+    expect(() =>
+      format({ ...BASE, id: { body: 'id', whenMissing: 'other' as 'transport-id' } }),
+    ).toThrow(ConfigurationError);
+  });
+});
+
+describe("jsonEnvelope headers as 'top-level-fields'", () => {
+  const json = format({
+    ...BASE,
+    correlationId: { body: 'requestId' },
+    headers: 'top-level-fields',
+    extra: { body: { provider: 'billing-api' } },
+  });
+
+  it('spreads the event headers over the top level of the body', () => {
+    const message = json.write(envelope({ headers: { tenant: 'tr', channel: 'web' } }));
+    expect(message.body).toEqual({
+      type: 'order_created',
+      requestId: 'req-1',
+      data: { orderId: 1 },
+      tenant: 'tr',
+      channel: 'web',
+      provider: 'billing-api',
+    });
+    expect(message.headers).toEqual({});
+  });
+
+  it('reads every unmapped top-level text field back as an event header', () => {
+    const fields = json.read({
+      body: {
+        type: 'order_created',
+        data: {},
+        provider: 'billing-api',
+        requestId: 'req-1',
+        tenant: 'tr',
+        retries: 3,
+        flags: { a: true },
+      },
+      headers: { 'x-ignored': '1' },
+    });
+    expect(fields.headers).toEqual({ tenant: 'tr' });
+  });
+
+  it('refuses an event header named like a mapped or extra field', () => {
+    expect(() => json.write(envelope({ headers: { requestId: 'x' } }))).toThrow(Unencodable);
+    expect(() => json.write(envelope({ headers: { provider: 'x' } }))).toThrow(Unencodable);
+    expect(() => json.write(envelope({ headers: { data: 'x' } }))).toThrow(Unencodable);
+  });
+
+  it('is not allowed on a payload-only mapping', () => {
+    expect(() =>
+      format({
+        type: { header: 'event-type' },
+        id: 'transport-id',
+        payload: 'whole-body',
+        headers: 'top-level-fields',
+      } as unknown as Mapping),
+    ).toThrow(ConfigurationError);
+  });
+});

@@ -50,8 +50,8 @@ type MessageRoute = {
  * Publishing: idempotent producer, `acks=-1`, resolves after the broker ack and
  * rejects with {@link PublishTimeoutError} after `publishTimeout`. A timed-out
  * send may still complete later; the outbox then retries it and the duplicate is
- * absorbed by the consumer's inbox dedup. The record key is the envelope key, so events sharing a key land on one
- * partition and keep their order; events without a key have no ordering.
+ * absorbed by the consumer's inbox dedup. The record key is the codec's: the event key by default, so events
+ * sharing a key land on one partition and keep their order; records without a key have no ordering.
  *
  * Subscribing: one consumer, one group, one `subscribe` call. `eachMessage`
  * awaits the handler; the client commits the offset only after it resolved. A

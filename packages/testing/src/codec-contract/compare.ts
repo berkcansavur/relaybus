@@ -82,11 +82,14 @@ export function compareDecoded(expected: unknown, decoded: unknown): string[] {
   return left === right ? [] : [`decoded: expected ${left}, decoded ${right}`];
 }
 
+/** The result of a step, or why it failed. */
+export type Attempt<TResult> = { readonly result?: TResult; readonly mismatches: string[] };
+
 /** Runs `step`, turning what it throws into a mismatch line. */
 export async function attempt<TResult>(
   label: string,
   step: () => TResult | Promise<TResult>,
-): Promise<{ readonly result?: TResult; readonly mismatches: string[] }> {
+): Promise<Attempt<TResult>> {
   try {
     return { result: await step(), mismatches: [] };
   } catch (error) {

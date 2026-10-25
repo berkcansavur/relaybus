@@ -226,4 +226,60 @@ describe.each(KAFKA_CLIENTS)('relaybus on $name', (client) => {
       await consumer.bus.stop();
     });
   });
+
+  describe('a legacy flat JSON envelope without record keys or headers', () => {
+    const legacyFlat = jsonEnvelope({
+      type: { body: 'type' },
+      id: { body: 'id', whenMissing: 'record-position' },
+      payload: { body: 'data' },
+      source: { body: 'provider' },
+      occurredAt: { body: 'timestamp', format: 'epoch-millis' },
+      correlationId: { body: 'requestId' },
+      headers: 'top-level-fields',
+      extra: { body: { createdDate: (event) => event.occurredAt.toISOString() } },
+      bodyOrder: ['id', 'requestId', 'provider', 'timestamp', 'createdDate', 'type', 'data'],
+      recordKey: 'none',
+      contentTypeHeader: false,
+    });
+
+    it('writes keyless, headerless flat records and reads them and foreign ones back', async () => {
+      const topic = uniqueName('legacy-flat');
+      await createTopics(topic);
+      const service = await startService(topic, { codec: legacyFlat, name: 'billing-api' });
+      const published = await service.bus.publish(new OrderPlaced({ orderId: '7' }), {
+        key: 'order-7',
+        correlationId: 'req-7',
+      });
+      const [record] = await readRaw(topic, 1);
+      expect(record!.key).toBeNull();
+      expect(record!.headers).toEqual({});
+      expect(JSON.parse(record!.value!)).toEqual({
+        id: published.id,
+        requestId: 'req-7',
+        provider: 'billing-api',
+        timestamp: published.occurredAt.getTime(),
+        createdDate: published.occurredAt.toISOString(),
+        type: 'order.placed.v1',
+        data: { orderId: '7' },
+      });
+
+      await produceRaw(topic, [
+        {
+          value:
+            '{"provider":"orders-api","timestamp":1792936800123,"createdDate":"2026-10-25T14:00:00.123Z","type":"order.placed.v1","data":{"orderId":"8"},"userId":"u-1","attempt":2}',
+        },
+      ]);
+      await waitFor(() => service.handled.length === 2);
+      expect(service.handled[0]!.id).toBe(published.id);
+      expect(service.handled[1]).toMatchObject({
+        id: `kafka:${topic}:0:1`,
+        source: 'orders-api',
+        key: null,
+        payload: { orderId: '8' },
+        headers: { userId: 'u-1' },
+        occurredAt: new Date('2026-10-25T14:00:00.123Z'),
+      });
+      await service.bus.stop();
+    });
+  });
 });

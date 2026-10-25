@@ -158,6 +158,25 @@ describe('kafkaCodecMismatches', () => {
   });
 });
 
+describe('one-way cases', () => {
+  const broken = kafkaOptions({
+    encode: () => ({ key: 'x', value: 'x', headers: {} }),
+    decode: () => ({ ...ENVELOPE, id: 'other' }),
+  });
+
+  it("checks only decoding for 'decode' and only encoding for 'encode'", async () => {
+    expect(await kafkaCodecMismatches(broken, { ...KAFKA_CASE, only: 'decode' })).toEqual([
+      expect.stringMatching(/^decoded: /),
+    ]);
+    expect(await kafkaCodecMismatches(broken, { ...KAFKA_CASE, only: 'encode' })).toHaveLength(3);
+    const rabbit = rabbitOptions({ decode: () => ({ ...ENVELOPE, id: 'other' }) });
+    expect(await rabbitMqCodecMismatches(rabbit, { ...RABBIT_CASE, only: 'encode' })).toEqual([]);
+    expect(await rabbitMqCodecMismatches(rabbit, { ...RABBIT_CASE, only: 'decode' })).toHaveLength(
+      1,
+    );
+  });
+});
+
 kafkaCodecContract('the test codec', kafkaOptions());
 
 const RABBIT_CASE: RabbitMqCodecCase = {

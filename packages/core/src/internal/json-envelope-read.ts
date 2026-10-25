@@ -17,10 +17,7 @@ export function readMessage(message: JsonWireMessage, context: Context): JsonEnv
   const read = (location: Location | undefined): string | undefined =>
     location === undefined ? undefined : readText(message, { location, failures });
   const fields: Record<string, unknown> = {
-    id:
-      plan.id === undefined
-        ? undefined
-        : requireText(read(plan.id), { location: plan.id, failures }),
+    id: readId(read(plan.id), context),
     type: readType(message, context),
     payload: readPayload(message.body, context),
     key: read(plan.optional.key),
@@ -33,6 +30,13 @@ export function readMessage(message: JsonWireMessage, context: Context): JsonEnv
   return Object.fromEntries(
     Object.entries(fields).filter((entry) => entry[1] !== undefined),
   ) as JsonEnvelopeFields;
+}
+
+function readId(id: string | undefined, { plan, failures }: Context): string | undefined {
+  if (plan.id === undefined || plan.idWhenMissing) {
+    return id;
+  }
+  return requireText(id, { location: plan.id, failures });
 }
 
 function readType(message: JsonWireMessage, { plan, failures }: Context): string {
@@ -61,19 +65,26 @@ function readPayload(body: unknown, { plan, failures }: Context): unknown {
 }
 
 function readEventHeaders(message: JsonWireMessage, plan: Plan): EventHeaders {
+  if (plan.topLevelHeaders) {
+    return textEntries(
+      Object.entries(message.body as Record<string, unknown>).filter(
+        ([name]) => !plan.topLevelNames.has(name),
+      ),
+    );
+  }
   if (plan.headers === undefined) {
     return Object.fromEntries(
       Object.entries(message.headers).filter(([name]) => !plan.mappedHeaders.has(name)),
     );
   }
   const headers = valueAt(message.body, plan.headers);
-  return isJsonObject(headers)
-    ? Object.fromEntries(
-        Object.entries(headers).filter(
-          (entry): entry is [string, string] => typeof entry[1] === 'string',
-        ),
-      )
-    : {};
+  return isJsonObject(headers) ? textEntries(Object.entries(headers)) : {};
+}
+
+function textEntries(entries: readonly [string, unknown][]): EventHeaders {
+  return Object.fromEntries(
+    entries.filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+  );
 }
 
 function readTime(text: string | undefined, { plan, failures }: Context): Date | undefined {
