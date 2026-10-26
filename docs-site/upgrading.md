@@ -1,13 +1,58 @@
 ---
 title: Upgrading relaybus
-description: 'Step-by-step upgrades between relaybus releases: 0.3 to 0.4 (nothing required; optional pool, wake, Confluent client, record keys, injected producer), 0.2 to 0.3 (route ids, transaction budget, StopResult, decorator and codec renames, error codes) and 0.1 to 0.2 (completed deliveries deleted, completionHistory, schema upgrade, PgBouncer settings).'
+description: 'Step-by-step upgrades between relaybus releases: 0.4.0 to 0.4.1 (PostgreSQL payload columns become json), 0.3 to 0.4 (nothing required; optional pool, wake, Confluent client, record keys, injected producer), 0.2 to 0.3 (route ids, transaction budget, StopResult, decorator and codec renames, error codes) and 0.1 to 0.2 (completed deliveries deleted, completionHistory, schema upgrade, PgBouncer settings).'
 ---
 
 # Upgrading relaybus
 
+- [0.4.0 → 0.4.1](#upgrading-from-0-4-0-to-0-4-1)
 - [0.3 → 0.4](#upgrading-from-0-3-to-0-4)
 - [0.2 → 0.3](#upgrading-from-0-2-to-0-3)
 - [0.1 → 0.2](#upgrading-from-0-1-to-0-2)
+
+## Upgrading from 0.4.0 to 0.4.1
+
+```yaml
+applies to: '@relaybus/* 0.4.0 -> 0.4.1'
+downtime: 'none; publishes and claims wait while setup() rewrites the events table once'
+rollout: '0.4.0 instances that start after the upgrade need setupStore: false'
+database: 'PostgreSQL: payload and headers of the events table become json (one table rewrite)'
+rollback: 'safe with setupStore: false; 0.4.0 reads and writes the json columns'
+```
+
+**Why.** The PostgreSQL store kept `payload` and `headers` as `jsonb`, which re-orders object keys (shorter keys first, then alphabetically). An event read back from the outbox therefore serialized differently from what the producer published: JSON consumers did not notice, byte or string comparisons and consumers that depend on field order did. 0.4.1 stores both as `json`, which keeps the text the producer serialized, and hands the transport and the handlers exactly that. MongoDB and the in-memory store already kept the order.
+
+**Rows already stored keep the order `jsonb` gave them.** Only events published after the upgrade keep their producer's key order. The values of old rows are unchanged.
+
+### With `setup()` (the default, `setupStore: true`)
+
+Nothing to do. The first 0.4.1 instance that starts converts the two columns in place. It is idempotent and guarded: it runs only while a column is still `jsonb`.
+
+The conversion rewrites the events table once under an exclusive lock, so publishes and claims wait for it. It takes about as long as copying the table; on a large table run it at a quiet time, or run the DDL below yourself first. `setup()` runs it in a transaction of its own, so it cannot deadlock with running completions, and on a schema 0.4.0 created (recognized by the marker 0.4.0 left on the lane table) that is all it does: the other schema statements, whose table locks could queue behind running claims, do not run again.
+
+### Without `setup()` (`setupStore: false`, your own migrations)
+
+Run this once, with your schema and table prefix (the defaults are `public` and `relaybus_`):
+
+```sql
+ALTER TABLE "public"."relaybus_events"
+  ALTER COLUMN headers DROP DEFAULT,
+  ALTER COLUMN payload TYPE json USING payload::json,
+  ALTER COLUMN headers TYPE json USING headers::json,
+  ALTER COLUMN headers SET DEFAULT '{}'::json;
+```
+
+`createPostgresSchemaSql()` contains the same conversion guarded by a column type check, so re-applying its output is safe as well.
+
+### During the rollout
+
+0.4.0 and 0.4.1 instances can run side by side. Before the conversion, 0.4.1 publishes into the `jsonb` columns (PostgreSQL casts on assignment; key order is lost as before); after it, 0.4.0 publishes into the `json` columns the same way. Do not start or restart a 0.4.0 instance with `setupStore: true` once the conversion ran: 0.4.0 does not know the new schema marker, so its `setup()` re-applies all of its schema statements, whose table locks can deadlock with running claims (PostgreSQL then aborts one of them). Finish the rollout first, or give 0.4.0 instances that start during it `setupStore: false`. The same holds for a rollback: deploy 0.4.0 with `setupStore: false`. Rolling back needs no DDL.
+
+### Also in 0.4.1
+
+- **Prisma 5.** `@relaybus/postgres` declares its optional `@prisma/client` peer as `^5.0.0 || ^6.0.0 || ^7.0.0`. With 0.4.0 (`^6 || ^7`), npm refused to install it next to Prisma 5 (`ERESOLVE`) or installed a second Prisma Client. Nothing changes in your code; Prisma 5 needs `previewFeatures = ["driverAdapters"]` for `@prisma/adapter-pg`.
+- **jsonEnvelope.** `bodyOrder` now also places the event headers spread by `headers: 'top-level-fields'`; before, they always came last, even when `bodyOrder` named them. Only a mapping whose `bodyOrder` names a spread header writes different bytes, and those are the bytes it asked for; headers it does not name still come last. New options: `otherFields` keeps unknown top-level fields of every JSON type, `wireTypes` names event types differently on the wire. See [Interoperating with other services](/recipes/interoperating-with-other-services).
+- **Codec contract.** Compared byte for byte, the decoded payload must now also keep the expected key order, so a case whose expected payload lists keys in another order than the wire fails with a `decoded payload` line; write the expected payload in wire order or use `compare: 'json'`. Jest projects use `@relaybus/testing/jest`; `vitest` is now an optional peer.
 
 ## Upgrading from 0.3 to 0.4
 

@@ -1,16 +1,31 @@
 ---
 title: relaybus releases and versioning
-description: What is new in relaybus 0.4.0 (Prisma 7, wake-up at commit, Confluent client, codec contract) and 0.3.0 (code-quality overhaul, per-key order across event types, codecs, NestJS transaction decorator, bounded shutdown, ESLint plugin, OpenTelemetry), its breaking changes, deprecations and known issues, and how relaybus is versioned and released.
+description: What is new in relaybus 0.4.1 (payloads kept byte for byte on PostgreSQL, Prisma 5, framework-agnostic codec contract), 0.4.0 (Prisma 7, wake-up at commit, Confluent client, codec contract) and 0.3.0 (code-quality overhaul, per-key order across event types, codecs, NestJS transaction decorator, bounded shutdown, ESLint plugin, OpenTelemetry), its breaking changes, deprecations and known issues, and how relaybus is versioned and released.
 ---
 
 # Releases
 
+- [0.4.1](#_0-4-1-2026-10-26): PostgreSQL hands out payloads exactly as published, Prisma 5 support, jsonEnvelope fixes, a codec contract for any test framework
 - [0.4.0](#_0-4-0-2026-10-25): Prisma 7 on a real database, wake-up at the caller's commit, the Confluent Kafka client, codec contract helpers, record keys, legacy flat envelopes, an application-owned producer
 - [0.3.1](#_0-3-1-2026-10-25): internal readability refactor, same behaviour
 - [0.3.0](#_0-3-0-2026-10-25): code quality, per-key order across event types, codecs, transactions in NestJS, bounded shutdown, ESLint rules, OpenTelemetry
 - [0.2.0](#_0-2-0-2026-10-24): high-throughput delivery, event catalogs, decoding of foreign messages
 - [0.1.x](#_0-1-x): first public release
 - [How versioning works](#how-versioning-works)
+
+## 0.4.1 (2026-10-26)
+
+A patch release: no export removed or renamed, every option additive. PostgreSQL users get one column conversion that `setup()` applies; see [Upgrading from 0.4.0 to 0.4.1](/upgrading#upgrading-from-0-4-0-to-0-4-1) for the DDL when you run your own migrations.
+
+- **PostgreSQL keeps the payload as published.** `payload` and `headers` were `jsonb`, which re-orders object keys, and the insert also went through `jsonb_to_recordset`, so an event read back serialized differently from what the producer published. Both columns are now `json` and the event insert uses `json_to_recordset` end to end, so the transport and the handlers get the producer's exact text, key order included. `setup()` converts existing tables in place (idempotent, one table rewrite); rows stored before keep the order `jsonb` gave them. The other batch parameters (deliveries, key counts, id lists) stay on `jsonb_to_recordset`.
+- **Payload fidelity is part of the store contract.** Every store (PostgreSQL through `pg`, Kysely, Knex, TypeORM, Drizzle and Prisma, MongoDB, in-memory) must hand back a payload with unsorted keys at every depth, unicode, `1e21`, `5e-324`, the largest safe integers and empty containers exactly as `JSON.stringify` wrote it, for single and batched appends and for a handler added later. A bus-level test checks the same through `publish` and `publishAll`. New tests also show that every built-in Kafka and RabbitMQ codec and both transports write and read payloads byte for byte; they did already.
+- **Prisma 5.** The optional `@prisma/client` peer is `^5.0.0 || ^6.0.0 || ^7.0.0` (0.4.0: `^6 || ^7`, which made npm refuse the install next to Prisma 5 or add a second client). `createPrismaExecutor` works unchanged on Prisma 5.22; a `prisma compat (prisma 5)` CI job runs the Prisma tests on it, and CI checks that installing `@relaybus/postgres` into an app on Prisma 5.22 leaves its `@prisma/client` and `prisma generate` untouched.
+- **jsonEnvelope keeps every top-level field type.** New `otherFields: { payloadField }` keeps the unknown top-level fields that are not read as event headers (numbers, booleans, null, objects, arrays, and text when headers do not live at the top level) unchanged under that payload field (an object payload always gets it, `{}` when there is nothing to keep), where the event's schema validates them; writing spreads them back over the top level, so the values survive a round trip, and the bytes do too when `bodyOrder` lists the fields in wire order. Without it, decode leaves them out as before.
+- **jsonEnvelope `bodyOrder` covers spread fields.** Event headers spread by `headers: 'top-level-fields'` (and fields kept by `otherFields`) now take their `bodyOrder` position; before they always came last.
+- **jsonEnvelope `wireTypes`.** Maps event types to the names a format uses on the wire, so one route carries many types whose wire names are not relaybus event types, without a `fixed` type per transport. The event type grammar is unchanged; it already accepts snake_case such as `transfer_auto_dispatched`.
+- **The codec contract runs under any test framework.** `@relaybus/testing/codec-contract` imports no test framework: `assertKafkaCodecCase` / `assertRabbitMqCodecCase` throw a `CodecContractError` (code `RELAYBUS_TESTING_CODEC_CONTRACT`), and `registerKafkaCodecContract` / `registerRabbitMqCodecContract` register tests with any `describe` and `it`. `@relaybus/testing/jest` registers with Jest's globals. `vitest` is an optional peer now; `kafkaCodecContract` and `rabbitMqCodecContract` from the main entry work with Vitest as before. Compared byte for byte, the decoded payload must also keep the expected key order.
+- Additive API: `jsonEnvelope` options `otherFields` and `wireTypes`; `@relaybus/testing` `assertKafkaCodecCase`, `assertRabbitMqCodecCase`, `registerKafkaCodecContract`, `registerRabbitMqCodecContract`, `CodecContractError`, `TestFramework`, and the `codec-contract` and `jest` entry points.
+- BENCHMARK_LINE
 
 ## 0.4.0 (2026-10-25)
 
@@ -27,7 +42,7 @@ Not breaking: the public API snapshot of every package changes by additions only
 - Peer and test dependencies moved to the latest versions: `@opentelemetry/api` 1.10 with the OpenTelemetry SDK 3, `@nestjs/*` 12.2.
 - Additive API: Kafka `KafkaInjectedProducer`, `KafkaRecordKey`, `KafkaRecordOptions`, `decodeKafkaRecord`; RabbitMQ `decodeRabbitMqMessage`; testing the codec contract functions and their option types; `RelayBus.wake()`; `KafkaTransportOptions.kafka` is now optional.
 - Benchmark against 0.3.1 (quick run, 3 interleaved pairs per cell): publish 0.98–1.03x, dispatch 0.99–1.06x, statements per delivery identical. See [Performance](/performance#_0-4-0-vs-0-3-1).
-- Known limits: on decode, unknown top-level fields are kept only when they are strings; there is no consumer injection (only a producer can be passed in); RabbitMQ has no routing-key override.
+- Known limits: on decode, unknown top-level fields are kept only when they are strings (0.4.1 adds `otherFields`); there is no consumer injection (only a producer can be passed in); RabbitMQ has no routing-key override.
 
 ## 0.3.1 (2026-10-25)
 
