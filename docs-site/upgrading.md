@@ -1,14 +1,55 @@
 ---
 title: Upgrading relaybus
-description: 'Step-by-step upgrades between relaybus releases: 0.4.0 to 0.4.1 (PostgreSQL payload columns become json), 0.3 to 0.4 (nothing required; optional pool, wake, Confluent client, record keys, injected producer), 0.2 to 0.3 (route ids, transaction budget, StopResult, decorator and codec renames, error codes) and 0.1 to 0.2 (completed deliveries deleted, completionHistory, schema upgrade, PgBouncer settings).'
+description: 'Step-by-step upgrades between relaybus releases: 0.4.1 to 0.5.0 (nothing required; optional catalog routes and wire names), 0.4.0 to 0.4.1 (PostgreSQL payload columns become json), 0.3 to 0.4 (nothing required; optional pool, wake, Confluent client, record keys, injected producer), 0.2 to 0.3 (route ids, transaction budget, StopResult, decorator and codec renames, error codes) and 0.1 to 0.2 (completed deliveries deleted, completionHistory, schema upgrade, PgBouncer settings).'
 ---
 
 # Upgrading relaybus
 
+- [0.4.1 → 0.5.0](#upgrading-from-0-4-1-to-0-5-0)
 - [0.4.0 → 0.4.1](#upgrading-from-0-4-0-to-0-4-1)
 - [0.3 → 0.4](#upgrading-from-0-3-to-0-4)
 - [0.2 → 0.3](#upgrading-from-0-2-to-0-3)
 - [0.1 → 0.2](#upgrading-from-0-1-to-0-2)
+
+## Upgrading from 0.4.1 to 0.5.0
+
+```yaml
+applies to: '@relaybus/* 0.4.1 -> 0.5.0'
+downtime: 'none'
+rollout: 'mixed 0.4.1 and 0.5.0 instances are safe'
+database: 'none'
+rollback: 'safe; 0.5.0 stores and sends nothing 0.4.1 cannot read'
+```
+
+**Nothing is required.** 0.5.0 adds API and changes no behaviour of existing code: routes, `jsonEnvelope` `wireTypes`, handler ids, stored deliveries and the wire format are as in 0.4.1.
+
+Two optional steps for services that publish a catalog:
+
+1. **Replace per-event routes with a catalog route.** Routes of one destination written event by event can become one `route`; the handler id `relaybus.transport:<transport>:<destination>` and the routed event types stay the same, so deliveries stored under the old routes are still sent. Do it in one deploy; there is nothing to migrate.
+
+   ```ts
+   // before
+   routes: [
+     { event: OrderPlaced, transport: 'kafka', destination: 'orders', retry },
+     { event: OrderCancelled, transport: 'kafka', destination: 'orders', retry },
+   ],
+   // after
+   routes: [
+     route(produce(OrderEvents, { events: ['OrderPlaced', 'OrderCancelled'] }), {
+       transport: 'kafka',
+       destination: 'orders',
+       retry,
+     }),
+   ],
+   ```
+
+2. **Move wire names to the catalog.** Names from the `wireTypes` of a `jsonEnvelope` can be declared by `defineCatalog(..., { wireTypes })` or `route(..., { wireTypes })` instead. The bytes are identical; naming the same pair in both places is allowed, naming another name for the same event type fails the boot with `RELAYBUS_WIRE_TYPE_COLLISION`.
+
+Things to know:
+
+- A custom `Transport` written outside relaybus keeps working. It only needs `declareWireTypes(wireTypes)` if you declare wire names for it; without the method, declaring them fails the boot with `RELAYBUS_WIRE_TYPES_UNSUPPORTED`. Without wire names, it is never called.
+- `RelayBusOptions.routes` is now `readonly RouteDefinition[]` (`RouteOptions | CatalogRoute`). Code that only passes routes compiles unchanged; code that reads `options.routes` and expects `RouteOptions` now has to narrow.
+- A service that only consumes a catalog with wire names has no route to declare them: give its codec `wireTypes: catalogWireTypes(OrderEvents)`.
 
 ## Upgrading from 0.4.0 to 0.4.1
 

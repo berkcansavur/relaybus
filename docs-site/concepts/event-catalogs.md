@@ -106,6 +106,86 @@ ConfigurationError: Catalog events without a handler or route:
 
 The check runs before the store is set up or any transport connects, so a failed check has no side effects and the NestJS application simply does not boot.
 
+## Routing a catalog production
+
+A service that publishes several events of a catalog to one topic does not need a route per event. `route(produce(catalog, { events }), settings)` turns every selected event into a route with the same `transport`, `destination`, `retry` and `timeout`:
+
+```ts
+import { produce, route } from '@relaybus/core';
+
+new RelayBus({
+  store,
+  transports: [kafka],
+  routes: [
+    route(produce(OrderEvents, { events: ['OrderPlaced', 'OrderCancelled'] }), {
+      transport: 'kafka',
+      destination: 'orders',
+      retry: { initialDelay: '500ms', maxDelay: '30s' },
+      timeout: '10s',
+    }),
+    { event: OrderShipped, transport: 'kafka', destination: 'shipments' }, // a plain route still works
+  ],
+});
+```
+
+- **Same as one route per event.** The result is exactly the routes you would have written by hand: one handler `relaybus.transport:<transport>:<destination>` per destination, so events of one key reach the broker in commit order whatever their types, and `bus.handlers()` lists it once per event type. Without `events`, every event of the catalog is routed.
+- **`destination` is optional.** Without it every event goes to its own event type, as a plain route does. With it, all selected events share it.
+- **It covers `produce`.** A route made this way is a route like any other, so `catalogs: [produce(OrderEvents, ...)]` and `RelayBusModule.forFeature({ produces })` see the events as routed. Routing fewer events than a `produce` declaration lists still fails the boot check, naming the events left out.
+- **Mix freely.** Catalog routes and plain routes can share a destination when they resolve to the same `retry` and `timeout`, as plain routes always had to.
+
+The boot refuses a configuration that cannot work, before any transport connects. The errors extend `ConfigurationError`, so existing `catch` blocks keep matching, and carry their own [code](/concepts/error-codes):
+
+| Mistake                                                                       | Error                       | Code                              |
+| ----------------------------------------------------------------------------- | --------------------------- | --------------------------------- |
+| An event routed twice to one destination, when a catalog route is involved    | `DuplicateRouteEventError`  | `RELAYBUS_ROUTE_DUPLICATE_EVENT`  |
+| A wire name for an event the catalog (or the route's selection) does not have | `UnknownCatalogEventError`  | `RELAYBUS_CATALOG_UNKNOWN_EVENT`  |
+| One event with two wire names on a transport, or two events with one          | `WireTypeCollisionError`    | `RELAYBUS_WIRE_TYPE_COLLISION`    |
+| Wire names for a transport or codec that cannot map type names                | `WireTypesUnsupportedError` | `RELAYBUS_WIRE_TYPES_UNSUPPORTED` |
+
+Two plain routes to the same event and destination keep failing with the `ConfigurationError` they always did. An unknown event name in `produce(catalog, { events })` does not compile and fails with the `ConfigurationError` of `produce`.
+
+## Wire names next to the catalog and the route
+
+Some wire formats name event types differently from relaybus (`Order Placed` instead of `order.placed.v1`). Declare those names where the event or the route is, not only on the codec:
+
+```ts
+export const OrderEvents = defineCatalog(
+  { OrderPlaced, OrderCancelled, OrderShipped },
+  {
+    name: 'OrderEvents',
+    wireTypes: { OrderPlaced: 'Order Placed', OrderCancelled: 'Order Cancelled' },
+  },
+);
+
+new RelayBus({
+  store,
+  transports: [
+    new KafkaTransport({
+      kafka,
+      codec: jsonEnvelope({
+        type: { body: 'eventName' },
+        id: { body: 'messageId' },
+        payload: { body: 'data' },
+      }),
+    }),
+  ],
+  routes: [
+    route(produce(OrderEvents), {
+      transport: 'kafka',
+      destination: 'orders',
+      wireTypes: { OrderShipped: 'Order Shipped' }, // the route adds to the catalog's names, and wins on a clash
+    }),
+  ],
+});
+```
+
+The names of the events a transport sends reach its codec when the bus is created, and the codec writes and reads those events under them, byte for byte as `jsonEnvelope`'s own `wireTypes` would (a contract test in the Kafka and RabbitMQ packages proves it). Keys are catalog event names, checked by the compiler; `route` can name only the events it routes. Events without a name travel under their event type. Rules:
+
+- A codec has one set of names per transport: the same event cannot have two names on a transport, and no two events can share one. An event without a name travels as its event type, so a name equal to the type of another event the transport sends is refused too (`WireTypeCollisionError`). A clash with the `wireTypes` of the codec itself fails too (`WireTypeCollisionError`); naming the same pair in both places is fine.
+- The transport needs a codec that maps type names: `jsonEnvelope` with a type at `{ body }` or `{ header }`. The default CloudEvents codecs, a `fixed` type and a hand-written codec refuse wire names at boot (`WireTypesUnsupportedError`). A transport written outside relaybus takes them through the optional `declareWireTypes` method of `Transport`, which checks the names and returns the function that applies them, so a refused configuration changes no transport.
+- The names live in the transport's codec, so they belong to the transport, not to a bus: two buses that use one transport instance cannot declare wire names for it (`WireTypesUnsupportedError`; give each bus its own transport), and a transport that already connected or subscribed refuses them. Buses that share a transport without declaring any are unaffected.
+- Wire names of a catalog are used only for the events a route sends. A service that only consumes a catalog has no route to declare them, so give its codec `wireTypes: catalogWireTypes(OrderEvents)`, which lists the catalog's names by event type; names that only a route declared go next to it.
+
 ## NestJS: module contracts
 
 In NestJS the recommended form is a contract per feature module: `RelayBusModule.forFeature({ consumes: [OrderEvents], produces: [produce(BillingEvents)] })` in the module's `imports`. At boot every consumed event needs a method-level `@RelayBusConsumer` handler among the providers of that module (free method names, any number of classes), and every produced event a route; otherwise the application fails to start naming the module and each missing event. See [@relaybus/nestjs](/packages/nestjs#module-contracts-relaybusmodule-forfeature).
@@ -129,8 +209,10 @@ const bus = new RelayBus({
   store: new PostgresEventStore({ pool }),
   transports: [kafka],
   routes: [
-    { event: OrderPlaced, transport: 'kafka', destination: 'orders' },
-    { event: OrderCancelled, transport: 'kafka', destination: 'orders' },
+    route(produce(OrderEvents, { events: ['OrderPlaced', 'OrderCancelled'] }), {
+      transport: 'kafka',
+      destination: 'orders',
+    }),
   ],
   subscriptions: [{ transport: 'kafka', destinations: ['shipments'] }],
   catalogs: [

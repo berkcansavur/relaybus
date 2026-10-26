@@ -1,10 +1,11 @@
 ---
 title: relaybus releases and versioning
-description: What is new in relaybus 0.4.1 (payloads kept byte for byte on PostgreSQL, Prisma 5, framework-agnostic codec contract), 0.4.0 (Prisma 7, wake-up at commit, Confluent client, codec contract) and 0.3.0 (code-quality overhaul, per-key order across event types, codecs, NestJS transaction decorator, bounded shutdown, ESLint plugin, OpenTelemetry), its breaking changes, deprecations and known issues, and how relaybus is versioned and released.
+description: What is new in relaybus 0.5.0 (catalog routes and wire names declared on catalogs and routes), 0.4.1 (payloads kept byte for byte on PostgreSQL, Prisma 5, framework-agnostic codec contract), 0.4.0 (Prisma 7, wake-up at commit, Confluent client, codec contract) and 0.3.0 (code-quality overhaul, per-key order across event types, codecs, NestJS transaction decorator, bounded shutdown, ESLint plugin, OpenTelemetry), its breaking changes, deprecations and known issues, and how relaybus is versioned and released.
 ---
 
 # Releases
 
+- [0.5.0](#_0-5-0-2026-10-26): `route(produce(Catalog, { events }), settings)` routes several catalog events with shared settings; wire names declared on catalogs and routes reach the codec
 - [0.4.1](#_0-4-1-2026-10-26): PostgreSQL hands out payloads exactly as published, Prisma 5 support, jsonEnvelope fixes, a codec contract for any test framework
 - [0.4.0](#_0-4-0-2026-10-25): Prisma 7 on a real database, wake-up at the caller's commit, the Confluent Kafka client, codec contract helpers, record keys, legacy flat envelopes, an application-owned producer
 - [0.3.1](#_0-3-1-2026-10-25): internal readability refactor, same behaviour
@@ -12,6 +13,16 @@ description: What is new in relaybus 0.4.1 (payloads kept byte for byte on Postg
 - [0.2.0](#_0-2-0-2026-10-24): high-throughput delivery, event catalogs, decoding of foreign messages
 - [0.1.x](#_0-1-x): first public release
 - [How versioning works](#how-versioning-works)
+
+## 0.5.0 (2026-10-26)
+
+A minor release with one new API and nothing required when upgrading from 0.4.x: no export removed or renamed, every option additive, no database or default wire-format change, and per-event routes and `jsonEnvelope` `wireTypes` work as before. See [Upgrading from 0.4.1 to 0.5.0](/upgrading#upgrading-from-0-4-1-to-0-5-0).
+
+- **Catalog routes.** `route(produce(Catalog, { events }), { transport, destination, retry, timeout })` in `routes` turns every selected event into a route with the shared settings, where a service publishing several catalog events to one topic used to write one route per event and repeat the destination, retry and timeout. Without `destination`, each event goes to its own event type, as a plain route does; without `events`, the whole catalog is routed. The routes it creates are ordinary routes: one handler `relaybus.transport:<transport>:<destination>` per destination (the per-key order and the ids of stored deliveries are the same as with routes written by hand), counted by `produce(...)` boot checks and by `RelayBusModule.forFeature({ produces })`. See [Routing a catalog production](/concepts/event-catalogs#routing-a-catalog-production).
+- **Wire names next to the catalog and the route.** `defineCatalog(events, { wireTypes })` and `route(..., { wireTypes })` name the types a wire format uses, by catalog event name (checked by the compiler; the route's names win). The bus hands the names of the events a transport sends to it when the bus is created: the new optional `Transport.declareWireTypes` is implemented by the Kafka and RabbitMQ transports, which pass them to a `jsonEnvelope` codec through its new `withWireTypes`. The codec then writes and reads those events exactly as with its own `wireTypes`; a contract test on both transports checks that the bytes are identical. `catalogWireTypes(catalog)` lists a catalog's names for a codec on the consuming side. See [Wire names](/concepts/event-catalogs#wire-names-next-to-the-catalog-and-the-route).
+- **Boot checks with their own codes.** An event routed twice to one destination through a catalog route (`RELAYBUS_ROUTE_DUPLICATE_EVENT`), a wire name for an unknown event (`RELAYBUS_CATALOG_UNKNOWN_EVENT`), a clash of wire names on a transport or with the codec's own (`RELAYBUS_WIRE_TYPE_COLLISION`) and wire names for a transport or codec that cannot map type names (`RELAYBUS_WIRE_TYPES_UNSUPPORTED`) fail when the bus is created, before any transport connects. Every transport checks its names first and all apply them last, so a refused configuration changes no transport; a transport that two buses use, or that already started, refuses wire names. All four extend `ConfigurationError`. Two plain routes to one destination keep failing with the plain `ConfigurationError`.
+- Additive API: core `route`, `catalogWireTypes`, `CatalogRoute`, `CatalogRouteOptions`, `RouteDefinition`, `DuplicateRouteEventError`, `UnknownCatalogEventError`, `WireTypeCollisionError`, `WireTypesUnsupportedError`, `DefineCatalogOptions.wireTypes`, `Transport.declareWireTypes` (checks the names and returns the function that applies them); `RelayBusOptions.routes` accepts `RouteDefinition` (a plain route or a catalog route); Kafka and RabbitMQ `KafkaCodec.withWireTypes` / `RabbitMqCodec.withWireTypes` and `declareWireTypes` on both transports; `InMemoryTransport.declaredWireTypes` in `@relaybus/testing`; `mergeWireTypes` and `withDeclaredWireTypes` in `@relaybus/core/internal`.
+- BENCHMARK_LINE
 
 ## 0.4.1 (2026-10-26)
 
@@ -25,7 +36,7 @@ A patch release: no export removed or renamed, every option additive. PostgreSQL
 - **jsonEnvelope `wireTypes`.** Maps event types to the names a format uses on the wire, so one route carries many types whose wire names are not relaybus event types, without a `fixed` type per transport. The event type grammar is unchanged; it already accepts snake_case such as `transfer_auto_dispatched`.
 - **The codec contract runs under any test framework.** `@relaybus/testing/codec-contract` imports no test framework: `assertKafkaCodecCase` / `assertRabbitMqCodecCase` throw a `CodecContractError` (code `RELAYBUS_TESTING_CODEC_CONTRACT`), and `registerKafkaCodecContract` / `registerRabbitMqCodecContract` register tests with any `describe` and `it`. `@relaybus/testing/jest` registers with Jest's globals. `vitest` is an optional peer now; `kafkaCodecContract` and `rabbitMqCodecContract` from the main entry work with Vitest as before. Compared byte for byte, the decoded payload must also keep the expected key order.
 - Additive API: `jsonEnvelope` options `otherFields` and `wireTypes`; `@relaybus/testing` `assertKafkaCodecCase`, `assertRabbitMqCodecCase`, `registerKafkaCodecContract`, `registerRabbitMqCodecContract`, `CodecContractError`, `TestFramework`, and the `codec-contract` and `jest` entry points.
-- BENCHMARK_LINE
+- Benchmark against 0.4.0 (quick gate, 3 interleaved pairs per cell): publish 0.98–1.10x (batch 1 0.98x, batch 100 1.04x, batch 100 with 5 handlers 1.10x, MongoDB 0.99x), dispatch 1.02–1.03x (PostgreSQL 1 instance 1.02x, 10 hot keys 1.02x, MongoDB 1.03x), so speed is unchanged. WAL bytes per event or delivery are 3–11% lower and `lanes` updates per delivery 0.88x on the PostgreSQL dispatch cell. The 4-instance PostgreSQL dispatch cell was not valid on either side (its template drains before the measurement window ends); that is a harness sizing issue, not a regression.
 
 ## 0.4.0 (2026-10-25)
 

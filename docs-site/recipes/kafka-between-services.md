@@ -31,6 +31,30 @@ const bus = new RelayBus({
 });
 ```
 
+### Several events of a catalog to one topic
+
+When the events belong to a [catalog](/concepts/event-catalogs), one `route` sends the ones you pick with shared settings instead of one route per event:
+
+```ts
+import { produce, route } from '@relaybus/core';
+
+const bus = new RelayBus({
+  store,
+  source: 'orders',
+  transports: [transport],
+  routes: [
+    route(produce(OrderEvents, { events: ['OrderPlaced', 'OrderCancelled'] }), {
+      transport: 'kafka',
+      destination: 'orders.events',
+      retry: { initialDelay: '500ms', maxDelay: '30s' },
+      timeout: '10s',
+    }),
+  ],
+});
+```
+
+Events of one key still reach the topic in commit order whatever their types, and `produce` checks count the events as routed. For a topic whose format names the types differently, add `wireTypes` to the route or the catalog (see [Wire names](/concepts/event-catalogs#wire-names-next-to-the-catalog-and-the-route)).
+
 ## Service B: subscribe and handle
 
 ```ts
