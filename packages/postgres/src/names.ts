@@ -27,6 +27,8 @@ export interface PostgresNames {
   readonly schema: string;
   readonly quotedSchema: string;
   readonly events: string;
+  /** Unquoted, unqualified name of {@link events}, for catalog lookups. */
+  readonly eventsTableName: string;
   readonly deliveries: string;
   readonly keySequences: string;
   /** Lane lease rows: one per lane, see {@link LANE_COUNT}. */
@@ -120,6 +122,7 @@ export function resolvePostgresNames(options: PostgresSchemaOptions = {}): Postg
     schema,
     quotedSchema,
     events: table('events'),
+    eventsTableName: name('events'),
     deliveries: table('deliveries'),
     keySequences: table('key_sequences'),
     lanes: table('lanes'),

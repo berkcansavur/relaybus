@@ -15,9 +15,9 @@ description: 'Step-by-step upgrades between relaybus releases: 0.4.0 to 0.4.1 (P
 ```yaml
 applies to: '@relaybus/* 0.4.0 -> 0.4.1'
 downtime: 'none; publishes and claims wait while setup() rewrites the events table once'
-rollout: '0.4.0 instances that start after the upgrade need setupStore: false'
+rollout: 'mixed 0.4.0 and 0.4.1 instances are safe with the defaults'
 database: 'PostgreSQL: payload and headers of the events table become json (one table rewrite)'
-rollback: 'safe with setupStore: false; 0.4.0 reads and writes the json columns'
+rollback: 'safe with the defaults; 0.4.0 reads and writes the json columns, no DDL'
 ```
 
 **Why.** The PostgreSQL store kept `payload` and `headers` as `jsonb`, which re-orders object keys (shorter keys first, then alphabetically). An event read back from the outbox therefore serialized differently from what the producer published: JSON consumers did not notice, byte or string comparisons and consumers that depend on field order did. 0.4.1 stores both as `json`, which keeps the text the producer serialized, and hands the transport and the handlers exactly that. MongoDB and the in-memory store already kept the order.
@@ -28,7 +28,7 @@ rollback: 'safe with setupStore: false; 0.4.0 reads and writes the json columns'
 
 Nothing to do. The first 0.4.1 instance that starts converts the two columns in place. It is idempotent and guarded: it runs only while a column is still `jsonb`.
 
-The conversion rewrites the events table once under an exclusive lock, so publishes and claims wait for it. It takes about as long as copying the table; on a large table run it at a quiet time, or run the DDL below yourself first. `setup()` runs it in a transaction of its own, so it cannot deadlock with running completions, and on a schema 0.4.0 created (recognized by the marker 0.4.0 left on the lane table) that is all it does: the other schema statements, whose table locks could queue behind running claims, do not run again.
+The conversion rewrites the events table once under an exclusive lock, so publishes and claims wait for it. It takes about as long as copying the table; on a large table run it at a quiet time, or run the DDL below yourself first. `setup()` runs it in a transaction of its own, so it cannot deadlock with running completions, and on a schema 0.4.0 created (recognized by the marker 0.4.0 left on the lane table) that is all it does: the other schema statements, whose table locks could queue behind running claims, do not run again. 0.4.1 keeps writing the marker 0.4.0 writes and reads whether the conversion ran from the column types, so once both columns are `json` its `setup()` runs nothing and takes no lock.
 
 ### Without `setup()` (`setupStore: false`, your own migrations)
 
@@ -46,7 +46,7 @@ ALTER TABLE "public"."relaybus_events"
 
 ### During the rollout
 
-0.4.0 and 0.4.1 instances can run side by side. Before the conversion, 0.4.1 publishes into the `jsonb` columns (PostgreSQL casts on assignment; key order is lost as before); after it, 0.4.0 publishes into the `json` columns the same way. Do not start or restart a 0.4.0 instance with `setupStore: true` once the conversion ran: 0.4.0 does not know the new schema marker, so its `setup()` re-applies all of its schema statements, whose table locks can deadlock with running claims (PostgreSQL then aborts one of them). Finish the rollout first, or give 0.4.0 instances that start during it `setupStore: false`. The same holds for a rollback: deploy 0.4.0 with `setupStore: false`. Rolling back needs no DDL.
+0.4.0 and 0.4.1 instances can run side by side. Before the conversion, 0.4.1 publishes into the `jsonb` columns (PostgreSQL casts on assignment; key order is lost as before); after it, 0.4.0 publishes into the `json` columns the same way. Mixed rollouts and rollbacks are safe with the default settings: a 0.4.0 instance that starts or restarts with `setupStore: true` after the conversion finds its own schema marker, which 0.4.1 keeps, and runs no schema statement. Rolling back needs no DDL; the columns stay `json`, and a later 0.4.1 start has nothing to do.
 
 ### Also in 0.4.1
 

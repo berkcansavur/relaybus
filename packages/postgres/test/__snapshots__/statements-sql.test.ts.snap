@@ -112,7 +112,7 @@ $relaybus_upgrade$",
   completed_at timestamptz NOT NULL
 )",
   "CREATE INDEX IF NOT EXISTS "x_completed_deliveries_completed_idx" ON "bus"."x_completed_deliveries" (completed_at, id)",
-  "COMMENT ON TABLE "bus"."x_lanes" IS 'relaybus schema 97e2e30dabbf0f0bac37bc9f9a531b87'",
+  "COMMENT ON TABLE "bus"."x_lanes" IS 'relaybus schema 22458fc899be38d2ee6edc6fd04a041b'",
 ]
 `;
 
@@ -217,7 +217,7 @@ $relaybus_upgrade$",
 )",
   "CREATE INDEX IF NOT EXISTS "relaybus_event_completions_completed_idx" ON "public"."relaybus_event_completions" (completed_at, event_id)",
   "INSERT INTO "public"."relaybus_lanes" (lane) SELECT generate_series(0, 255)::smallint ON CONFLICT (lane) DO NOTHING",
-  "COMMENT ON TABLE "public"."relaybus_lanes" IS 'relaybus schema 1baadc72d5758b3eac3f928fe77c46eb'",
+  "COMMENT ON TABLE "public"."relaybus_lanes" IS 'relaybus schema ae44fe2cd55d06183921bc5e2bb0db92'",
 ]
 `;
 
@@ -1573,7 +1573,14 @@ WHERE delivery.id = dead.id AND delivery.status = 'dead' RETURNING 1) SELECT cou
   JOIN pg_catalog.pg_description AS d
     ON d.objoid = c.oid AND d.classoid = 'pg_catalog.pg_class'::regclass AND d.objsubid = 0
   WHERE n.nspname = 'bus' AND c.relname = 'x_lanes' AND d.description = $1::text
-) AS current",
+) AS marked, (
+  SELECT count(*) FROM pg_catalog.pg_attribute AS a
+  JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid
+  JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'bus' AND c.relname = 'x_events'
+    AND a.attname IN ('payload', 'headers') AND a.atttypid = 'pg_catalog.json'::pg_catalog.regtype
+    AND NOT a.attisdropped
+) = 2 AS payload_json",
     "setupLock": "SELECT true AS locked FROM pg_advisory_xact_lock(hashtextextended($1::text, 0))",
     "setupLockKey": "relaybus:bus",
   },
@@ -2882,7 +2889,14 @@ WHERE delivery.id = dead.id AND delivery.status = 'dead' RETURNING 1) SELECT cou
   JOIN pg_catalog.pg_description AS d
     ON d.objoid = c.oid AND d.classoid = 'pg_catalog.pg_class'::regclass AND d.objsubid = 0
   WHERE n.nspname = 'public' AND c.relname = 'relaybus_lanes' AND d.description = $1::text
-) AS current",
+) AS marked, (
+  SELECT count(*) FROM pg_catalog.pg_attribute AS a
+  JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid
+  JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'public' AND c.relname = 'relaybus_events'
+    AND a.attname IN ('payload', 'headers') AND a.atttypid = 'pg_catalog.json'::pg_catalog.regtype
+    AND NOT a.attisdropped
+) = 2 AS payload_json",
     "setupLock": "SELECT true AS locked FROM pg_advisory_xact_lock(hashtextextended($1::text, 0))",
     "setupLockKey": "relaybus:public",
   },

@@ -37,6 +37,13 @@ const JSONB_PAYLOAD_COLUMNS = `  payload jsonb NOT NULL,
  */
 export function createPostgresSchemaStatements(options: PostgresSchemaOptions = {}): string[] {
   const names = resolvePostgresNames(options);
+  const statements = schemaBodyStatements(names);
+  statements.push(`COMMENT ON TABLE ${names.lanes} IS '${version040Marker(names, statements)}'`);
+  return statements;
+}
+
+/** The schema statements without the marker comment. */
+function schemaBodyStatements(names: PostgresNames): string[] {
   const statements = [...eventAndDeliveryStatements(names), ...laneAndCompletionStatements(names)];
   if (names.completionHistory) {
     statements.push(...completionHistoryStatements(names));
@@ -44,7 +51,6 @@ export function createPostgresSchemaStatements(options: PostgresSchemaOptions = 
   if (names.schema !== 'public') {
     statements.unshift(`CREATE SCHEMA IF NOT EXISTS ${names.quotedSchema}`);
   }
-  statements.push(`COMMENT ON TABLE ${names.lanes} IS '${postgresSchemaMarker(statements)}'`);
   return statements;
 }
 
@@ -147,12 +153,12 @@ function completionHistoryStatements(names: PostgresNames): string[] {
 }
 
 /**
- * The comment the last schema statement leaves on the lane table: a hash of every statement
- * before it. {@link PostgresEventStore.setup} reads it to skip the statements when the schema is
- * already current, because their table locks queue behind running claims and completions and
- * deadlock with them.
+ * A schema marker: the hash of `statements`. The last schema statement leaves one on the lane table
+ * ({@link version040SchemaMarker}), and {@link PostgresEventStore.setup} reads it to skip the
+ * statements when the schema is already current, because their table locks queue behind running
+ * claims and completions and deadlock with them.
  */
-export function postgresSchemaMarker(statements: readonly string[]): string {
+function postgresSchemaMarker(statements: readonly string[]): string {
   return `relaybus schema ${createHash('sha256').update(statements.join(';')).digest('hex').slice(0, SCHEMA_MARKER_DIGITS)}`;
 }
 
@@ -217,16 +223,22 @@ $relaybus_payload_json$`;
 }
 
 /**
- * The schema marker 0.4.0 left on the lane table: the hash of today's statements without the
- * payload conversion and with the `jsonb` columns. A schema that carries it needs only the
- * conversion, so {@link PostgresEventStore.setup} converts it and moves the marker on without
- * re-running the other schema statements, whose table locks could deadlock with running claims.
+ * The schema marker 0.4.0 writes, which 0.4.1 keeps writing: the hash of the schema statements without
+ * the payload conversion and with the `jsonb` columns of 0.4.0. A 0.4.0 instance started next to 0.4.1,
+ * or after a rollback, then still finds its marker and runs no schema statement, whose table locks could
+ * deadlock with running claims. Whether the payload columns are converted is read from the column types
+ * instead (see {@link SetupStatements.schemaCurrent}).
  */
 export function version040SchemaMarker(options: PostgresSchemaOptions = {}): string {
-  const conversion = upgradePayloadToJson(resolvePostgresNames(options));
+  const names = resolvePostgresNames(options);
+  return version040Marker(names, schemaBodyStatements(names));
+}
+
+/** {@link version040SchemaMarker} of the body statements of {@link schemaBodyStatements}. */
+function version040Marker(names: PostgresNames, statements: readonly string[]): string {
+  const conversion = upgradePayloadToJson(names);
   return postgresSchemaMarker(
-    createPostgresSchemaStatements(options)
-      .slice(0, -1)
+    statements
       .filter((statement) => statement !== conversion)
       .map((statement) => statement.replace(PAYLOAD_COLUMNS, JSONB_PAYLOAD_COLUMNS)),
   );
