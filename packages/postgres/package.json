@@ -124,7 +124,7 @@
     "kysely": ">=0.27.0",
     "pg": "^8.11.0",
     "typeorm": ">=0.3.0",
-    "@prisma/client": "^6.0.0 || ^7.0.0"
+    "@prisma/client": "^5.0.0 || ^6.0.0 || ^7.0.0"
   },
   "devDependencies": {
     "@prisma/adapter-pg": "7.10.1",

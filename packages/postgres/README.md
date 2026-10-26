@@ -102,7 +102,8 @@ Where the budget lives depends on who owns the pool:
 - **A pool or executor you pass in**: the budget is transaction-scoped (`SET LOCAL` semantics), set with `BEGIN` by
   `PgExecutor` and by its own statement for the other adapters. Session settings of your pool are never changed.
 
-**Prisma** is integration-tested with a generated Prisma Client 7.10 (and 6.19 in CI) on the `@prisma/adapter-pg`
+**Prisma** 5, 6 and 7 are supported (optional peer `@prisma/client` `^5.0.0 || ^6.0.0 || ^7.0.0`). It is
+integration-tested with a generated Prisma Client 7.10 (and 6.19 and 5.22 in CI) on the `@prisma/adapter-pg`
 driver adapter: the full event store contract, publishing in `prisma.$transaction`, rollback and concurrent
 transactions. The adapter is typed structurally, so the package has no Prisma dependency. Prisma interactive
 transactions default to a 5 s timeout, so pass `createPrismaExecutor(prisma, { timeout, maxWait })` if handlers run

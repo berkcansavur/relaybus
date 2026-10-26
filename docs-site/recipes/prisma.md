@@ -42,7 +42,7 @@ If the transaction rolls back, the event is rolled back with it.
 
 - Prisma interactive transactions default to a 5 second timeout. If handlers run longer, pass `createPrismaExecutor(prisma, { timeout, maxWait })`.
 - Move your Prisma disconnect from `onModuleDestroy` to `onApplicationShutdown`, so handlers still have their connection while the bus drains.
-- The Prisma adapter is typed structurally (relaybus does not depend on Prisma). It runs the full contract suite against PostgreSQL with a generated Prisma Client (7.10, and 6.19 in CI) on `@prisma/adapter-pg`.
+- The Prisma adapter is typed structurally (relaybus does not depend on Prisma). It runs the full contract suite against PostgreSQL with a generated Prisma Client (7.10, and 6.19 and 5.22 in CI) on `@prisma/adapter-pg`. Prisma 5 needs `previewFeatures = ["driverAdapters"]` in its generator for the adapter.
 - Give the store the `pg` pool of your driver adapter too: `new PostgresEventStore({ executor: createPrismaExecutor(prisma), pool })` with `new PrismaClient({ adapter: new PrismaPg(pool) })`. The dispatcher's statements then run as prepared statements, and the store listens for the notification PostgreSQL sends when your `$transaction` commits, so the handler starts within milliseconds of the commit instead of after a fixed delay or the next poll.
 - Prisma 7 raw queries cannot read a `void` column; relaybus' statements never return one.
 
