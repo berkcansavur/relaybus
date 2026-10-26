@@ -19,6 +19,39 @@ export class ConfigurationError extends RelayBusError {
 }
 
 /**
+ * A catalog or a catalog route names an event that is not part of the catalog, for example a wire
+ * name for an event the catalog does not have.
+ */
+export class UnknownCatalogEventError extends ConfigurationError {
+  override name = 'UnknownCatalogEventError';
+  override readonly code: string = 'RELAYBUS_CATALOG_UNKNOWN_EVENT';
+}
+
+/** A catalog route sends an event to a destination that another route already sends it to. */
+export class DuplicateRouteEventError extends ConfigurationError {
+  override name = 'DuplicateRouteEventError';
+  override readonly code: string = 'RELAYBUS_ROUTE_DUPLICATE_EVENT';
+}
+
+/**
+ * Wire names clash: one event type has two wire names on a transport, or two event types share one,
+ * whether they come from catalogs, routes or the `wireTypes` of a codec.
+ */
+export class WireTypeCollisionError extends ConfigurationError {
+  override name = 'WireTypeCollisionError';
+  override readonly code: string = 'RELAYBUS_WIRE_TYPE_COLLISION';
+}
+
+/**
+ * A route or catalog declares wire names for a transport whose codec cannot carry them: the
+ * transport has no `declareWireTypes`, or its codec is not a `jsonEnvelope` with a type to map.
+ */
+export class WireTypesUnsupportedError extends ConfigurationError {
+  override name = 'WireTypesUnsupportedError';
+  override readonly code: string = 'RELAYBUS_WIRE_TYPES_UNSUPPORTED';
+}
+
+/**
  * Thrown by `publish` when no transaction can be found and the bus runs with
  * `transactionMode: 'required'` (the default). Publishing outside a transaction
  * would reintroduce the dual-write problem the outbox exists to prevent.

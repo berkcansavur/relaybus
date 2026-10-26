@@ -1,4 +1,5 @@
 import type { CatalogDeclaration } from './catalog-coverage.js';
+import type { RouteDefinition } from './catalog-routes.js';
 import type { Catalog } from './catalog.js';
 import type { Clock } from './clock.js';
 import type { Duration } from './duration.js';
@@ -123,8 +124,12 @@ export interface RelayBusOptions<TTransaction = unknown> {
   readonly dispatcher?: DispatcherOptions;
   readonly retention?: RetentionOptions;
   readonly transports?: readonly Transport[];
-  /** Events forwarded to brokers after they commit. */
-  readonly routes?: readonly RouteOptions[];
+  /**
+   * Events forwarded to brokers after they commit: a route per event class or type, or
+   * `route(produce(Catalog, { events }), { transport, destination, ... })` for several events of a
+   * catalog with shared settings.
+   */
+  readonly routes?: readonly RouteDefinition[];
   /** Broker destinations whose events are stored and dispatched to local handlers. */
   readonly subscriptions?: readonly InboundSubscriptionOptions[];
   /** Create tables and indexes on start. Default true. */

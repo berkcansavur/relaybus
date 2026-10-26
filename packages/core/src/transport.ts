@@ -56,6 +56,16 @@ export interface Transport {
    */
   readonly system?: string;
   connect?(): Promise<void>;
+  /**
+   * Offered the wire names that routes and catalogs declare (event type to the name the wire
+   * format uses), once when the bus is created, before `connect` and `subscribe`. Check them
+   * without changing anything and return the function that applies them to the codec, so the bus
+   * can refuse a configuration before any transport changed. Throw
+   * {@link WireTypeCollisionError} when a name clashes with one the codec already has and
+   * {@link WireTypesUnsupportedError} when the codec cannot map type names or the transport
+   * already started. A transport without it refuses declared wire names at boot.
+   */
+  declareWireTypes?(wireTypes: Readonly<Record<string, string>>): () => void;
   publish(envelope: EventEnvelope, destination: string): Promise<void>;
   subscribe?(
     destinations: readonly string[],

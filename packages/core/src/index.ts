@@ -1,6 +1,13 @@
 export { systemClock, type Clock } from './clock.js';
 export { MAX_TIMER_DELAY_MS, toMilliseconds, type Duration } from './duration.js';
 export { CatalogPublisher, type PublishTarget } from './catalog-publisher.js';
+export {
+  catalogWireTypes,
+  route,
+  type CatalogRoute,
+  type CatalogRouteOptions,
+  type RouteDefinition,
+} from './catalog-routes.js';
 export { consume, produce, type CatalogDeclaration, type CatalogRole } from './catalog-coverage.js';
 export {
   defineCatalog,
@@ -27,6 +34,7 @@ export {
   ConfigurationError,
   DispatcherStoppedError,
   DrainIncompleteError,
+  DuplicateRouteEventError,
   EventValidationError,
   HandlerTimeoutError,
   InvalidEnvelopeError,
@@ -36,6 +44,9 @@ export {
   RelayBusError,
   TransactionRequiredError,
   TransactionTimeoutError,
+  UnknownCatalogEventError,
+  WireTypeCollisionError,
+  WireTypesUnsupportedError,
   toErrorInfo,
   type ErrorInfo,
   type ValidationIssue,

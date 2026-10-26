@@ -13,6 +13,8 @@ export interface PublishedMessage {
 export class InMemoryTransport implements Transport {
   readonly name: string;
   readonly published: PublishedMessage[] = [];
+  /** Wire names (event type to name) that routes and catalogs declared; the transport sends events as they are. */
+  readonly declaredWireTypes: Record<string, string> = {};
   readonly #subscribers = new Map<string, TransportMessageHandler[]>();
   #failNextPublishes = 0;
   connected = false;
@@ -24,6 +26,12 @@ export class InMemoryTransport implements Transport {
 
   async connect(): Promise<void> {
     this.connected = true;
+  }
+
+  declareWireTypes(wireTypes: Readonly<Record<string, string>>): () => void {
+    return () => {
+      Object.assign(this.declaredWireTypes, wireTypes);
+    };
   }
 
   /** Makes the next `count` publishes reject, simulating a broker outage. */

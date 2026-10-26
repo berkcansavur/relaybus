@@ -6,6 +6,7 @@ import {
   defineCatalog,
   defineEvent,
   produce,
+  route,
   type EventOf,
 } from '@relaybus/core';
 import { InMemoryTransport } from '@relaybus/testing';
@@ -141,6 +142,30 @@ describe('RelayBusModule.forFeature', () => {
       ],
     };
     await expect(boot([Billing], routed)).resolves.toBeUndefined();
+  });
+
+  it('sees the events of a catalog route as routed', async () => {
+    const Billing = featureModule('BillingModule', {
+      produces: [BillingEvents, OrderEvents],
+    });
+    const routed = (
+      events: readonly ('OrderPlaced' | 'OrderCancelled')[],
+    ): RelayBusModuleOptions => ({
+      store: new InMemoryEventStore(),
+      dispatcher: { enabled: false },
+      transports: [new InMemoryTransport('memory')],
+      routes: [
+        { event: InvoiceIssued, transport: 'memory' },
+        route(produce(OrderEvents, { events }), { transport: 'memory', destination: 'orders' }),
+      ],
+    });
+
+    await expect(
+      boot([Billing], routed(['OrderPlaced', 'OrderCancelled'])),
+    ).resolves.toBeUndefined();
+    await expect(boot([Billing], routed(['OrderPlaced']))).rejects.toThrow(
+      'BillingModule: OrderEvents.OrderCancelled (order.cancelled.v1) has no route to a transport',
+    );
   });
 
   it('names events of an unnamed catalog after the catalog role and takes empty options', () => {

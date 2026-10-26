@@ -185,6 +185,8 @@ export interface ResolvedTransportSettings {
   readonly allowUnroutable: boolean;
   readonly publishTimeoutMs: number;
   readonly shutdownTimeoutMs: number;
+  /** The wire format the `encode` and `decode` below come from. */
+  readonly codec: RabbitMqCodec;
   /** Turns an event into the message to publish. */
   readonly encode: (envelope: EventEnvelope) => EncodedMessage;
   /** Turns a consumed message into a complete envelope; throws for a malformed one. */
@@ -331,6 +333,7 @@ function resolveRuntime(
   | 'allowUnroutable'
   | 'publishTimeoutMs'
   | 'shutdownTimeoutMs'
+  | 'codec'
   | 'encode'
   | 'decode'
   | 'logger'
@@ -365,16 +368,24 @@ export function resolveQueueName(settings: ResolvedTransportSettings): string {
 function resolveCodec({
   codec,
   decode,
-}: RabbitMqTransportOptions): Pick<ResolvedTransportSettings, 'encode' | 'decode'> {
+}: RabbitMqTransportOptions): Pick<ResolvedTransportSettings, 'codec' | 'encode' | 'decode'> {
   if (decode !== undefined && codec !== undefined) {
     throw new ConfigurationError("Give 'codec' or the deprecated 'decode', not both");
   }
-  const chosen =
-    decode === undefined ? (codec ?? cloudEventsBinary) : { encode: encodeEnvelope, decode };
+  return codecSettings(
+    decode === undefined ? (codec ?? cloudEventsBinary) : { encode: encodeEnvelope, decode },
+  );
+}
+
+/** The settings that follow from a codec: the codec itself and its `encode` and `decode`. */
+export function codecSettings(
+  chosen: RabbitMqCodec,
+): Pick<ResolvedTransportSettings, 'codec' | 'encode' | 'decode'> {
   if (chosen === cloudEventsBinary) {
-    return { encode: encodeEnvelope, decode: decodeEnvelope };
+    return { codec: chosen, encode: encodeEnvelope, decode: decodeEnvelope };
   }
   return {
+    codec: chosen,
     encode: chosen.encode,
     decode: (message) => decodeRabbitMqMessage(chosen, message),
   };
