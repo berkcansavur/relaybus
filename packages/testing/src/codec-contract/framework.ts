@@ -1,3 +1,5 @@
+import { RelayBusError } from '@relaybus/core';
+
 // Running the codec contract under any test framework: the cases as plain assertions, and the
 // registration of one test per case through the framework's own `describe` and `it`.
 
@@ -8,14 +10,13 @@ export interface TestFramework {
 }
 
 /** Thrown by a codec contract assertion: one line per mismatch between the codec and the case. */
-export class CodecContractError extends Error {
+export class CodecContractError extends RelayBusError {
+  override name = 'CodecContractError';
+  override readonly code: string = 'RELAYBUS_TESTING_CODEC_CONTRACT';
   readonly mismatches: readonly string[];
 
-  constructor(caseName: string, mismatches: readonly string[]) {
-    super(
-      `Codec case '${caseName}' does not match:\n${mismatches.map((line) => `- ${line}`).join('\n')}`,
-    );
-    this.name = 'CodecContractError';
+  constructor(message: string, mismatches: readonly string[] = []) {
+    super(message);
     this.mismatches = mismatches;
   }
 }
@@ -23,7 +24,8 @@ export class CodecContractError extends Error {
 /** Throws a {@link CodecContractError} when `mismatches` is not empty. */
 export function assertNoMismatches(caseName: string, mismatches: readonly string[]): void {
   if (mismatches.length > 0) {
-    throw new CodecContractError(caseName, mismatches);
+    const lines = mismatches.map((line) => `- ${line}`).join('\n');
+    throw new CodecContractError(`Codec case '${caseName}' does not match:\n${lines}`, mismatches);
   }
 }
 
