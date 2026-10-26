@@ -66,7 +66,18 @@ export interface PostgresConnectionOptions extends PostgresEventStoreSettings {
 /** Use another database library through an adapter. The store never closes it. */
 export interface PostgresExecutorOptions<TTransaction> extends PostgresEventStoreSettings {
   readonly executor: PostgresExecutor<TTransaction>;
-  readonly pool?: never;
+  /**
+   * Optional `pg` pool on the same database, for example the one an ORM's `pg` driver adapter uses
+   * (`new PrismaPg(pool)`, Kysely's `PostgresDialect`, Drizzle's `node-postgres`). The store never
+   * closes it. With it:
+   * - the statements the store sends outside a transaction (the dispatcher's claims, completions and
+   *   lease renewals, maintenance) run on it as prepared statements (`preparedStatements`), which ORM
+   *   raw queries cannot do; statements in a transaction still go through `executor`;
+   * - with `wakeUp: 'notify'` the store listens for wake-ups with its connection settings, so a
+   *   delivery published in an ORM transaction is dispatched right after that transaction commits,
+   *   instead of after a fixed delay or the next poll.
+   */
+  readonly pool?: Pool;
   readonly connectionString?: never;
   readonly poolConfig?: never;
 }
@@ -84,7 +95,8 @@ export function resolveStoreSettings<TTransaction>(
   wakeUp: PostgresWakeUp;
   queryOptions: PostgresQueryOptions | undefined;
 } {
-  const sources = [options.pool, options.connectionString, options.executor].filter(
+  // A pool next to an executor only serves the store's own statements (PostgresExecutorOptions.pool).
+  const sources = [options.executor ?? options.pool, options.connectionString].filter(
     (source) => source !== undefined,
   );
   if (sources.length !== 1) {

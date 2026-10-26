@@ -289,7 +289,7 @@ WHERE (SELECT count(*) FROM woken) >= 0",
 WHERE id = ANY (ARRAY(SELECT jsonb_array_elements_text($1::jsonb)))
 ORDER BY id
 FOR NO KEY UPDATE",
-    "notify": "SELECT pg_notify('bus.x_deliveries', '')",
+    "notify": "SELECT true AS notified FROM pg_notify('bus.x_deliveries', '')",
   },
   "claim": {
     "claim": "WITH scope AS MATERIALIZED (
@@ -1544,7 +1544,7 @@ WHERE delivery.id = dead.id AND delivery.status = 'dead' RETURNING 1) SELECT cou
     ON d.objoid = c.oid AND d.classoid = 'pg_catalog.pg_class'::regclass AND d.objsubid = 0
   WHERE n.nspname = 'bus' AND c.relname = 'x_lanes' AND d.description = $1::text
 ) AS current",
-    "setupLock": "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+    "setupLock": "SELECT true AS locked FROM pg_advisory_xact_lock(hashtextextended($1::text, 0))",
     "setupLockKey": "relaybus:bus",
   },
 }
@@ -1648,7 +1648,7 @@ WHERE (SELECT count(*) FROM woken) >= 0",
 WHERE id = ANY (ARRAY(SELECT jsonb_array_elements_text($1::jsonb)))
 ORDER BY id
 FOR NO KEY UPDATE",
-    "notify": "SELECT pg_notify('public.relaybus_deliveries', '')",
+    "notify": "SELECT true AS notified FROM pg_notify('public.relaybus_deliveries', '')",
   },
   "claim": {
     "claim": "WITH scope AS MATERIALIZED (
@@ -2853,7 +2853,7 @@ WHERE delivery.id = dead.id AND delivery.status = 'dead' RETURNING 1) SELECT cou
     ON d.objoid = c.oid AND d.classoid = 'pg_catalog.pg_class'::regclass AND d.objsubid = 0
   WHERE n.nspname = 'public' AND c.relname = 'relaybus_lanes' AND d.description = $1::text
 ) AS current",
-    "setupLock": "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+    "setupLock": "SELECT true AS locked FROM pg_advisory_xact_lock(hashtextextended($1::text, 0))",
     "setupLockKey": "relaybus:public",
   },
 }

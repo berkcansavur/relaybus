@@ -1,5 +1,5 @@
 import { SpanKind } from '@opentelemetry/api';
-import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
+import type { ReadableSpan } from '@opentelemetry/sdk-trace';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   InMemoryEventStore,
@@ -113,7 +113,7 @@ describe('one trace from publish in one service to process in another', () => {
     await services.billing.drain();
     await services.billing.stop();
 
-    const spans = telemetry.spans();
+    const spans = await telemetry.spans();
     const publish = only(spans, 'publish order.placed.v1');
     const send = only(spans, 'send orders');
     const process = only(spans, 'process order.placed.v1');

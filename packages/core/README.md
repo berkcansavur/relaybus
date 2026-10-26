@@ -311,7 +311,12 @@ deploy, are still claimed and sent by the new route; the store rows keep their o
 ## Operations
 
 `listDeliveries(query)`, `requeue(ids)`, `statistics()`, `purgeExpired()`,
-`handlers()`, `runOnce()` and `drain()` (tests), `start()` and `stop()`.
+`handlers()`, `runOnce()` and `drain()` (tests), `start()`, `stop()` and `wake()`.
+
+**`wake()` after your own commit.** A publish in relaybus' own transaction wakes the dispatcher right after its
+commit. A publish in your transaction commits at a time the bus cannot see: unless the store reports the commit
+(PostgreSQL with `LISTEN/NOTIFY`), the dispatcher is woken 25, 100 and 250 ms after the latest publish and otherwise
+finds the delivery at its next poll. Call `bus.wake()` right after such a commit to claim at once.
 
 **`stop({ timeout })` is bounded.** The whole shutdown (stop claiming, wait for running
 handlers, hand back leases, close transports and the store) takes at most `timeout`, default

@@ -16,7 +16,7 @@ export function assertCanSubscribe(
     destinations,
   }: { readonly settings: KafkaSettings; readonly destinations: readonly string[] },
 ): void {
-  const { name, groupId, invalidPolicy } = settings;
+  const { name, groupId, invalidPolicy, kafka } = settings;
   if (state === 'closed') {
     throw new TransportClosedError(`Transport '${name}' is closed`);
   }
@@ -24,6 +24,9 @@ export function assertCanSubscribe(
     throw new ConfigurationError(
       `Transport '${name}' already subscribed; list every topic in one subscription or use one KafkaTransport per consumer group`,
     );
+  }
+  if (kafka === undefined) {
+    throw new ConfigurationError(`Transport '${name}' needs 'kafka' to create its consumer`);
   }
   if (groupId === undefined || groupId.length === 0) {
     throw new ConfigurationError(`Transport '${name}' needs a groupId to subscribe`);

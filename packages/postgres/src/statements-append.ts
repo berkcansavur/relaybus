@@ -85,9 +85,13 @@ WHERE (SELECT count(*) FROM woken) >= 0`;
 )`;
   }
 
-  /** One wake-up notification on {@link PostgresNames.notificationChannel}, outside any publishing transaction. */
+  /**
+   * One wake-up notification on {@link PostgresNames.notificationChannel}, outside any publishing
+   * transaction. Returns a boolean column rather than the `void` of `pg_notify`, which some libraries
+   * cannot read (Prisma's raw queries reject a `void` column).
+   */
   get notify(): string {
-    return `SELECT pg_notify('${this.#names.notificationChannel}', '')`;
+    return `SELECT true AS notified FROM pg_notify('${this.#names.notificationChannel}', '')`;
   }
 
   /**

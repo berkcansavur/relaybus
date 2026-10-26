@@ -3,6 +3,7 @@ import { createJsonEnvelopeFormat, type JsonEnvelopeMapping } from '@relaybus/co
 import type { AmqpMessage } from './amqp-types.js';
 import { MalformedMessageError, RabbitMqUnencodableEventError } from './errors.js';
 import {
+  completeDecodedEvent,
   decodeCloudEvent,
   nonEmptyText,
   parseJsonBody,
@@ -131,4 +132,16 @@ function requireMessageId(message: AmqpMessage): string {
     throw new MalformedMessageError('Message has no id: the messageId property is missing');
   }
   return id;
+}
+
+/**
+ * The event a {@link RabbitMqTransport} with `codec` hands to the bus for `message`: the codec's
+ * `decode`, with what it leaves out filled in (see `DecodedEvent`). Throws for a malformed
+ * message. For codec contract tests (`rabbitMqCodecContract` of `@relaybus/testing`).
+ */
+export function decodeRabbitMqMessage(codec: RabbitMqCodec, message: AmqpMessage): EventEnvelope {
+  if (codec === cloudEventsBinary) {
+    return decodeEnvelope(message);
+  }
+  return completeDecodedEvent(codec.decode(message), message);
 }

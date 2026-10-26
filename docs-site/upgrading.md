@@ -1,12 +1,99 @@
 ---
 title: Upgrading relaybus
-description: 'Step-by-step upgrades between relaybus releases: 0.2 to 0.3 (route ids, transaction budget, StopResult, decorator and codec renames, error codes) and 0.1 to 0.2 (completed deliveries deleted, completionHistory, schema upgrade, PgBouncer settings).'
+description: 'Step-by-step upgrades between relaybus releases: 0.3 to 0.4 (nothing required; optional pool, wake, Confluent client, record keys, injected producer), 0.2 to 0.3 (route ids, transaction budget, StopResult, decorator and codec renames, error codes) and 0.1 to 0.2 (completed deliveries deleted, completionHistory, schema upgrade, PgBouncer settings).'
 ---
 
 # Upgrading relaybus
 
+- [0.3 → 0.4](#upgrading-from-0-3-to-0-4)
 - [0.2 → 0.3](#upgrading-from-0-2-to-0-3)
 - [0.1 → 0.2](#upgrading-from-0-1-to-0-2)
+
+## Upgrading from 0.3 to 0.4
+
+```yaml
+applies to: '@relaybus/* 0.3.x -> 0.4.0'
+downtime: 'none; a rolling deploy is supported'
+database: 'no migration; setup() has nothing new to apply'
+rollback: 'safe; 0.4.0 writes the same rows, SQL and wire format as 0.3.x'
+```
+
+**There is nothing to do.** The public API only grew, defaults are unchanged and the stored and wire formats are the same. Update the packages (keep every `@relaybus/*` on one version) and deploy:
+
+```sh
+pnpm add @relaybus/core@0.4.0 @relaybus/postgres@0.4.0
+```
+
+Everything below is optional.
+
+### Optional: give an ORM store the pool
+
+With Prisma, Kysely or Drizzle, pass the `pg` pool your ORM's driver uses next to `executor`. Claims run as prepared statements, and an event published in your ORM transaction is dispatched right after the commit instead of at the next poll:
+
+```ts
+const pool = new Pool({ connectionString });
+const prisma = new PrismaClient({ adapter: new PrismaPg(pool) });
+const store = new PostgresEventStore({ executor: createPrismaExecutor(prisma), pool });
+```
+
+### Optional: wake the dispatcher after your own commit
+
+For a store without commit notifications (MongoDB, `wakeUp: 'poll'`, an executor without `pool`):
+
+```ts
+await myTransaction.commit();
+bus.wake();
+```
+
+Without it the dispatcher is woken 25, 100 and 250 ms after the latest publish and otherwise at the next poll.
+
+### Optional: the Confluent Kafka client
+
+```ts
+import { KafkaJS } from '@confluentinc/kafka-javascript';
+
+const kafka = new KafkaJS.Kafka({ kafkaJS: { clientId: 'orders', brokers: ['kafka:9092'] } });
+new KafkaTransport({ kafka, client: 'confluent', groupId: 'billing' });
+```
+
+`kafkajs` stays the default and keeps working. The two clients differ in a few behaviours; read [Choosing a client](/packages/kafka#choosing-a-client) first and roll it out per service.
+
+### Optional: control the Kafka record key
+
+```ts
+jsonEnvelope({ /* mapping */ recordKey: 'none' }); // or (event) => event.payload.accountId
+```
+
+The default `'event-key'` is what 0.3 wrote. A keyless record is placed by the producer, so per-key order then holds only up to the broker.
+
+### Optional: publish through your own producer
+
+```ts
+const producer = kafka.producer(); // already connected, owned by your application
+await producer.connect();
+new KafkaTransport({ producer }); // publish-only; add kafka and groupId to consume as well
+```
+
+The transport only calls `send`; it never connects or disconnects the producer. Do not combine `producer` with `producerConfig` or `maxInFlightRequests` (a `ConfigurationError`): configure the producer itself.
+
+### Optional: in-house formats and their tests
+
+```ts
+jsonEnvelope({
+  type: { header: 'x-event-type' },
+  payload: { body: 'payload' },
+  occurredAt: { body: 'sentAt', format: 'epoch-millis' },
+  extra: { body: { schema: 'orders/v1' }, headers: { 'x-schema-version': '1' } },
+});
+```
+
+```ts
+import { kafkaCodecContract } from '@relaybus/testing';
+
+kafkaCodecContract('orders format', { encode: codec.encode, decode, cases });
+```
+
+See [Interoperating with non-relaybus services](/recipes/interoperating-with-other-services) for legacy flat envelopes and the contract helpers.
 
 ## Upgrading from 0.2 to 0.3
 

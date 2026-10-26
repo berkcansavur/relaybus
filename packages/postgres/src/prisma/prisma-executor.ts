@@ -25,8 +25,7 @@ export interface PrismaTransactionOptions {
  * dependency. The transaction handle is the client of an interactive
  * transaction: pass `tx` from `prisma.$transaction(async (tx) => ...)`.
  *
- * Not yet verified against a real Prisma client and database: it is covered by
- * unit tests with a structural fake only.
+ * Integration-tested with a generated Prisma Client 7 on the `@prisma/adapter-pg` driver adapter.
  */
 export function createPrismaExecutor(
   client: PrismaClientLike,

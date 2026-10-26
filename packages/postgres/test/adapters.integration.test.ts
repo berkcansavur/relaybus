@@ -2,7 +2,10 @@ import { CompiledQuery, Kysely, PostgresDialect, type Transaction } from 'kysely
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { sql as drizzleSql } from 'drizzle-orm';
 import knexFactory, { type Knex } from 'knex';
+import type { Pool } from 'pg';
 import { DataSource, type EntityManager } from 'typeorm';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { PrismaClient } from './prisma/generated/client.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { RelayBus, defineEvent, type EventStore } from '@relaybus/core';
 import { eventStoreContract } from '@relaybus/testing';
@@ -10,6 +13,7 @@ import { PostgresEventStore, type PostgresExecutor } from '../src/index.js';
 import { createDrizzleExecutor } from '../src/drizzle/index.js';
 import { createKnexExecutor } from '../src/knex/index.js';
 import { createKyselyExecutor } from '../src/kysely/index.js';
+import { createPrismaExecutor } from '../src/prisma/index.js';
 import { createTypeOrmExecutor } from '../src/typeorm/index.js';
 import {
   dropSchema,
@@ -24,6 +28,8 @@ class OrderPlaced extends defineEvent<{ orderId: string }>('order.placed.v1') {}
 /** Everything the shared tests need from one ORM, on one schema. */
 interface Harness<TTransaction> {
   readonly executor: PostgresExecutor<TTransaction>;
+  /** A `pg` pool for the statements the store sends outside a transaction, when the store gets one. */
+  readonly pool?: Pool;
   /** The ORM's own transaction API, as application code uses it. */
   begin<T>(work: (transaction: TTransaction) => Promise<T>): Promise<T>;
   /** A business write through the ORM transaction. */
@@ -111,6 +117,31 @@ const drizzleAdapter: Adapter<DrizzleTransaction> = {
   },
 };
 
+type PrismaTransaction = Parameters<Parameters<PrismaClient['$transaction']>[0]>[0];
+
+/** A real Prisma Client (generated from test/prisma/schema.prisma) on the `pg` driver adapter. */
+const prismaAdapter = (withPool: boolean): Adapter<PrismaTransaction> => ({
+  name: withPool ? 'Prisma with pool' : 'Prisma',
+  async create(connectionString, schema) {
+    const pool = createTestPool(connectionString, 10);
+    const prisma = new PrismaClient({ adapter: new PrismaPg(pool) });
+    return {
+      ...(withPool ? { pool } : {}),
+      executor: createPrismaExecutor(prisma, {
+        timeout: 20_000,
+      }) as unknown as PostgresExecutor<PrismaTransaction>,
+      begin: (work) => prisma.$transaction(work),
+      async insertOrder(transaction, orderId) {
+        await transaction.$executeRawUnsafe(orderInsertSql(schema), orderId);
+      },
+      async destroy() {
+        await prisma.$disconnect();
+        await pool.end();
+      },
+    };
+  },
+});
+
 let database: TestDatabase;
 
 beforeAll(async () => {
@@ -144,6 +175,7 @@ function defineAdapterTests<TTransaction>(adapter: Adapter<TTransaction>): void 
       const harness = await adapter.create(database.connectionString, schema);
       const store = new PostgresEventStore<TTransaction>({
         executor: harness.executor,
+        ...(harness.pool === undefined ? {} : { pool: harness.pool }),
         schema,
         completionHistory,
       });
@@ -249,3 +281,41 @@ defineAdapterTests(kyselyAdapter);
 defineAdapterTests(knexAdapter);
 defineAdapterTests(typeOrmAdapter);
 defineAdapterTests(drizzleAdapter);
+defineAdapterTests(prismaAdapter(false));
+defineAdapterTests(prismaAdapter(true));
+
+describe('Prisma adapter with a generated client', () => {
+  it('publishes next to typed model writes in concurrent interactive transactions', async () => {
+    const schema = uniqueSchema();
+    const pool = createTestPool(database.connectionString, 10);
+    const prisma = new PrismaClient({ adapter: new PrismaPg(pool) });
+    await database.pool.query('CREATE TABLE IF NOT EXISTS prisma_orders (id text PRIMARY KEY)');
+    const store = new PostgresEventStore({ executor: createPrismaExecutor(prisma), schema });
+    await store.setup();
+    const bus = new RelayBus({ store, setupStore: false, dispatcher: { enabled: false } });
+    bus.subscribe(OrderPlaced, () => undefined, { id: 'listener' });
+    const orderIds = Array.from({ length: 20 }, (_, index) => `${schema}-${index}`);
+    const results = await Promise.allSettled(
+      orderIds.map((orderId, index) =>
+        prisma.$transaction(async (transaction) => {
+          await transaction.order.create({ data: { id: orderId } });
+          await bus.publish(new OrderPlaced({ orderId }), { transaction, key: 'one-key' });
+          if (index % 4 === 3) {
+            throw new Error('business failure');
+          }
+        }),
+      ),
+    );
+    const committed = orderIds.filter((_, index) => results[index]!.status === 'fulfilled');
+    expect(committed).toHaveLength(15);
+    const stored = await prisma.order.findMany({ where: { id: { startsWith: `${schema}-` } } });
+    expect(stored.map((order) => order.id).sort()).toEqual([...committed].sort());
+    const deliveries = await store.listDeliveries({});
+    expect(new Set(deliveries.map((delivery) => delivery.event.id)).size).toBe(15);
+    // One key: the dispatcher hands the deliveries out one at a time, in commit order.
+    expect(await bus.drain()).toBe(15);
+    await prisma.$disconnect();
+    await pool.end();
+    await dropSchema(database.pool, schema);
+  });
+});

@@ -1,7 +1,14 @@
 import { ConfigurationError } from '../errors.js';
 import { assertEventType } from '../event.js';
 import { isJsonObject } from './cloudevents.js';
-import type { FixedType, JsonEnvelopeFailures, JsonEnvelopeMapping } from './json-envelope.js';
+import type {
+  ExtraValue,
+  FixedType,
+  JsonConstant,
+  JsonEnvelopeFailures,
+  JsonEnvelopeMapping,
+  TimeFormat,
+} from './json-envelope.js';
 
 // Compiling a jsonEnvelope mapping into the plan that writing and reading follow.
 
@@ -22,13 +29,32 @@ export type Plan = {
   readonly type: Location | FixedType;
   /** Undefined when the transport supplies the id. */
   readonly id: Location | undefined;
+  /** Whether a message without the mapped id gets the transport's own id instead. */
+  readonly idWhenMissing: boolean;
   readonly optional: Readonly<Partial<Record<OptionalName, Location>>>;
   /** Undefined when the payload is the whole body. */
   readonly payload: readonly string[] | undefined;
-  /** Undefined when event headers are the unmapped message headers. */
+  /** Undefined when event headers are the unmapped message headers or top-level fields. */
   readonly headers: readonly string[] | undefined;
+  /** Whether event headers are spread over the top level of the body. */
+  readonly topLevelHeaders: boolean;
+  /** Top-level body names a mapped, payload, headers or extra value uses. */
+  readonly topLevelNames: ReadonlySet<string>;
+  /** Headers the mapping writes itself: the mapped ones and the extra ones. */
   readonly mappedHeaders: ReadonlySet<string>;
+  readonly timeFormat: TimeFormat;
+  readonly extraBody: readonly ExtraBodyValue[];
+  readonly extraHeaders: readonly (readonly [string, ExtraValue<string>])[];
+  readonly bodyOrder: readonly string[];
 };
+
+/** An extra body value at its path. */
+export type ExtraBodyValue = {
+  readonly path: readonly string[];
+  readonly value: ExtraValue<JsonConstant>;
+};
+
+const TIME_FORMATS: readonly TimeFormat[] = ['rfc3339', 'epoch-millis', 'epoch-seconds'];
 
 export const ARRAY_INDEX = /^(?:0|[1-9]\d*)$/;
 
@@ -49,15 +75,63 @@ export function compile(
       optional[name] = toLocation(field, name);
     }
   }
+  const payload = compilePayload(mapping.payload);
+  const topLevelHeaders = mapping.headers === 'top-level-fields';
+  if (topLevelHeaders && payload === undefined) {
+    throw new ConfigurationError("jsonEnvelope headers 'top-level-fields' needs a body payload");
+  }
   const plan: Plan = {
     type: compileType(mapping.type),
     id: compileId(mapping.id, transportIds),
+    idWhenMissing: isJsonObject(mapping.id) && 'whenMissing' in mapping.id,
     optional,
-    payload: compilePayload(mapping.payload),
-    headers: compileHeaders(mapping.headers),
+    payload,
+    headers: topLevelHeaders ? undefined : compileHeaders(mapping.headers),
+    topLevelHeaders,
+    topLevelNames: new Set(),
     mappedHeaders: new Set(),
+    timeFormat: compileTimeFormat(mapping.occurredAt),
+    ...compileExtras(mapping, payload !== undefined),
   };
   return assertDisjoint(plan);
+}
+
+function compileTimeFormat(field: unknown): TimeFormat {
+  const format = isJsonObject(field) ? field['format'] : undefined;
+  if (format === undefined) {
+    return 'rfc3339';
+  }
+  if (!TIME_FORMATS.includes(format as TimeFormat)) {
+    throw new ConfigurationError(
+      `jsonEnvelope occurredAt format must be one of ${TIME_FORMATS.map((name) => `'${name}'`).join(', ')}`,
+    );
+  }
+  return format as TimeFormat;
+}
+
+/** The extra values and the body order; a payload-only mapping has no body to put them in. */
+function compileExtras(
+  mapping: JsonEnvelopeMapping<string>,
+  hasBody: boolean,
+): Pick<Plan, 'extraBody' | 'extraHeaders' | 'bodyOrder'> {
+  const extra = (mapping.extra ?? {}) as {
+    readonly body?: Readonly<Record<string, ExtraValue<JsonConstant>>>;
+    readonly headers?: Readonly<Record<string, ExtraValue<string>>>;
+  };
+  const bodyOrder = (mapping as { readonly bodyOrder?: readonly string[] }).bodyOrder ?? [];
+  if (!hasBody && (extra.body !== undefined || bodyOrder.length > 0)) {
+    throw new ConfigurationError(
+      'jsonEnvelope with a whole-body payload has no body for extra values or a body order',
+    );
+  }
+  return {
+    extraBody: Object.entries(extra.body ?? {}).map(([path, value]) => ({
+      path: toPath(path, 'extra body value'),
+      value,
+    })),
+    extraHeaders: Object.entries(extra.headers ?? {}),
+    bodyOrder,
+  };
 }
 
 function compileType(type: unknown): Location | FixedType {
@@ -75,10 +149,14 @@ function compileId(id: unknown, transportIds: readonly string[]): Location | und
   if (typeof id === 'string' && transportIds.includes(id)) {
     return undefined;
   }
+  const names = transportIds.map((name) => `'${name}'`).join(', ');
   if (!isJsonObject(id)) {
     throw new ConfigurationError(
-      `jsonEnvelope needs an id: { body }, { header } or one of ${transportIds.map((name) => `'${name}'`).join(', ')}`,
+      `jsonEnvelope needs an id: { body }, { header } or one of ${names}`,
     );
+  }
+  if ('whenMissing' in id && !transportIds.includes(id['whenMissing'] as string)) {
+    throw new ConfigurationError(`jsonEnvelope id whenMissing must be one of ${names}`);
   }
   return toLocation(id, 'id');
 }
@@ -134,7 +212,10 @@ function assertDisjoint(plan: Plan): Plan {
   const locations = [plan.type, plan.id, ...Object.values(plan.optional)].filter(
     (location): location is Location => location !== undefined && !('fixed' in location),
   );
-  const headers = locations.flatMap((location) => ('header' in location ? [location.header] : []));
+  const headers = [
+    ...locations.flatMap((location) => ('header' in location ? [location.header] : [])),
+    ...plan.extraHeaders.map(([name]) => name),
+  ];
   const duplicate = headers.find((name, index) => headers.indexOf(name) !== index);
   if (duplicate !== undefined) {
     throw new ConfigurationError(`jsonEnvelope maps header '${duplicate}' twice`);
@@ -142,9 +223,14 @@ function assertDisjoint(plan: Plan): Plan {
   const paths = [
     ...locations.flatMap((location) => ('path' in location ? [location.path] : [])),
     ...[plan.payload, plan.headers].filter((path) => path !== undefined),
+    ...plan.extraBody.map(({ path }) => path),
   ];
   assertNoNestedPaths(paths);
-  return { ...plan, mappedHeaders: new Set(headers) };
+  return {
+    ...plan,
+    mappedHeaders: new Set(headers),
+    topLevelNames: new Set(paths.map((path) => path[0]!)),
+  };
 }
 
 function assertNoNestedPaths(paths: readonly (readonly string[])[]): void {

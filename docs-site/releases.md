@@ -1,15 +1,33 @@
 ---
 title: relaybus releases and versioning
-description: What is new in relaybus 0.3.0 (code-quality overhaul, per-key order across event types, codecs, NestJS transaction decorator, bounded shutdown, ESLint plugin, OpenTelemetry), its breaking changes, deprecations and known issues, and how relaybus is versioned and released.
+description: What is new in relaybus 0.4.0 (Prisma 7, wake-up at commit, Confluent client, codec contract) and 0.3.0 (code-quality overhaul, per-key order across event types, codecs, NestJS transaction decorator, bounded shutdown, ESLint plugin, OpenTelemetry), its breaking changes, deprecations and known issues, and how relaybus is versioned and released.
 ---
 
 # Releases
 
+- [0.4.0](#_0-4-0-2026-10-25): Prisma 7 on a real database, wake-up at the caller's commit, the Confluent Kafka client, codec contract helpers, record keys, legacy flat envelopes, an application-owned producer
 - [0.3.1](#_0-3-1-2026-10-25): internal readability refactor, same behaviour
 - [0.3.0](#_0-3-0-2026-10-25): code quality, per-key order across event types, codecs, transactions in NestJS, bounded shutdown, ESLint rules, OpenTelemetry
 - [0.2.0](#_0-2-0-2026-10-24): high-throughput delivery, event catalogs, decoding of foreign messages
 - [0.1.x](#_0-1-x): first public release
 - [How versioning works](#how-versioning-works)
+
+## 0.4.0 (2026-10-25)
+
+Not breaking: the public API snapshot of every package changes by additions only (no export removed or renamed, checked with `git diff` of the `public-api` snapshots against 0.3.1), and nothing in the database, the SQL or the default wire format changes. Nothing to do when upgrading from 0.3; see [Upgrading from 0.3 to 0.4](/upgrading#upgrading-from-0-3-to-0-4) for the optional features.
+
+- Prisma 7 runs on a real database. The Prisma adapter now passes the full event store contract against PostgreSQL with Prisma Client 7.10 on `@prisma/adapter-pg` (6.19 is covered in CI too). This found one bug: Prisma raw queries reject a `void` column, so `setup()` and the trailing notification failed; both statements now return a boolean column. `@prisma/client` is an optional peer `^6 || ^7`.
+- `PostgresEventStore` accepts `pool` next to `executor`. Statements outside a transaction (claims, completions, renewals) run on it as prepared statements (a warm dispatch batch parses 0 statements instead of 2 for Prisma, Kysely and Drizzle), and the store listens on it.
+- Wake-up at the caller's commit. With a `pool`, an event published in your ORM transaction is dispatched right after that transaction commits (handler start a median under 10 ms after a commit held back 200 ms). A publish in a transaction relaybus does not own wakes the dispatcher 25, 100 and 250 ms after the latest publish instead of once at 25 ms. New `bus.wake()` for stores without notifications.
+- Kafka: `client: 'confluent'` runs `@confluentinc/kafka-javascript` (its KafkaJS-compatible API), now the recommended client, tested on a real broker next to `kafkajs`. The default stays `'kafkajs'`. The peer range is `^1.11.0`.
+- Kafka: `producer` publishes and dead-letters through an already-connected producer the application owns (kafkajs or Confluent). The transport never connects or disconnects it. With it, `kafka` is optional and the transport publishes only; `kafka` and `groupId` as well make it consume with its own consumer.
+- Kafka `jsonEnvelope`: `recordKey: 'event-key' | 'none' | (event) => string | null` (default `'event-key'`, unchanged) and `contentTypeHeader`. Only the wire key changes; the outbox order of one event key stays.
+- `jsonEnvelope` (Kafka and RabbitMQ) describes more in-house formats: `occurredAt` as `'epoch-millis'` or `'epoch-seconds'`, `extra` body values and headers (constants or functions of the event, written only), `bodyOrder` for formats compared byte for byte, an id that falls back to the transport's own (`whenMissing: 'record-position'`) and `headers: 'top-level-fields'`. Together they write and read legacy flat envelopes (one topic, many types, no key, no headers) byte for byte.
+- `@relaybus/testing`: `kafkaCodecContract` and `rabbitMqCodecContract` (and the pure `kafkaCodecMismatches`, `rabbitMqCodecMismatches`) check a codec against captured messages in both directions. The transports' own decode path is exported as `decodeKafkaRecord` and `decodeRabbitMqMessage`.
+- Peer and test dependencies moved to the latest versions: `@opentelemetry/api` 1.10 with the OpenTelemetry SDK 3, `@nestjs/*` 12.2.
+- Additive API: Kafka `KafkaInjectedProducer`, `KafkaRecordKey`, `KafkaRecordOptions`, `decodeKafkaRecord`; RabbitMQ `decodeRabbitMqMessage`; testing the codec contract functions and their option types; `RelayBus.wake()`; `KafkaTransportOptions.kafka` is now optional.
+- Benchmark against 0.3.1 (quick run, 3 interleaved pairs per cell): publish 0.98–1.03x, dispatch 0.99–1.06x, statements per delivery identical. See [Performance](/performance#_0-4-0-vs-0-3-1).
+- Known limits: on decode, unknown top-level fields are kept only when they are strings; there is no consumer injection (only a producer can be passed in); RabbitMQ has no routing-key override.
 
 ## 0.3.1 (2026-10-25)
 

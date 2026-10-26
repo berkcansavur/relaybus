@@ -88,8 +88,8 @@ describe('OpenTelemetry across two services over RabbitMQ', () => {
       await billing.stop();
     }
 
-    const sent = ordersTelemetry.spans();
-    const processed = billingTelemetry.spans();
+    const sent = await ordersTelemetry.spans();
+    const processed = await billingTelemetry.spans();
     const publish = sent.find((span) => span.name === 'publish order.placed.v1')!;
     const send = sent.find((span) => span.name === 'send orders.placed')!;
     const process = processed.find((span) => span.name === 'process order.placed.v1')!;
@@ -160,6 +160,8 @@ describe('OpenTelemetry across two services over RabbitMQ', () => {
   });
 });
 
-function rootSpan(spans: ReturnType<Telemetry['spans']>): ReturnType<Telemetry['spans']>[number] {
+function rootSpan(
+  spans: Awaited<ReturnType<Telemetry['spans']>>,
+): Awaited<ReturnType<Telemetry['spans']>>[number] {
   return spans.find((span) => span.name === 'POST /orders')!;
 }

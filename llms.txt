@@ -56,7 +56,7 @@ relaybus stores every event in the same database transaction as your business da
 - [Write amplification in the delivery path](https://berkcansavur.github.io/relaybus/performance/write-amplification.md): Why relaybus 0.1.0 rewrote delivery rows, how lane leases and delete-on-complete remove it, which guarantees are preserved, and what it measured.
 - [The publish path and prepared statements](https://berkcansavur.github.io/relaybus/performance/publish-path.md): Per-event round trips, WAL bytes and plan times of the 0.2.0 publish and claim statements against 0.1.0, and the prepared-statement fix.
 - [FAQ](https://berkcansavur.github.io/relaybus/faq.md): Answers to common questions: publishing events reliably in NestJS, the transactional outbox pattern and avoiding lost events between a database and Kafka.
-- [Releases](https://berkcansavur.github.io/relaybus/releases.md): What is new in relaybus 0.3.0, its breaking changes, deprecations, known issues and a benchmark against 0.2.0, and how relaybus is versioned and released.
+- [Releases](https://berkcansavur.github.io/relaybus/releases.md): What is new in relaybus 0.4.0 and 0.3.0, breaking changes, deprecations, known issues and benchmarks, and how relaybus is versioned and released.
 
 ## Optional
 

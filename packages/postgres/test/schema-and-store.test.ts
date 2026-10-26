@@ -112,8 +112,21 @@ describe('PostgresEventStore options', () => {
   it('requires exactly one way to connect', () => {
     expect(() => new PostgresEventStore({} as never)).toThrow(ConfigurationError);
     expect(
-      () => new PostgresEventStore({ pool: {} as Pool, executor: fakeExecutor() } as never),
+      () =>
+        new PostgresEventStore({
+          connectionString: 'postgres://x',
+          executor: fakeExecutor(),
+        } as never),
     ).toThrow(ConfigurationError);
+    expect(
+      () => new PostgresEventStore({ connectionString: 'postgres://x', pool: {} as Pool } as never),
+    ).toThrow(ConfigurationError);
+  });
+
+  it('takes a pool next to an executor for the statements outside a transaction', () => {
+    expect(
+      () => new PostgresEventStore({ executor: fakeExecutor(), pool: {} as Pool }),
+    ).not.toThrow();
   });
 
   it.each([0, -1, 1.5, Number.NaN])('rejects purgeBatchSize %s', (purgeBatchSize) => {
@@ -388,7 +401,7 @@ describe('wake-up notifications', () => {
       executor: {
         transaction: (work) => work(undefined),
         query: async (sql, parameters) => {
-          if (sql.startsWith('SELECT pg_notify')) {
+          if (sql.startsWith('SELECT true AS notified FROM pg_notify')) {
             sent.push(['notify']);
             await notify();
             return [];

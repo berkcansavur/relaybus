@@ -80,18 +80,21 @@ CloudEvents SDKs often send one JSON document with the attributes and `data`, wi
 
 `jsonEnvelope(mapping)` declares where each value lives: a dotted body path (`{ body: 'meta.correlationId' }`, a whole number indexes an array: `'messageType.0'`) or a header (`{ header: 'event-type' }`). The codec writes and reads the same mapping, so relaybus and the other services can both produce and consume.
 
-| Field           | Required | Where                                           | When not mapped                                                                                |
-| --------------- | -------- | ----------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `type`          | yes      | body, header, or `{ fixed: 'order.placed.v1' }` |                                                                                                |
-| `id`            | yes      | body, header, or the transport's own id (below) |                                                                                                |
-| `payload`       | yes      | body path, or `'whole-body'`                    |                                                                                                |
-| `key`           | no       | body or header                                  | Kafka: the record key (always written). RabbitMQ: none.                                        |
-| `source`        | no       | body or header                                  | Kafka: the topic. RabbitMQ: the `appId` property (always written), else the routing key.       |
-| `occurredAt`    | no       | body or header, RFC 3339                        | Kafka: the record timestamp (written from `occurredAt`). RabbitMQ: `timestamp`, whole seconds. |
-| `correlationId` | no       | body or header                                  | null                                                                                           |
-| `causationId`   | no       | body or header                                  | null                                                                                           |
-| `headers`       | no       | body path of an object, or `'message-headers'`  | `'message-headers'`: every message header no other field maps                                  |
-| `contentType`   | no       | written as the content type                     | `application/json`                                                                             |
+| Field           | Required | Where                                                 | When not mapped                                                                                |
+| --------------- | -------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `type`          | yes      | body, header, or `{ fixed: 'order.placed.v1' }`       |                                                                                                |
+| `id`            | yes      | body, header, or the transport's own id (below)       |                                                                                                |
+| `payload`       | yes      | body path, or `'whole-body'`                          |                                                                                                |
+| `key`           | no       | body or header                                        | Kafka: the record key (written unless `recordKey` says otherwise). RabbitMQ: none.             |
+| `source`        | no       | body or header                                        | Kafka: the topic. RabbitMQ: the `appId` property (always written), else the routing key.       |
+| `occurredAt`    | no       | body or header, RFC 3339 (or `format`, below)         | Kafka: the record timestamp (written from `occurredAt`). RabbitMQ: `timestamp`, whole seconds. |
+| `correlationId` | no       | body or header                                        | null                                                                                           |
+| `causationId`   | no       | body or header                                        | null                                                                                           |
+| `headers`       | no       | body path of an object, or `'message-headers'`        | `'message-headers'`: every message header no other field maps                                  |
+| `contentType`   | no       | written as the content type                           | `application/json`                                                                             |
+| `recordKey`     | no       | Kafka: `'event-key'`, `'none'` or `(event) => key`    | `'event-key'`; `contentTypeHeader: false` also drops the `content-type` header                 |
+| `extra`         | no       | `{ body: { path: value }, headers: { name: value } }` | nothing extra; values are constants or `(event) => value`, written only, never read            |
+| `bodyOrder`     | no       | top-level body field names                            | fields in the order they are written; set it when the other side compares bytes                |
 
 The types make an incomplete mapping a compile error: `type`, `id` and `payload` are required, and with `payload: 'whole-body'` every other field must be a header, because the body is the payload. The id strategy is always explicit, because it is what the inbox deduplicates on:
 
@@ -104,6 +107,8 @@ The types make an incomplete mapping a compile error: `type`, `id` and `payload`
 A producer that may send one event twice writes it at two Kafka offsets, so only a producer id deduplicates that; prefer `{ body }` or `{ header }` when the other side sets an id. relaybus itself writes the event id in `relaybus-event-id` under `'record-position'`, so its own outbox retries stay deduplicated.
 
 A value that is neither mapped nor carried by the transport (see the table) does not survive the trip: on RabbitMQ an unmapped key reads as none and an unmapped `occurredAt` keeps whole seconds. Map every value both sides need.
+
+`occurredAt: { body: 'timestamp', format: 'epoch-millis' }` writes whole epoch milliseconds (a number in the body, decimal text in a header) and reads them back; `'epoch-seconds'` drops the milliseconds. `extra` writes what in-house formats carry besides the event: a constant `provider: 'orders-api'`, a second copy of the time (`createdDate: (event) => event.occurredAt.toISOString()`) or a schema-version header. Extra values are never read, extra headers are left out of the event headers on read, and an extra value at a mapped location is a configuration error. A payload-only mapping takes extra headers only.
 
 On write, event headers that travel as message headers keep their names, so a name the mapping uses for another field is refused with a non-retryable error (`UnencodableEventError` on Kafka, `RabbitMqUnencodableEventError` on RabbitMQ), as is `content-type` on Kafka. A `{ fixed }` type refuses events of any other type the same way: such a route carries one type only. On read, a body field holding a number is read as its decimal text when it is a safe integer, so numeric ids work.
 
@@ -217,6 +222,85 @@ const legacyOrders: KafkaCodec = {
 ```
 
 `decode` may leave out `source`, `key`, `occurredAt`, `headers`, `correlationId` and `causationId`; the transport fills them as in the table above. Both functions must be synchronous and free of side effects: `decode` runs again on every redelivery and must return the same id. On RabbitMQ, `encode` returns `{ content, options }` and should set `options.messageId`, which the transport uses to match unroutable returns. What `encode` throws fails the publish, and the outbox retries it unless it is a `NonRetryableError`.
+
+### A legacy flat envelope without keys or headers
+
+Some topics carry many event types as one flat JSON object, written without a record key and without headers, with the event headers spread over the top level:
+
+```json
+{
+  "id": "evt-1",
+  "requestId": "req-1",
+  "provider": "billing-api",
+  "timestamp": 1792936800123,
+  "createdDate": "2026-10-25T14:00:00.123Z",
+  "type": "order.created",
+  "data": { "orderId": 1 },
+  "userId": "u-7"
+}
+```
+
+```ts
+codec: jsonEnvelope({
+  type: { body: 'type' },
+  id: { body: 'id', whenMissing: 'record-position' }, // older records have no id
+  payload: { body: 'data' },
+  source: { body: 'provider' },
+  occurredAt: { body: 'timestamp', format: 'epoch-millis' },
+  correlationId: { body: 'requestId' },
+  headers: 'top-level-fields', // event headers spread over the top level, read back from it
+  extra: { body: { createdDate: (event) => event.occurredAt.toISOString() } },
+  bodyOrder: ['id', 'requestId', 'provider', 'timestamp', 'createdDate', 'type', 'data'],
+  recordKey: 'none',
+  contentTypeHeader: false,
+}),
+```
+
+`headers: 'top-level-fields'` reads every top-level text field that no other value uses as an event header; other unknown fields (numbers, objects) are accepted and left out. A record without a key reads as an event without a key. relaybus still keeps the outbox order of one event key, but keyless records are spread over partitions by the producer, so consumers see events of one key in order only when the key reaches the wire.
+
+## Prove the format with captured messages
+
+Before relaybus joins a topic or queue other services already use, capture a few real messages and check, in a unit test, that relaybus writes exactly those messages and reads back exactly those events. `@relaybus/testing` registers one test per captured message:
+
+```ts
+import { kafkaCodecContract } from '@relaybus/testing';
+import { decodeKafkaRecord, jsonEnvelope } from '@relaybus/kafka';
+
+const codec = jsonEnvelope({
+  type: { header: 'x-event-type' },
+  id: { header: 'x-message-id' },
+  payload: { body: 'payload' },
+  source: { body: 'meta.producer' },
+  occurredAt: { body: 'meta.sentAt', format: 'epoch-millis' },
+  extra: { body: { 'meta.schema': 'orders/v1' }, headers: { 'x-schema-version': '1' } },
+  bodyOrder: ['meta', 'payload'],
+});
+
+kafkaCodecContract('orders format', {
+  encode: codec.encode,
+  decode: (record) => decodeKafkaRecord(codec, record),
+  compare: 'bytes', // or 'json': same JSON regardless of key order and spacing
+  ignoreHeaders: ['content-type'], // headers relaybus adds that the other consumers ignore
+  cases: [
+    {
+      name: 'order placed',
+      envelope: { id: 'm-1', type: 'order.placed.v1', key: 'order-1' /* ... the whole event */ },
+      record: {
+        topic: 'orders',
+        key: 'order-1',
+        headers: {
+          'x-event-type': 'order.placed.v1',
+          'x-message-id': 'm-1',
+          'x-schema-version': '1',
+        },
+        value: '{"meta":{...},"payload":{...}}',
+      },
+    },
+  ],
+});
+```
+
+Each case checks both directions: `encode(envelope)` gives the captured key, value and headers (and the timestamp, when the codec sets one), and decoding the captured record gives `envelope`, filled in the way the transport fills it (`decodeKafkaRecord`). When the wire does not carry all of the event, for example a record without a key, give the event decoding yields as `decoded`; `only: 'decode'` checks a message only other producers write (one without an id, say), `only: 'encode'` one only other consumers read. `encode` may also be a transport's publish captured by an injected producer (`new KafkaTransport({ producer: recorder, codec })`, see [Reusing the application's producer](/packages/kafka#reusing-the-applications-producer)), so the test covers what the transport sends. `rabbitMqCodecContract` does the same for RabbitMQ with `decodeRabbitMqMessage`: the captured message has `properties` (as publish options name them, such as `persistent`), `headers` and `body`; `ignoreProperties` leaves out a per-send `timestamp`. The routing key is the route's destination, not part of the codec. `kafkaCodecMismatches` and `rabbitMqCodecMismatches` return the differences as lines, for other test runners.
 
 ## Malformed input
 

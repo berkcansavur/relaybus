@@ -7,28 +7,28 @@ outbox events to Kafka topics and feeds events consumed from Kafka into the
 bus inbox, with at-least-once delivery and idempotent storage.
 
 - Wire format: [CloudEvents Kafka protocol binding](https://github.com/cloudevents/spec/blob/main/cloudevents/bindings/kafka-protocol-binding.md), binary content mode, so any CloudEvents-aware consumer or tool can read the topic.
-- Built for and tested against [`kafkajs`](https://kafka.js.org) 2.2.x on a real broker. The KafkaJS-compatible API of `@confluentinc/kafka-javascript` is **experimental and untested**, see [Confluent](#confluent-experimental-untested). Neither client is a dependency; install the one you use.
+- Tested on a real broker with both clients: [`@confluentinc/kafka-javascript`](https://github.com/confluentinc/confluent-kafka-javascript) 1.11.0 (its KafkaJS-compatible API, **recommended**: maintained, librdkafka based) and [`kafkajs`](https://kafka.js.org) 2.2.4 (unmaintained). See [Choosing a client](#choosing-a-client). Neither client is a dependency; install the one you use.
 - Never loses an event: the offset is committed only after the bus stored the event; a failing store blocks the partition instead of skipping.
 
 ## Install
 
 ```sh
-pnpm add @relaybus/core @relaybus/kafka kafkajs
+pnpm add @relaybus/core @relaybus/kafka @confluentinc/kafka-javascript
 ```
 
 ## Usage
 
 ```ts
-import { Kafka, Partitioners } from 'kafkajs';
+import { KafkaJS } from '@confluentinc/kafka-javascript';
 import { RelayBus } from '@relaybus/core';
 import { KafkaTransport } from '@relaybus/kafka';
 
-const kafka = new Kafka({ clientId: 'orders', brokers: ['kafka:9092'] });
+const kafka = new KafkaJS.Kafka({ kafkaJS: { clientId: 'orders', brokers: ['kafka:9092'] } });
 
 const transport = new KafkaTransport({
   kafka,
+  client: 'confluent', // the default is 'kafkajs'
   groupId: 'billing', // required to subscribe
-  producerConfig: { createPartitioner: Partitioners.DefaultPartitioner },
 });
 
 const bus = new RelayBus({
@@ -55,13 +55,15 @@ const consuming = transport.isConsuming();
 
 | Option                         | Default             | Meaning                                                                                                                                                                                                                                                                                                                           |
 | ------------------------------ | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `kafka`                        | required            | A `kafkajs` `Kafka` or Confluent `KafkaJS.Kafka` instance. It is the producer/consumer factory.                                                                                                                                                                                                                                   |
+| `kafka`                        | required            | A `kafkajs` `Kafka` or Confluent `KafkaJS.Kafka` instance: the factory of the transport's consumer and producer. Optional with `producer`, but then the transport cannot subscribe.                                                                                                                                               |
+| `producer`                     | none                | An already-connected producer the application owns (kafkajs `Producer`, Confluent `KafkaJS.Producer`), used to publish and dead-letter instead of one of `kafka`. Never connected or disconnected by the transport. See [Reusing the application's producer](#reusing-the-applications-producer).                                 |
+| `client`                       | `'kafkajs'`         | Which client `kafka` is: `'kafkajs'` or `'confluent'`. Set `'confluent'` for a Confluent `KafkaJS.Kafka`; see [Choosing a client](#choosing-a-client).                                                                                                                                                                            |
 | `name`                         | `'kafka'`           | Transport name used by routes and subscriptions.                                                                                                                                                                                                                                                                                  |
 | `groupId`                      | none                | Consumer group. Required as soon as `subscribe` is used; publish-only services can omit it.                                                                                                                                                                                                                                       |
 | `fromBeginning`                | `true`              | Where a group without committed offsets starts. `true` so events published before the first start are not skipped.                                                                                                                                                                                                                |
 | `maxInFlightRequests`          | `1`                 | Producer in-flight requests, 1 to 5. `1` keeps retries from reordering events of one key.                                                                                                                                                                                                                                         |
-| `producerConfig`               | `{}`                | Extra producer settings (partitioner, compression, ...). `idempotent` and `maxInFlightRequests` always win.                                                                                                                                                                                                                       |
-| `consumerConfig`               | `{}`                | Extra consumer settings (`sessionTimeout`, `retry`, `heartbeatInterval`, ...). `groupId` always wins.                                                                                                                                                                                                                             |
+| `producerConfig`               | `{}`                | Extra producer settings (partitioner, compression, ...). `idempotent` and `maxInFlightRequests` always win. Confluent: KafkaJS-style settings in a `kafkaJS` block, librdkafka properties at the top level; `acks: -1` also wins, as do `enable.idempotence`, `max.in.flight` and `acks` there.                                   |
+| `consumerConfig`               | `{}`                | Extra consumer settings (`sessionTimeout`, `retry`, `heartbeatInterval`, ...). `groupId` always wins. Confluent: KafkaJS-style settings in a `kafkaJS` block, librdkafka properties at the top level; `fromBeginning` also wins, as do `group.id` and `auto.offset.reset` there. Your `rebalance_cb` is still called.             |
 | `processing.maxAttempts`       | `5`                 | In-process attempts per delivery of a record.                                                                                                                                                                                                                                                                                     |
 | `processing.initialBackoff`    | `'200ms'`           | Delay before attempt 2, doubling per attempt.                                                                                                                                                                                                                                                                                     |
 | `processing.maxBackoff`        | `'5s'`              | Upper bound of the delay between attempts.                                                                                                                                                                                                                                                                                        |
@@ -77,7 +79,8 @@ const consuming = transport.isConsuming();
 
 ## Wire format
 
-Value: the JSON payload. Key: the envelope key (`null` means no key).
+Value: the JSON payload. Key: the event key (`null` means no key); `jsonEnvelope` can write
+another key or none (`recordKey`).
 
 | Header                               | Content                                                   |
 | ------------------------------------ | --------------------------------------------------------- |
@@ -171,8 +174,10 @@ indexes an array) or a header (`{ header: 'event-type' }`) for `type`, `id`, `pa
 `'whole-body'`), `key`, `source`, `occurredAt`, `correlationId`, `causationId` and `headers`, plus a
 `contentType`. `type`, `id` and `payload` are required by the types; `id: 'record-position'` uses the
 record position (records relaybus writes carry the event id in a `relaybus-event-id` header, which
-wins on read, so outbox retries stay deduplicated). The record key is always the event key, and when `occurredAt` is not mapped the
-record timestamp carries it. Event headers that are record headers keep their names, so a name the
+wins on read, so outbox retries stay deduplicated); `{ body: 'id', whenMissing: 'record-position' }`
+uses the body id when a record has one. The record key is the event key unless `recordKey` says
+otherwise (`'none'` or `(event) => string | null`), `contentTypeHeader: false` writes no
+`content-type` header, and when `occurredAt` is not mapped the record timestamp carries it. Event headers that are record headers keep their names, so a name the
 mapping uses, `content-type` or `relaybus-event-id`, is refused with `UnencodableEventError`. The
 [interoperability recipe](https://berkcansavur.github.io/relaybus/recipes/interoperating-with-other-services)
 has a full table and a MassTransit example.
@@ -225,14 +230,23 @@ without a key (`key: null`) are spread over partitions and have no ordering. Use
 as the key where order matters. Use the same partitioner in every producer of a topic, otherwise
 one key can map to different partitions depending on who wrote it.
 
+The record key is the event key by default. A `jsonEnvelope` codec with `recordKey: 'none'`
+writes records without a key, as many existing producers do, and `recordKey: (event) => ...`
+derives another one. The event key, and the outbox's per-key order, stay as they are: relaybus
+still publishes events of one key one after the other. But a record without a key is placed on a
+partition by the producer (round-robin or sticky), so events of one key can land on different
+partitions and consumers may see them out of order. Keep the event key on the wire wherever
+consumers rely on per-key order.
+
 ## Guarantees
 
 - **Publish**: idempotent producer, `acks=-1`; `publish` resolves after the broker ack and rejects
   with `PublishTimeoutError` after `publishTimeout` (kafkajs would otherwise retry an idempotent
   send for as long as the broker is unreachable). A rejected publish makes the outbox retry; a
   timed-out send may still land, so a message can be duplicated, and the idempotent producer plus
-  the consumer's dedup on the event id absorb it. Pass `producerConfig: { retry: { retries } }` to
-  bound client-side retries further.
+  the consumer's dedup on the event id absorb it. Pass `producerConfig: { retry: { retries } }`
+  (Confluent: `producerConfig: { kafkaJS: { retry: { retries } } }`) to bound client-side retries
+  further.
 - **Consume**: `eachMessage` awaits the bus (`RelayBus.receive`, one idempotent insert) and the
   client commits the offset only afterwards. A duplicate message is stored once.
 - **Handler failure**: retried in-process `processing.maxAttempts` times with backoff and
@@ -243,7 +257,8 @@ one key can map to different partitions depending on who wrote it.
   same record. The record is never skipped, so a persistent outage blocks the partition until the
   store recovers. That is deliberate: `receive` is a cheap insert, and skipping would lose the
   event. `isConsuming()` is `false` while any partition is stuck (tracked per partition).
-- **Dead consumer**: the transport does not rely on the client to restart itself. When the client
+- **Dead consumer** (kafkajs; Confluent never gives up on a consumer): the transport does not rely
+  on the client to restart itself. When the client
   reports a crash with `restart=false`, the transport logs it and reconnects, re-subscribes and
   re-runs the consumer with bounded backoff (`restart.*`) until it joined again or the transport
   closed. `isReady()` is `false` meanwhile.
@@ -275,31 +290,70 @@ Only these members are called (`KafkaClientLike` and friends in `src/kafka-clien
 | `kafka`                    | `producer(config)`, `consumer(config)`                                                                   |
 | producer                   | `connect()`, `send({ topic, acks, messages: [{ key, value, headers }] })`, `disconnect()`                |
 | consumer                   | `connect()`, `subscribe({ topics, fromBeginning })`, `run({ eachMessage })`, `disconnect()`              |
+| Confluent consumer config  | `rebalance_cb(error, assignment)` reports joins (`-175`, assigned) and rebalances (`-174`, revoked)      |
 | `eachMessage` payload      | `topic`, `partition`, `message.{ key, value, headers, offset }`, `heartbeat()`                           |
 | consumer events (optional) | `consumer.on(name, listener)` and `consumer.events.{ GROUP_JOIN, CRASH, REBALANCING, STOP, DISCONNECT }` |
 
-`on`/`events` are optional: without `GROUP_JOIN` the transport cannot wait for the join or observe
-crashes, so `subscribe` resolves when `run` returns and `isConsuming()` only reflects processing
-stalls and `close()`. kafkajs 2.2.4 is verified by the integration tests.
+With Confluent, `send` gets no `acks` and `subscribe` no `fromBeginning` (it rejects both; they are
+set on the producer and consumer instead), and `on`/`events` are not used.
 
-## Confluent (experimental, untested)
+`on`/`events` are optional for other kafkajs-like clients: without `GROUP_JOIN` the transport cannot
+wait for the join or observe crashes, so `subscribe` resolves when `run` returns and
+`isConsuming()` only reflects processing stalls and `close()`. kafkajs 2.2.4 and
+`@confluentinc/kafka-javascript` 1.11.0 are verified by the integration tests.
 
-`@confluentinc/kafka-javascript` exposes a KafkaJS-compatible API, and the structural client types
-here are satisfied by it, but nothing in this repository runs against it. Its documented
-differences from kafkajs mean the options below do **not** work as written for Confluent:
+## Reusing the application's producer
 
-- `idempotent` and `maxInFlightRequests` (producer) and `groupId` (consumer) must be nested in the
-  client's `kafkaJS: { ... }` config block. The transport passes them at the top level, so with
-  Confluent the producer is not guaranteed to be idempotent and the group id may be ignored.
-- `fromBeginning` is not supported per `subscribe()`; it is a consumer-level `kafkaJS` setting.
-  The transport's `fromBeginning` option is therefore not applied.
-- `heartbeat()` is a no-op there and the consumer `events` (`GROUP_JOIN`, `CRASH`, ...) are not
-  documented, so start-up falls back to "resolved when `run` returns" and crash recovery cannot
-  trigger.
-- Failed `eachMessage` handling (re-seek) and the error classification of a rethrown error differ.
+An application that already has a connected producer, with its SSL and SASL settings, can hand it
+to the transport instead of letting it open a second connection:
 
-Use it only after verifying these against your version; until a Confluent path is tested, treat
-kafkajs as the supported client.
+```ts
+const transport = new KafkaTransport({
+  producer: ordersService.producer, // already connected, owned by the application
+  client: 'confluent', // when it is a Confluent producer
+});
+```
+
+Without `kafka` the transport only publishes; give `kafka` and `groupId` as well to subscribe (the
+consumer stays the transport's own). The transport calls only `send` on the injected producer: it
+never connects or disconnects it, so it is usable before `bus.start()` and stays open after
+`bus.stop()`; closing it is the application's job, after the bus stopped. The guarantees hold
+only if that producer is configured like the transport's own: idempotent, `acks` -1 (all in-sync
+replicas) and at most 5 in-flight requests (1 keeps retries from reordering a key). For kafkajs
+that is `kafka.producer({ idempotent: true, maxInFlightRequests: 1 })`, for Confluent
+`kafka.producer({ kafkaJS: { idempotent: true, acks: -1, maxInFlightRequests: 1 } })`. Because the
+transport cannot apply `producerConfig` or `maxInFlightRequests` to it, giving them together with
+`producer` is a configuration error.
+
+## Choosing a client
+
+**Use `@confluentinc/kafka-javascript`** (`client: 'confluent'`): it is maintained and built on
+librdkafka, while `kafkajs` is no longer maintained. Every integration scenario runs against a real
+broker with both clients (publish and subscribe, retries and redelivery, dead letters, codecs,
+per-key order across partitions, start-up failure, close, interoperability and two services
+through the bus); Confluent is tested with 1.11.0, the lowest version the peer range allows.
+
+What the transport does differently for Confluent, because its KafkaJS-compatible API differs:
+
+- `idempotent`, `maxInFlightRequests` and `acks: -1` go in the producer's `kafkaJS` block, and
+  `groupId` and `fromBeginning` in the consumer's: Confluent rejects them at the top level, in
+  `send` and in `subscribe`. They are also set as librdkafka properties (`enable.idempotence`,
+  `max.in.flight`, `acks`, `group.id`, `auto.offset.reset`), which Confluent applies after the
+  block. Your own `kafkaJS` block and properties are merged below them.
+- The group join and rebalances are followed through `rebalance_cb` (Confluent has no
+  instrumentation events), so `subscribe` still waits for the join and `isConsuming()` still turns
+  `false` during a rebalance.
+- Confluent never gives up on a consumer: a failed `eachMessage` makes it seek back and redeliver
+  the record, and it reports no crash. The restart options therefore never apply.
+- `heartbeat()` is a no-op there; librdkafka heartbeats in the background. Keep the time a record
+  can spend in retries (`maxAttempts * maxBackoff`) well below `max.poll.interval.ms` (5 minutes by
+  default) instead of `sessionTimeout`.
+- Its producer partitions keys with librdkafka's `murmur2_random`, which librdkafka documents as
+  Java compatible, like kafkajs' `DefaultPartitioner`. `createPartitioner` does not exist there.
+
+Moving from kafkajs: create the client with `new KafkaJS.Kafka({ kafkaJS: { brokers, clientId } })`,
+add `client: 'confluent'`, and move KafkaJS-style settings in `producerConfig` and `consumerConfig`
+into a `kafkaJS` block (drop `createPartitioner`). The wire format is unchanged.
 
 ## Operations
 
@@ -313,31 +367,31 @@ kafkajs as the supported client.
   consumer group.
 - **Session timeout**: the retry loop heartbeats between attempts. Keep
   `maxAttempts * maxBackoff` well below the consumer `sessionTimeout` (30 s default).
-- **Concurrency**: one record at a time per partition (kafkajs default); scale with partitions and
+- **Concurrency**: one record at a time per partition (the default of both clients); scale with partitions and
   service replicas in the same group. With `partitionsConsumedConcurrently > 1` in `consumerConfig`
   the stall state is tracked per partition.
 - **Retention vs. inbox**: Kafka may redeliver old records after rebalances or offset resets. The
   bus deduplicates on the event id for as long as it keeps completed deliveries
   (`retention.completed`, default 7 days), so keep that longer than your redelivery window.
-- **Partitioner warning** (kafkajs 2.x): pass `createPartitioner: Partitioners.DefaultPartitioner`
+- **Partitioner warning** (kafkajs 2.x only): pass `createPartitioner: Partitioners.DefaultPartitioner`
   in `producerConfig` to silence the legacy partitioner warning.
 
 ## Troubleshooting
 
 - `did not join group ... within 30000ms` at start: broker unreachable, wrong credentials, or the
-  group is rebalancing for longer than `startupTimeout`. Check the kafkajs connection settings.
+  group is rebalancing for longer than `startupTimeout`. Check the client's connection settings.
 - `isConsuming()` stays `false` with `Giving up for now` logs: `RelayBus.receive` keeps failing
   (database down?). Fix the store; consumption resumes by itself.
 - `Dead-lettered malformed message` logs: a producer on that topic is not writing CloudEvents binary
   mode with `content-type: application/json`. Inspect `<topic>.dead` and its `relaybus-invalid-reason`.
 - `Consumer crashed ... restart=false` followed by `Consumer restarted`: the client gave up and the
-  transport recovered it. Repeated `Restart failed` logs mean the broker or credentials are the problem.
+  transport recovered it (kafkajs only). Repeated `Restart failed` logs mean the broker or credentials are the problem.
 - `PublishTimeoutError`: no broker ack within `publishTimeout`; the outbox retries.
 - Events appear twice in logs but handlers run once: expected, the inbox deduplicates on the id.
 
 ## When to use @relaybus/kafka, and when not to
 
-Use it to send events between services through Kafka without a dual write between your database and the broker. It is a transport, not a store: it needs `@relaybus/core` and a store, and `@confluentinc/kafka-javascript` support is experimental and untested.
+Use it to send events between services through Kafka without a dual write between your database and the broker. It is a transport, not a store: it needs `@relaybus/core`, a store and one of the two clients, `@confluentinc/kafka-javascript` (recommended) or `kafkajs`.
 
 Documentation: <https://berkcansavur.github.io/relaybus/packages/kafka>
 

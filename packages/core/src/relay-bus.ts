@@ -27,7 +27,7 @@ import type {
 import type { DomainEvent, EventClass, EventEnvelope } from './event.js';
 import { getCurrentScope, runInScope } from './execution-scope.js';
 import type { EventHandler, HandlerDescriptor, SubscribeOptions } from './handler-registry.js';
-import { schedule } from './internal/timers.js';
+import { PublishWakeUps } from './bus/publish-wake-ups.js';
 import type {
   PublishOneOptions,
   PublishOptions,
@@ -45,7 +45,6 @@ import { Milliseconds } from './values/milliseconds.js';
 
 /** Batches `drain` runs at most before it gives up. */
 const DEFAULT_DRAIN_BATCHES = 1_000;
-const WAKE_DELAY_MS = 25;
 
 /**
  * Reliable event bus: events are stored with business data in one transaction,
@@ -55,16 +54,21 @@ const WAKE_DELAY_MS = 25;
 export class RelayBus<TTransaction = unknown> {
   readonly #parts: RelayBusParts<TTransaction>;
   readonly #lifecycle: BusLifecycle;
+  readonly #wakeUps: PublishWakeUps;
 
   constructor(options: RelayBusOptions<TTransaction>) {
     this.#parts = assembleRelayBus(options, {
       reportUnrouted: (envelope) => this.#reportUnrouted(envelope),
-      scheduleWake: () => this.#scheduleWake(),
+      scheduleWake: (committed) => this.#scheduleWake(committed),
       statistics: () => this.statistics(),
     });
     this.#lifecycle = new BusLifecycle({
       ...this.#parts,
       closeTransports: (deadline) => this.#closeTransports(deadline),
+    });
+    this.#wakeUps = new PublishWakeUps({
+      clock: this.#parts.clock,
+      wake: () => this.#parts.dispatcher.wake(),
     });
   }
 
@@ -275,6 +279,7 @@ export class RelayBus<TTransaction = unknown> {
     if (!first) {
       return stopping;
     }
+    this.#wakeUps.cancel();
     const result = await stopping;
     if (!result.graceful) {
       this.#parts.logger.warn(
@@ -310,6 +315,14 @@ export class RelayBus<TTransaction = unknown> {
 
   listDeliveries(query: DeliveryQuery = {}): Promise<DeliveryRecord[]> {
     return this.#parts.store.listDeliveries(query);
+  }
+
+  /**
+   * Asks the dispatcher to claim now. Call it right after committing your own transaction that published,
+   * when the store cannot report the commit (see Tuning, "Wake-up after your transaction commits").
+   */
+  wake(): void {
+    this.#parts.dispatcher.wake();
   }
 
   /** Moves dead deliveries back to pending with a fresh attempt budget. */
@@ -390,17 +403,12 @@ export class RelayBus<TTransaction = unknown> {
     return { handlers: registrations.length - routes, routes };
   }
 
-  #scheduleWake(): void {
+  #scheduleWake(committed: boolean): void {
     // A store that reports new deliveries wakes the dispatcher itself, right after the commit.
     if (this.#lifecycle.state !== 'running' || this.#parts.dispatcher.watchesNewDeliveries) {
       return;
     }
-    // The publishing transaction commits after publish returns; claim shortly after.
-    schedule(this.#parts.clock, {
-      run: () => this.#parts.dispatcher.wake(),
-      delayMs: WAKE_DELAY_MS,
-      unref: true,
-    });
+    this.#wakeUps.afterPublish(committed);
   }
 
   /** Closes every transport, each at most until the deadline; past it they are asked to force. */

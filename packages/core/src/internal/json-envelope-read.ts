@@ -6,6 +6,8 @@ import type { Context, Location, Plan } from './json-envelope-plan.js';
 // Reading the envelope fields of a JSON message by a compiled mapping.
 
 const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/i;
+const EPOCH_PATTERN = /^\d+$/;
+const MILLISECONDS_PER_SECOND = 1000;
 
 export function readMessage(message: JsonWireMessage, context: Context): JsonEnvelopeFields {
   const { plan, failures } = context;
@@ -15,10 +17,7 @@ export function readMessage(message: JsonWireMessage, context: Context): JsonEnv
   const read = (location: Location | undefined): string | undefined =>
     location === undefined ? undefined : readText(message, { location, failures });
   const fields: Record<string, unknown> = {
-    id:
-      plan.id === undefined
-        ? undefined
-        : requireText(read(plan.id), { location: plan.id, failures }),
+    id: readId(read(plan.id), context),
     type: readType(message, context),
     payload: readPayload(message.body, context),
     key: read(plan.optional.key),
@@ -26,11 +25,18 @@ export function readMessage(message: JsonWireMessage, context: Context): JsonEnv
     headers: readEventHeaders(message, plan),
     correlationId: read(plan.optional.correlationId) ?? null,
     causationId: read(plan.optional.causationId) ?? null,
-    occurredAt: readTime(read(plan.optional.occurredAt), failures),
+    occurredAt: readTime(read(plan.optional.occurredAt), context),
   };
   return Object.fromEntries(
     Object.entries(fields).filter((entry) => entry[1] !== undefined),
   ) as JsonEnvelopeFields;
+}
+
+function readId(id: string | undefined, { plan, failures }: Context): string | undefined {
+  if (plan.id === undefined || plan.idWhenMissing) {
+    return id;
+  }
+  return requireText(id, { location: plan.id, failures });
 }
 
 function readType(message: JsonWireMessage, { plan, failures }: Context): string {
@@ -59,24 +65,40 @@ function readPayload(body: unknown, { plan, failures }: Context): unknown {
 }
 
 function readEventHeaders(message: JsonWireMessage, plan: Plan): EventHeaders {
+  if (plan.topLevelHeaders) {
+    return textEntries(
+      Object.entries(message.body as Record<string, unknown>).filter(
+        ([name]) => !plan.topLevelNames.has(name),
+      ),
+    );
+  }
   if (plan.headers === undefined) {
     return Object.fromEntries(
       Object.entries(message.headers).filter(([name]) => !plan.mappedHeaders.has(name)),
     );
   }
   const headers = valueAt(message.body, plan.headers);
-  return isJsonObject(headers)
-    ? Object.fromEntries(
-        Object.entries(headers).filter(
-          (entry): entry is [string, string] => typeof entry[1] === 'string',
-        ),
-      )
-    : {};
+  return isJsonObject(headers) ? textEntries(Object.entries(headers)) : {};
 }
 
-function readTime(text: string | undefined, failures: JsonEnvelopeFailures): Date | undefined {
+function textEntries(entries: readonly [string, unknown][]): EventHeaders {
+  return Object.fromEntries(
+    entries.filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+  );
+}
+
+function readTime(text: string | undefined, { plan, failures }: Context): Date | undefined {
   if (text === undefined) {
     return undefined;
+  }
+  if (plan.timeFormat !== 'rfc3339') {
+    const time = new Date(
+      Number(text) * (plan.timeFormat === 'epoch-seconds' ? MILLISECONDS_PER_SECOND : 1),
+    );
+    if (!EPOCH_PATTERN.test(text) || Number.isNaN(time.getTime())) {
+      throw failures.invalid(`The event time is not a whole ${plan.timeFormat} number: '${text}'`);
+    }
+    return time;
   }
   const time = new Date(text);
   if (!RFC3339_PATTERN.test(text) || Number.isNaN(time.getTime())) {

@@ -247,7 +247,7 @@ export const sections = [
         title: 'Releases',
         path: 'releases',
         description:
-          'What is new in relaybus 0.3.0, its breaking changes, deprecations, known issues and a benchmark against 0.2.0, and how relaybus is versioned and released.',
+          'What is new in relaybus 0.4.0 and 0.3.0, breaking changes, deprecations, known issues and benchmarks, and how relaybus is versioned and released.',
       },
     ],
   },

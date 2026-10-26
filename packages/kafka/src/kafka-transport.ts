@@ -8,7 +8,8 @@ import {
 import { SubscribingTransport, type TransportSubscription } from '@relaybus/core/internal';
 import { cloudEventsBinary } from './codecs.js';
 import { InvalidKafkaMessageError } from './errors.js';
-import { GroupJoinWatch, tracksMembership } from './kafka-group-join.js';
+import { GroupJoinWatch } from './kafka-group-join.js';
+import type { MembershipListeners } from './kafka-client-dialects.js';
 import type {
   KafkaConsumerEvent,
   KafkaConsumerLike,
@@ -29,6 +30,7 @@ import { WakeableSleeps } from './wakeable-sleeps.js';
 export type {
   InvalidKafkaMessage,
   InvalidMessagePolicy,
+  KafkaInjectedProducer,
   KafkaProcessingOptions,
   KafkaRestartOptions,
   KafkaTransportOptions,
@@ -49,8 +51,8 @@ type MessageRoute = {
  * Publishing: idempotent producer, `acks=-1`, resolves after the broker ack and
  * rejects with {@link PublishTimeoutError} after `publishTimeout`. A timed-out
  * send may still complete later; the outbox then retries it and the duplicate is
- * absorbed by the consumer's inbox dedup. The record key is the envelope key, so events sharing a key land on one
- * partition and keep their order; events without a key have no ordering.
+ * absorbed by the consumer's inbox dedup. The record key is the codec's: the event key by default, so events
+ * sharing a key land on one partition and keep their order; records without a key have no ordering.
  *
  * Subscribing: one consumer, one group, one `subscribe` call. `eachMessage`
  * awaits the handler; the client commits the offset only after it resolved. A
@@ -136,10 +138,12 @@ export class KafkaTransport extends SubscribingTransport {
   async #subscribe({ destinations, onMessage, hooks }: TransportSubscription): Promise<void> {
     assertCanSubscribe(this.#state, { settings: this.#settings, destinations });
     this.#state = 'subscribed';
-    const { kafka, consumerConfig, groupId } = this.#settings;
-    const consumer = kafka.consumer({ ...consumerConfig, groupId: groupId! });
+    const { kafka, dialect, groupId } = this.#settings;
+    const membership = this.#observeConsumer();
+    const consumer = kafka!.consumer(dialect.consumerConfig(this.#settings, membership));
     this.#consumer = consumer;
-    this.#observeConsumer(consumer);
+    this.#groupJoined = !dialect.tracksMembership(consumer);
+    dialect.observe(consumer, membership);
     const start = (): Promise<void> =>
       this.#groupJoin.start(consumer, {
         topics: [...destinations],
@@ -295,38 +299,26 @@ export class KafkaTransport extends SubscribingTransport {
     }
   }
 
-  #observeConsumer(consumer: KafkaConsumerLike): void {
-    if (!tracksMembership(consumer)) {
-      this.#groupJoined = true;
-      return;
-    }
+  /** What the transport does when the consumer joins, rebalances, crashes or leaves its group. */
+  #observeConsumer(): MembershipListeners {
     const { logger, groupId } = this.#settings;
-    const names = consumer.events!;
-    const listen = (
-      name: string | undefined,
-      listener: (event: KafkaConsumerEvent) => void,
-    ): void => {
-      if (name !== undefined) {
-        consumer.on!(name, listener);
-      }
+    return {
+      joined: () => {
+        this.#groupJoined = true;
+        this.#groupJoin.joined();
+        logger.log(`[KafkaTransport](observeConsumer) Joined group | group=${groupId}`);
+      },
+      rebalancing: () => {
+        this.#groupJoined = false;
+        // The partition assignment is about to change; a stall is re-detected if it persists.
+        this.#stalledPartitions.clear();
+        logger.warn(`[KafkaTransport](observeConsumer) Rebalancing | group=${groupId}`);
+      },
+      crashed: (event) => this.#handleCrash(event),
+      left: () => {
+        this.#groupJoined = false;
+      },
     };
-    listen(names.GROUP_JOIN, () => {
-      this.#groupJoined = true;
-      this.#groupJoin.joined();
-      logger.log(`[KafkaTransport](observeConsumer) Joined group | group=${groupId}`);
-    });
-    listen(names.REBALANCING, () => {
-      this.#groupJoined = false;
-      // The partition assignment is about to change; a stall is re-detected if it persists.
-      this.#stalledPartitions.clear();
-      logger.warn(`[KafkaTransport](observeConsumer) Rebalancing | group=${groupId}`);
-    });
-    listen(names.CRASH, (event) => this.#handleCrash(event));
-    const leftGroup = (): void => {
-      this.#groupJoined = false;
-    };
-    listen(names.STOP, leftGroup);
-    listen(names.DISCONNECT, leftGroup);
   }
 
   #handleCrash(event: KafkaConsumerEvent): void {

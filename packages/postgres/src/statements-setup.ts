@@ -34,7 +34,11 @@ export class SetupStatements {
 ) AS current`;
   }
 
+  /**
+   * Takes the setup lock. Returns a boolean column rather than the `void` of the lock function, which
+   * some libraries cannot read (Prisma's raw queries reject a `void` column).
+   */
   get setupLock(): string {
-    return 'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))';
+    return 'SELECT true AS locked FROM pg_advisory_xact_lock(hashtextextended($1::text, 0))';
   }
 }

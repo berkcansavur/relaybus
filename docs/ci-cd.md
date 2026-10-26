@@ -4,15 +4,15 @@ All automation lives in `.github/`. Every third-party action is pinned to a full
 
 ## Workflows
 
-| File                    | Trigger                                   | Purpose                                                                                   |
-| ----------------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `ci.yml`                | push to `main`, pull requests, reusable   | quality, tests with coverage, build checks, NestJS compatibility, aggregate `CI pass` job |
-| `release.yml`           | push to `main`, `next`, `beta`            | Runs `ci.yml` as a gate, then semantic-release: tag, npm publish (OIDC), GitHub Release   |
-| `pr-title.yml`          | pull requests (`pull_request_target`)     | Fails PRs whose title is not a valid Conventional Commit (type and scope allow-lists)     |
-| `codeql.yml`            | push, PR, weekly                          | CodeQL static analysis (`javascript-typescript`, `security-extended`)                     |
-| `dependency-review.yml` | pull requests                             | Fails PRs that add dependencies with known vulnerabilities (moderate and above)           |
-| `scorecard.yml`         | weekly, push to `main`, branch rule edits | OpenSSF Scorecard, published results and SARIF upload to code scanning                    |
-| `mutation.yml`          | weekly, manual                            | Stryker mutation testing, uploads the HTML/JSON report, fails below `thresholds.break`    |
+| File                    | Trigger                                   | Purpose                                                                                              |
+| ----------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `ci.yml`                | push to `main`, pull requests, reusable   | quality, tests with coverage, build checks, NestJS and Prisma compatibility, aggregate `CI pass` job |
+| `release.yml`           | push to `main`, `next`, `beta`            | Runs `ci.yml` as a gate, then semantic-release: tag, npm publish (OIDC), GitHub Release              |
+| `pr-title.yml`          | pull requests (`pull_request_target`)     | Fails PRs whose title is not a valid Conventional Commit (type and scope allow-lists)                |
+| `codeql.yml`            | push, PR, weekly                          | CodeQL static analysis (`javascript-typescript`, `security-extended`)                                |
+| `dependency-review.yml` | pull requests                             | Fails PRs that add dependencies with known vulnerabilities (moderate and above)                      |
+| `scorecard.yml`         | weekly, push to `main`, branch rule edits | OpenSSF Scorecard, published results and SARIF upload to code scanning                               |
+| `mutation.yml`          | weekly, manual                            | Stryker mutation testing, uploads the HTML/JSON report, fails below `thresholds.break`               |
 
 `.github/actions/setup` is a local composite action shared by the jobs: it installs pnpm (version from `packageManager`), Node.js with the pnpm store cached, and runs `pnpm install --frozen-lockfile`.
 
@@ -22,6 +22,7 @@ All automation lives in `.github/`. Every third-party action is pinned to a full
 - `test (node 22.x | 24.x)`: `pnpm coverage` runs unit and integration projects (Testcontainers use the Docker daemon on `ubuntu-latest`). The Docker servers are started once by `vitest.global-setup.ts` and shared by the integration files (see CONTRIBUTING.md). It fails when any 100% threshold from `vitest.config.ts` is missed. `coverage/lcov.info` and `coverage-summary.json` are uploaded as an artifact and to Codecov with OIDC (`use_oidc: true`, `fail_ci_if_error: false`), so no `CODECOV_TOKEN` is needed.
 - `build`: `pnpm build`, per-package `typecheck`, `publint` and `attw --pack` for every package.
 - `nestjs compat (@nestjs/* 11 | 12)`: re-resolves the `@nestjs/*` dev dependencies of `packages/nestjs` to the matrix major with `pnpm --filter @relaybus/nestjs add --save-dev`, asserts the resolved major, then runs the typecheck and the nestjs tests. The changed manifest and lockfile exist only on the runner.
+- `prisma compat (prisma 6)`: re-resolves `prisma`, `@prisma/client` and `@prisma/adapter-pg` in `packages/postgres` to the previous major (the test job runs the latest, 7), adds the datasource `url` Prisma 6 needs to the test schema, regenerates the test client and runs the Prisma integration tests (contract suite, prepared statements, wake-up after commit). The changed files exist only on the runner.
 - `CI pass`: succeeds only when all of the above succeeded. Use this single check in branch protection.
 
 ### release.yml flow

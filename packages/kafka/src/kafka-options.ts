@@ -1,7 +1,8 @@
 import type { Duration, RelayBusLogger } from '@relaybus/core';
 import type { KafkaCodec } from './codecs.js';
 import type { KafkaMessageDecoder } from './inbound-decoders.js';
-import type { KafkaClientLike } from './kafka-client.js';
+import type { KafkaClientLike, KafkaProducerLike } from './kafka-client.js';
+import type { KafkaClientName } from './kafka-client-dialects.js';
 
 /** A record the transport refused to hand to the bus because it is malformed. */
 export interface InvalidKafkaMessage {
@@ -56,9 +57,34 @@ export interface KafkaRestartOptions {
   readonly maxBackoff?: Duration;
 }
 
+/**
+ * A producer the application already connected and owns, such as the one of its own Kafka
+ * service: a kafkajs `Producer` or a Confluent `KafkaJS.Producer`. Only `send` is called.
+ */
+export type KafkaInjectedProducer = Pick<KafkaProducerLike, 'send'>;
+
 export interface KafkaTransportOptions {
-  /** A `kafkajs` `Kafka` or `@confluentinc/kafka-javascript` `KafkaJS.Kafka` instance. */
-  readonly kafka: KafkaClientLike;
+  /**
+   * A `kafkajs` `Kafka` or `@confluentinc/kafka-javascript` `KafkaJS.Kafka` instance: the
+   * factory of the transport's own consumer and, unless `producer` is given, producer.
+   * Required unless `producer` is given; required to subscribe.
+   */
+  readonly kafka?: KafkaClientLike;
+  /**
+   * Publish (and dead-letter) through this already-connected producer instead of one of
+   * `kafka`, reusing the application's connection and its SSL/SASL settings. The transport never
+   * connects or disconnects it; `close` leaves it open. Make it idempotent with `acks` -1 (all
+   * in-sync replicas) and at most 5 in-flight requests (1 to keep retries from reordering), as
+   * the transport's own producer is: `producerConfig` and `maxInFlightRequests` cannot be given
+   * with it. With Confluent, set `client: 'confluent'` too.
+   */
+  readonly producer?: KafkaInjectedProducer;
+  /**
+   * Which client `kafka` is. Default `'kafkajs'`; set `'confluent'` for a
+   * `@confluentinc/kafka-javascript` `KafkaJS.Kafka`. The two KafkaJS-style APIs differ in where
+   * settings go and how the consumer reports its group membership.
+   */
+  readonly client?: KafkaClientName;
   /** Name referenced by routes and subscriptions. Default `'kafka'`. */
   readonly name?: string;
   /** Consumer group id. Required as soon as `subscribe` is used. */
@@ -70,9 +96,17 @@ export interface KafkaTransportOptions {
   readonly fromBeginning?: boolean;
   /** Producer `maxInFlightRequests`, 1 to 5. Default 1, which keeps retries from reordering a key. */
   readonly maxInFlightRequests?: number;
-  /** Extra producer settings; `idempotent` and `maxInFlightRequests` always win. */
+  /**
+   * Extra producer settings; `idempotent` and `maxInFlightRequests` always win. With Confluent,
+   * KafkaJS-style settings go in a `kafkaJS` block and librdkafka properties at the top level;
+   * `acks: -1` also wins, and so do `enable.idempotence`, `max.in.flight` and `acks` there.
+   */
   readonly producerConfig?: object;
-  /** Extra consumer settings; `groupId` always wins. */
+  /**
+   * Extra consumer settings; `groupId` always wins. With Confluent, KafkaJS-style settings go in
+   * a `kafkaJS` block and librdkafka properties at the top level; `fromBeginning` also wins, and
+   * so do `group.id` and `auto.offset.reset` there. A `rebalance_cb` of yours is still called.
+   */
   readonly consumerConfig?: object;
   readonly processing?: KafkaProcessingOptions;
   /** How long `subscribe` waits for the consumer group join before failing. Default `'30s'`. */

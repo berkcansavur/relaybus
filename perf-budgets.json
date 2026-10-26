@@ -360,6 +360,11 @@
     "unit": "statements",
     "description": "Statements the server parses and plans from their text for a warm claim of 10 and the completion of what it claimed."
   },
+  "postgres.dispatch.ormParsedStatementsPerBatch": {
+    "budget": 0,
+    "unit": "statements",
+    "description": "The same for a store on an ORM executor (Prisma, Kysely, Drizzle) given `pool` for the statements it sends outside the application's transactions. Without `pool` every statement is parsed: ORMs send raw statements unnamed."
+  },
   "postgres.wal.publishSingle.bytesPerEvent": {
     "budget": 1144,
     "unit": "bytes",

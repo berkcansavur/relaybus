@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { KafkaContainer, type StartedKafkaContainer } from '@testcontainers/kafka';
-import { Kafka, Partitioners, logLevel } from 'kafkajs';
+import { Kafka, logLevel } from 'kafkajs';
 import { describeSharedCatalogServices } from '../../testing/test/support/catalog-services.suite.js';
 import { silentLogger } from '../../testing/test/support/catalog-services.js';
 import { KafkaTransport } from '../src/index.js';
+import { KAFKA_CLIENTS, type KafkaClientUnderTest } from './support/kafka-clients.js';
 
 const KAFKA_IMAGE = 'confluentinc/cp-kafka:7.5.0';
 const KAFKA_EXTERNAL_PORT = 9093;
@@ -59,49 +60,50 @@ async function waitForBroker(): Promise<void> {
   }
 }
 
-function createTransport(groupId?: string): KafkaTransport {
+function createTransport(client: KafkaClientUnderTest, groupId?: string): KafkaTransport {
   return new KafkaTransport({
-    kafka: createClient(),
+    kafka: client.createClient(brokers),
     ...(groupId === undefined ? {} : { groupId }),
     logger: silentLogger,
-    producerConfig: { createPartitioner: Partitioners.DefaultPartitioner },
-    consumerConfig: { retry: { initialRetryTime: 100, retries: 10 } },
+    ...client.transportOptions,
   });
 }
 
-describeSharedCatalogServices({
-  name: 'Kafka',
-  async start() {
-    container = await new KafkaContainer(KAFKA_IMAGE).withKraft().start();
-    brokers = [`${container.getHost()}:${container.getMappedPort(KAFKA_EXTERNAL_PORT)}`];
-    await waitForBroker();
-  },
-  async stop() {
-    await container.stop();
-  },
-  async createDestinations() {
-    const suffix = randomUUID().slice(0, 8);
-    const destinations = { orders: `orders-${suffix}`, shipments: `shipments-${suffix}` };
-    const admin = createClient().admin();
-    await admin.connect();
-    await admin.createTopics({
-      waitForLeaders: true,
-      topics: [
-        // Several partitions, so per-key order relies on the key, not on a single partition.
-        { topic: destinations.orders, numPartitions: 3 },
-        { topic: destinations.shipments, numPartitions: 3 },
-      ],
-    });
-    await admin.disconnect();
-    return destinations;
-  },
-  createTransport: (consumerGroup) => createTransport(consumerGroup),
-  async replay(envelope, destination) {
-    const transport = createTransport();
-    try {
-      await transport.publish(envelope, destination);
-    } finally {
-      await transport.close();
-    }
-  },
-});
+for (const client of KAFKA_CLIENTS) {
+  describeSharedCatalogServices({
+    name: `Kafka (${client.name})`,
+    async start() {
+      container = await new KafkaContainer(KAFKA_IMAGE).withKraft().start();
+      brokers = [`${container.getHost()}:${container.getMappedPort(KAFKA_EXTERNAL_PORT)}`];
+      await waitForBroker();
+    },
+    async stop() {
+      await container.stop();
+    },
+    async createDestinations() {
+      const suffix = randomUUID().slice(0, 8);
+      const destinations = { orders: `orders-${suffix}`, shipments: `shipments-${suffix}` };
+      const admin = createClient().admin();
+      await admin.connect();
+      await admin.createTopics({
+        waitForLeaders: true,
+        topics: [
+          // Several partitions, so per-key order relies on the key, not on a single partition.
+          { topic: destinations.orders, numPartitions: 3 },
+          { topic: destinations.shipments, numPartitions: 3 },
+        ],
+      });
+      await admin.disconnect();
+      return destinations;
+    },
+    createTransport: (consumerGroup) => createTransport(client, consumerGroup),
+    async replay(envelope, destination) {
+      const transport = createTransport(client);
+      try {
+        await transport.publish(envelope, destination);
+      } finally {
+        await transport.close();
+      }
+    },
+  });
+}

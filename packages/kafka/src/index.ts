@@ -36,16 +36,20 @@ export {
   type KafkaCodec,
   type KafkaEncodedRecord,
   type KafkaJsonEnvelopeMapping,
+  type KafkaRecordKey,
+  type KafkaRecordOptions,
 } from './codecs.js';
 export {
   KafkaTransport,
   type InvalidKafkaMessage,
   type InvalidMessagePolicy,
+  type KafkaInjectedProducer,
   type KafkaProcessingOptions,
   type KafkaRestartOptions,
   type KafkaTransportOptions,
 } from './kafka-transport.js';
 export { fromHeader, fromPayloadField } from './field-extractors.js';
+export { decodeKafkaRecord } from './kafka-records.js';
 export {
   decodeCloudEvent,
   plainJsonDecoder,

@@ -1,7 +1,7 @@
 import type { EventEnvelope } from '@relaybus/core';
 import { decodeEnvelope, toOutgoingHeaders } from './cloudevents-codec.js';
 import { cloudEventsBinary, type KafkaCodec } from './codecs.js';
-import { completeDecodedEvent } from './inbound-decoders.js';
+import { completeDecodedEvent, type KafkaInboundRecord } from './inbound-decoders.js';
 import type { KafkaEachMessagePayload, KafkaProducerRecord } from './kafka-client.js';
 
 // What a consumed record becomes: an event, or a copy for its dead-letter topic.
@@ -11,10 +11,7 @@ export function decodeRecord(
   codec: KafkaCodec,
   { topic, partition, message }: KafkaEachMessagePayload,
 ): EventEnvelope {
-  if (codec === cloudEventsBinary) {
-    return decodeEnvelope(message);
-  }
-  const record = {
+  return decodeKafkaRecord(codec, {
     topic,
     partition,
     offset: message.offset,
@@ -22,7 +19,18 @@ export function decodeRecord(
     value: message.value,
     headers: message.headers,
     timestamp: message.timestamp,
-  };
+  });
+}
+
+/**
+ * The event a {@link KafkaTransport} with `codec` hands to the bus for `record`: the codec's
+ * `decode`, with what it leaves out filled in (see `DecodedEvent`). Throws for a malformed
+ * record. For codec contract tests (`kafkaCodecContract` of `@relaybus/testing`).
+ */
+export function decodeKafkaRecord(codec: KafkaCodec, record: KafkaInboundRecord): EventEnvelope {
+  if (codec === cloudEventsBinary) {
+    return decodeEnvelope(record);
+  }
   return completeDecodedEvent(codec.decode(record), record);
 }
 

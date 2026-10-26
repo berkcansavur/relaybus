@@ -9,8 +9,10 @@ import { encodeEnvelope } from './cloudevents-codec.js';
 import { cloudEventsBinary, type KafkaCodec } from './codecs.js';
 import { HandlerFailedError } from './errors.js';
 import type { KafkaClientLike } from './kafka-client.js';
+import { clientDialect, type KafkaClientDialect } from './kafka-client-dialects.js';
 import type {
   InvalidMessagePolicy,
+  KafkaInjectedProducer,
   KafkaProcessingOptions,
   KafkaRestartOptions,
   KafkaTransportOptions,
@@ -45,7 +47,12 @@ export interface KafkaTimings {
 /** Every option of a {@link KafkaTransport}, with its default, checked. */
 export interface KafkaSettings {
   readonly name: string;
-  readonly kafka: KafkaClientLike;
+  /** Undefined only with an injected producer: then the transport cannot subscribe. */
+  readonly kafka: KafkaClientLike | undefined;
+  /** The application's own producer, which the transport never connects or disconnects. */
+  readonly injectedProducer: KafkaInjectedProducer | undefined;
+  /** How to talk to `kafka`: kafkajs or Confluent. */
+  readonly dialect: KafkaClientDialect;
   readonly groupId: string | undefined;
   readonly fromBeginning: boolean;
   readonly maxInFlightRequests: number;
@@ -62,6 +69,8 @@ export function resolveKafkaSettings(options: KafkaTransportOptions): KafkaSetti
   return {
     name: options.name ?? DEFAULTS.name,
     kafka: options.kafka,
+    injectedProducer: resolveInjectedProducer(options),
+    dialect: clientDialect(options.client),
     groupId: options.groupId,
     fromBeginning: options.fromBeginning ?? true,
     maxInFlightRequests: BoundedInteger.of(
@@ -75,6 +84,27 @@ export function resolveKafkaSettings(options: KafkaTransportOptions): KafkaSetti
     logger: options.logger ?? console,
     timings: resolveTimings(options),
   };
+}
+
+/** The injected producer, refusing producer settings it would ignore and a transport with no producer. */
+function resolveInjectedProducer(
+  options: KafkaTransportOptions,
+): KafkaInjectedProducer | undefined {
+  const { producer, kafka, producerConfig, maxInFlightRequests } = options;
+  if (producer === undefined) {
+    if (kafka === undefined) {
+      throw new ConfigurationError(
+        "Give 'kafka', or an already-connected 'producer' to publish with",
+      );
+    }
+    return undefined;
+  }
+  if (producerConfig !== undefined || maxInFlightRequests !== undefined) {
+    throw new ConfigurationError(
+      "Give 'producerConfig' and 'maxInFlightRequests' to a producer you inject yourself",
+    );
+  }
+  return producer;
 }
 
 /** The codec of the options; the deprecated `decode` pairs with the default encoding. */

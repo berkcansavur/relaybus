@@ -77,11 +77,15 @@ describe('span outcomes', () => {
     await bus.publish(new OrderPlaced({ orderId: '1' }));
     await bus.publish(new OrderShipped({ orderId: '1' }));
     await bus.drain();
-    const placed = telemetry.spans().find((span) => span.name === 'process order.placed.v1')!;
+    const placed = (await telemetry.spans()).find(
+      (span) => span.name === 'process order.placed.v1',
+    )!;
     expect(placed.status).toEqual({ code: SpanStatusCode.ERROR, message: 'payment provider down' });
     expect(placed.attributes['error.type']).toBe('Error');
     expect(placed.events.map((event) => event.name)).toEqual(['exception']);
-    const shipped = telemetry.spans().find((span) => span.name === 'process order.shipped.v1')!;
+    const shipped = (await telemetry.spans()).find(
+      (span) => span.name === 'process order.shipped.v1',
+    )!;
     expect(shipped.status.code).toBe(SpanStatusCode.ERROR);
     expect(shipped.events[0]!.attributes).toMatchObject({ 'exception.message': 'not an error' });
   });
@@ -94,7 +98,7 @@ describe('span outcomes', () => {
     await expect(bus.publish(new OrderPlaced({ orderId: '1' }), { key: '' })).rejects.toThrow(
       'key must not be empty',
     );
-    const [mixed, failed] = telemetry.spans();
+    const [mixed, failed] = await telemetry.spans();
     expect(mixed!.name).toBe('publish');
     expect(mixed!.attributes).toEqual({
       'messaging.system': 'relaybus',
@@ -121,7 +125,7 @@ describe('span outcomes', () => {
       occurredAt: new Date('2026-01-01T00:00:00.000Z'),
     });
     await bus.drain();
-    const [process] = telemetry.spans();
+    const [process] = await telemetry.spans();
     expect(process!.name).toBe('process order.placed.v1');
     expect(process!.parentSpanContext).toBeUndefined();
   });
@@ -145,7 +149,7 @@ describe('send spans', () => {
       { envelope, transport: 'broker', system: 'kafka', destination: 'orders' },
       async (headers) => headers,
     );
-    const [send] = telemetry.spans();
+    const [send] = await telemetry.spans();
     expect(sent['traceparent']).toContain(send!.spanContext().spanId);
     expect(send!.parentSpanContext).toBeUndefined();
     expect(send!.links).toEqual([]);

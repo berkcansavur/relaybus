@@ -33,7 +33,7 @@ export type RelayBusHooks = {
   /** Logs or throws for an event no handler or route takes. */
   readonly reportUnrouted: (envelope: EventEnvelope) => void;
   /** Wakes the dispatcher shortly after new deliveries were stored. */
-  readonly scheduleWake: () => void;
+  readonly scheduleWake: (committed: boolean) => void;
   readonly statistics: () => Promise<EventStoreStatistics>;
 };
 

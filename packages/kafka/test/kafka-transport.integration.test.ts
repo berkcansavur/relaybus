@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { Kafka, Partitioners, logLevel, type Consumer } from 'kafkajs';
+import { type Kafka, type Consumer } from 'kafkajs';
 import {
   InMemoryEventStore,
   NonRetryableError,
@@ -8,9 +8,21 @@ import {
   type EventEnvelope,
   type InMemoryTransaction,
 } from '@relaybus/core';
-import { KafkaTransport, type KafkaTransportOptions } from '../src/index.js';
+import {
+  KafkaTransport,
+  type KafkaConsumerConfig,
+  type KafkaConsumerLike,
+  type KafkaRunConfig,
+  type KafkaTransportOptions,
+} from '../src/index.js';
 import { createEnvelope, createLogger } from './fakes.js';
 import {
+  KAFKA_CLIENTS,
+  withoutOwnProducerSettings,
+  type KafkaClientUnderTest,
+} from './support/kafka-clients.js';
+import {
+  brokerAddresses,
   createClient,
   createTopics,
   produceRaw,
@@ -23,18 +35,19 @@ import {
 
 class OrderPlaced extends defineEvent<{ orderId: string }>('order.placed.v1') {}
 
-function createTransport(options: Partial<KafkaTransportOptions> = {}) {
-  const logger = createLogger();
-  const transport = new KafkaTransport({
-    kafka: createClient(),
-    groupId: uniqueName('group'),
-    logger,
-    producerConfig: { createPartitioner: Partitioners.DefaultPartitioner },
-    consumerConfig: { retry: { initialRetryTime: 100, retries: 10 } },
-    processing: { maxAttempts: 3, initialBackoff: 50, maxBackoff: 200 },
-    ...options,
-  });
-  return { transport, logger };
+function transportFactory(client: KafkaClientUnderTest) {
+  return (options: Partial<KafkaTransportOptions> = {}) => {
+    const logger = createLogger();
+    const transport = new KafkaTransport({
+      kafka: client.createClient(brokerAddresses()),
+      groupId: uniqueName('group'),
+      logger,
+      ...client.transportOptions,
+      processing: { maxAttempts: 3, initialBackoff: 50, maxBackoff: 200 },
+      ...options,
+    });
+    return { transport, logger };
+  };
 }
 
 beforeAll(async () => {
@@ -45,7 +58,9 @@ afterAll(async () => {
   await stopKafkaBroker();
 });
 
-describe('KafkaTransport against a real broker', () => {
+describe.each(KAFKA_CLIENTS)('KafkaTransport on $name against a real broker', (client) => {
+  const createTransport = transportFactory(client);
+
   it('round-trips an envelope exactly and writes CloudEvents binary mode on the wire', async () => {
     const topic = uniqueName('orders');
     await createTopics(topic);
@@ -294,62 +309,165 @@ describe('KafkaTransport against a real broker', () => {
     120_000,
   );
 
-  it('restarts the consumer run loop after the client reported an unrecoverable crash', async () => {
-    const topic = uniqueName('crash-restart');
-    await createTopics(topic);
-    const client = createClient();
-    let crashed = false;
-    // Makes kafkajs see a raw TypeError from eachMessage, which it marks as unrecoverable.
-    const crashingClient = {
-      producer: (config: Parameters<Kafka['producer']>[0]) => client.producer(config),
-      consumer: (config: Parameters<Kafka['consumer']>[0]) => {
-        const consumer = client.consumer(config);
-        return Object.assign(Object.create(consumer) as Consumer, {
-          run: (runConfig: NonNullable<Parameters<Consumer['run']>[0]>) =>
-            consumer.run({
-              eachMessage: async (payload) => {
-                if (!crashed) {
-                  crashed = true;
-                  throw new TypeError('raw bug escaped the transport');
-                }
-                await runConfig.eachMessage!(payload);
-              },
-            }),
-        });
-      },
-    };
-    const { transport: producerSide } = createTransport();
-    const { transport: consumerSide, logger } = createTransport({
-      kafka: crashingClient as unknown as Kafka,
-      restart: { initialBackoff: 100, maxBackoff: 500 },
-    });
-    const received: string[] = [];
-    await consumerSide.subscribe([topic], async (envelope) => {
-      received.push(envelope.id);
-    });
-    await producerSide.publish(createEnvelope({ id: 'after-crash' }), topic);
-    await waitFor(() => received.length === 1, 90_000);
-    expect(received).toEqual(['after-crash']);
-    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('restart=false'));
-    expect(logger.log).toHaveBeenCalledWith(expect.stringContaining('Consumer restarted'));
-    await waitFor(() => consumerSide.isConsuming());
-    expect(consumerSide.isReady()).toBe(false);
-    await producerSide.close();
-    await consumerSide.close();
-  }, 120_000);
+  it.runIf(client.name === 'kafkajs')(
+    'restarts the consumer run loop after the client reported an unrecoverable crash',
+    async () => {
+      const topic = uniqueName('crash-restart');
+      await createTopics(topic);
+      const kafkajs = createClient();
+      let crashed = false;
+      // Makes kafkajs see a raw TypeError from eachMessage, which it marks as unrecoverable.
+      const crashingClient = {
+        producer: (config: Parameters<Kafka['producer']>[0]) => kafkajs.producer(config),
+        consumer: (config: Parameters<Kafka['consumer']>[0]) => {
+          const consumer = kafkajs.consumer(config);
+          return Object.assign(Object.create(consumer) as Consumer, {
+            run: (runConfig: NonNullable<Parameters<Consumer['run']>[0]>) =>
+              consumer.run({
+                eachMessage: async (payload) => {
+                  if (!crashed) {
+                    crashed = true;
+                    throw new TypeError('raw bug escaped the transport');
+                  }
+                  await runConfig.eachMessage!(payload);
+                },
+              }),
+          });
+        },
+      };
+      const { transport: producerSide } = createTransport();
+      const { transport: consumerSide, logger } = createTransport({
+        kafka: crashingClient as unknown as Kafka,
+        restart: { initialBackoff: 100, maxBackoff: 500 },
+      });
+      const received: string[] = [];
+      await consumerSide.subscribe([topic], async (envelope) => {
+        received.push(envelope.id);
+      });
+      await producerSide.publish(createEnvelope({ id: 'after-crash' }), topic);
+      await waitFor(() => received.length === 1, 90_000);
+      expect(received).toEqual(['after-crash']);
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('restart=false'));
+      expect(logger.log).toHaveBeenCalledWith(expect.stringContaining('Consumer restarted'));
+      await waitFor(() => consumerSide.isConsuming());
+      expect(consumerSide.isReady()).toBe(false);
+      await producerSide.close();
+      await consumerSide.close();
+    },
+    120_000,
+  );
+
+  // Confluent never gives up on a consumer: an error escaping eachMessage seeks back to the record.
+  it.runIf(client.name === 'confluent')(
+    'redelivers a record after a raw error escaped eachMessage, without a crash or restart',
+    async () => {
+      const topic = uniqueName('raw-error');
+      await createTopics(topic);
+      const kafka = client.createClient(brokerAddresses());
+      let thrown = false;
+      const throwingClient = {
+        producer: kafka.producer.bind(kafka),
+        consumer: (config: KafkaConsumerConfig): KafkaConsumerLike => {
+          const consumer = kafka.consumer(config);
+          return {
+            connect: () => consumer.connect(),
+            subscribe: (subscription) => consumer.subscribe(subscription),
+            disconnect: () => consumer.disconnect(),
+            run: (runConfig: KafkaRunConfig) =>
+              consumer.run({
+                eachMessage: async (payload) => {
+                  if (!thrown) {
+                    thrown = true;
+                    throw new TypeError('raw bug escaped the transport');
+                  }
+                  await runConfig.eachMessage(payload);
+                },
+              }),
+          };
+        },
+      };
+      const { transport: producerSide } = createTransport();
+      const { transport: consumerSide, logger } = createTransport({ kafka: throwingClient });
+      const received: string[] = [];
+      await consumerSide.subscribe([topic], async (envelope) => {
+        received.push(envelope.id);
+      });
+      await producerSide.publish(createEnvelope({ id: 'after-error' }), topic);
+      await waitFor(() => received.length === 1, 90_000);
+      expect(received).toEqual(['after-error']);
+      expect(thrown).toBe(true);
+      expect(logger.error).not.toHaveBeenCalled();
+      expect(consumerSide.isConsuming()).toBe(true);
+      await producerSide.close();
+      await consumerSide.close();
+    },
+    120_000,
+  );
 
   it('fails start-up when the broker is unreachable instead of looking healthy', async () => {
     const { transport } = createTransport({
-      kafka: new Kafka({
-        brokers: ['127.0.0.1:1'],
-        logLevel: logLevel.NOTHING,
-        connectionTimeout: 500,
-        retry: { retries: 0 },
-      }),
+      kafka: client.createClient(['127.0.0.1:1'], { unreachable: true }),
     });
     await expect(transport.subscribe(['any'], async () => undefined)).rejects.toThrow();
     expect(transport.isConsuming()).toBe(false);
     await transport.close().catch(() => undefined);
+  });
+
+  it('publishes through an injected, already-connected producer and leaves it open on close', async () => {
+    const topic = uniqueName('injected');
+    await createTopics(topic);
+    const appProducer = client.createClient(brokerAddresses()).producer(client.appProducerConfig);
+    await appProducer.connect();
+    const { transport: consumerSide } = createTransport();
+    const received: EventEnvelope[] = [];
+    await consumerSide.subscribe([topic], async (envelope) => {
+      received.push(envelope);
+    });
+    // Publish-only: no client of its own, so no second connection.
+    const clientOptions = withoutOwnProducerSettings(client);
+    const publisher = new KafkaTransport({
+      ...clientOptions,
+      producer: appProducer,
+      logger: createLogger(),
+    });
+    await publisher.connect();
+    expect(publisher.isReady()).toBe(true);
+    await publisher.publish(createEnvelope({ id: 'through-app-producer' }), topic);
+    await waitFor(() => received.length === 1);
+    expect(received[0]!.id).toBe('through-app-producer');
+    await publisher.close();
+
+    // Still connected: the application keeps using it after the transport closed.
+    await appProducer.send({
+      topic,
+      messages: [{ key: null, value: 'after close', headers: {} }],
+    });
+    const records = await readRaw(topic, 2);
+    expect(records.map((record) => record.value)).toContain('after close');
+    await appProducer.disconnect();
+    await consumerSide.close();
+  });
+
+  it('dead-letters through an injected producer while consuming with its own client', async () => {
+    const topic = uniqueName('injected-dlq');
+    await createTopics(topic, `${topic}.dead`);
+    const appProducer = client.createClient(brokerAddresses()).producer(client.appProducerConfig);
+    await appProducer.connect();
+    const clientOptions = withoutOwnProducerSettings(client);
+    const consumerSide = new KafkaTransport({
+      ...clientOptions,
+      kafka: client.createClient(brokerAddresses()),
+      groupId: uniqueName('group'),
+      producer: appProducer,
+      logger: createLogger(),
+    });
+    await produceRaw(topic, [{ key: 'k1', value: 'garbage' }]);
+    await consumerSide.subscribe([topic], async () => undefined);
+    const [deadLetter] = await readRaw(`${topic}.dead`, 1);
+    expect(deadLetter).toMatchObject({ key: 'k1', value: 'garbage' });
+    await consumerSide.close();
+    await appProducer.send({ topic, messages: [{ key: null, value: 'still open', headers: {} }] });
+    await appProducer.disconnect();
   });
 
   it('closes gracefully: stops consuming, rejects publishes, leaves the group', async () => {
@@ -365,7 +483,9 @@ describe('KafkaTransport against a real broker', () => {
   });
 });
 
-describe('RelayBus across Kafka', () => {
+describe.each(KAFKA_CLIENTS)('RelayBus across Kafka on $name', (client) => {
+  const createTransport = transportFactory(client);
+
   interface Service {
     readonly bus: RelayBus<InMemoryTransaction>;
     readonly store: InMemoryEventStore;

@@ -15,21 +15,48 @@ export type WireField = BodyField | HeaderField;
 /** The one event type every message of the route carries: written nowhere, used for every message read. */
 export type FixedType = { readonly fixed: string };
 
+/**
+ * How `occurredAt` travels: RFC 3339 text (default), or whole epoch milliseconds or seconds, a
+ * number in the body and decimal text in a header. Epoch seconds drop the milliseconds.
+ */
+export type TimeFormat = 'rfc3339' | 'epoch-millis' | 'epoch-seconds';
+/** Where the event time lives, and in which format. */
+export type TimeField<TField extends WireField> = TField & { readonly format?: TimeFormat };
+
+/** A JSON value written as it is. */
+export type JsonConstant =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly JsonConstant[]
+  | { readonly [name: string]: JsonConstant };
+/** A value written with every message: a constant, or derived from the event. */
+export type ExtraValue<TValue> = TValue | ((envelope: EventEnvelope) => TValue);
+/** Extra message headers, by name. */
+export type ExtraHeaders = Readonly<Record<string, ExtraValue<string>>>;
+/** Extra body values, by dotted path. */
+export type ExtraBody = Readonly<Record<string, ExtraValue<JsonConstant>>>;
+
 type MappingFields<TField extends WireField, TTransportId extends string> = {
   /** Where the event type lives, or the one type of the route. Required. */
   readonly type: TField | FixedType;
   /**
    * Where the event id lives, or the transport's own message identity (see the transport's
    * mapping type). Required, so the inbox dedup key is always a deliberate choice. A message
-   * whose mapped id is missing is malformed.
+   * whose mapped id is missing is malformed, unless `whenMissing` names the transport's own id
+   * to use instead: `{ body: 'id', whenMissing: 'record-position' }`.
    */
-  readonly id: TField | TTransportId;
+  readonly id: TField | TTransportId | (TField & { readonly whenMissing: TTransportId });
   /** Ordering key. Default: the transport's own (the Kafka record key; none on RabbitMQ). */
   readonly key?: TField;
   /** Producing service. Default: the transport's own (Kafka topic; RabbitMQ `appId`, else the routing key). */
   readonly source?: TField;
-  /** RFC 3339 time. Default: the transport's own (Kafka record timestamp; RabbitMQ `timestamp`, seconds). */
-  readonly occurredAt?: TField;
+  /**
+   * Event time, RFC 3339 unless `format` says otherwise. Default: the transport's own (Kafka
+   * record timestamp; RabbitMQ `timestamp`, seconds).
+   */
+  readonly occurredAt?: TimeField<TField>;
   readonly correlationId?: TField;
   readonly causationId?: TField;
   /** Media type written with the message. Default `application/json`. Not checked on read. */
@@ -48,10 +75,22 @@ export type BodyEnvelopeMapping<TTransportId extends string> = MappingFields<
   /** Body path of the payload. Required. */
   readonly payload: BodyField;
   /**
-   * Event headers: a body path holding an object of strings, or `'message-headers'` (default),
-   * every message header that no other field maps.
+   * Event headers: a body path holding an object of strings, `'message-headers'` (default),
+   * every message header that no other field maps, or `'top-level-fields'`, spread over the top
+   * level of the body: every top-level text field that no other value uses is read as one.
    */
-  readonly headers?: BodyField | 'message-headers';
+  readonly headers?: BodyField | 'message-headers' | 'top-level-fields';
+  /**
+   * Values written with every message besides the mapped ones, such as a constant
+   * `provider: 'orders-api'` or a second copy of the time. They are never read; extra headers
+   * are left out of the event headers on read.
+   */
+  readonly extra?: { readonly body?: ExtraBody; readonly headers?: ExtraHeaders };
+  /**
+   * Top-level body fields to write first, in this order; the others follow in the order they
+   * are written. Only the bytes change, for formats compared byte for byte.
+   */
+  readonly bodyOrder?: readonly string[];
 };
 
 /**
@@ -65,6 +104,8 @@ export type PayloadOnlyMapping<TTransportId extends string> = MappingFields<
   readonly payload: 'whole-body';
   /** Event headers: every message header that no other field maps. */
   readonly headers?: 'message-headers';
+  /** Message headers written with every message; never read, and left out of the event headers. */
+  readonly extra?: { readonly headers?: ExtraHeaders };
 };
 
 /** Where every envelope value lives in a JSON message. `type`, `id` and `payload` are required. */

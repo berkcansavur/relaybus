@@ -18,7 +18,7 @@ function createFakePrisma() {
   return { client, transactionClient };
 }
 
-describe('createPrismaExecutor (structural fake, not integration-tested)', () => {
+describe('createPrismaExecutor (structural fake; adapters.integration.test.ts runs a real client)', () => {
   it('spreads parameters into $queryRawUnsafe on the client', async () => {
     const { client } = createFakePrisma();
     const executor = createPrismaExecutor(client);

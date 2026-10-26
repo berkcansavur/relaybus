@@ -1,5 +1,5 @@
 import type { EventEnvelope } from '../event.js';
-import type { JsonEnvelopeFailures, JsonWireMessage } from './json-envelope.js';
+import type { JsonEnvelopeFailures, JsonWireMessage, TimeFormat } from './json-envelope.js';
 import {
   ARRAY_INDEX,
   type Context,
@@ -12,6 +12,7 @@ import {
 
 /** RFC 3339 years have four digits. */
 const MAXIMUM_RFC3339_YEAR = 9999;
+const MILLISECONDS_PER_SECOND = 1000;
 
 export function writeMessage(
   envelope: EventEnvelope,
@@ -19,45 +20,71 @@ export function writeMessage(
 ): JsonWireMessage {
   const root: Record<string, unknown> = {};
   const headers: [string, string][] = [];
-  const put = (location: Location, value: string): void => {
+  const put = (location: Location, value: string | number): void => {
     if ('header' in location) {
-      headers.push([location.header, value]);
+      headers.push([location.header, String(value)]);
     } else {
       setAt(root, { path: location.path, value });
     }
   };
-  if ('fixed' in plan.type) {
-    if (envelope.type !== plan.type.fixed) {
-      throw failures.unencodable(
-        `Event ${envelope.id} has type '${envelope.type}', but this route carries only '${plan.type.fixed}'`,
-      );
-    }
-  } else {
-    put(plan.type, envelope.type);
+  const typeAt = typeLocation(envelope, { plan, failures });
+  if (typeAt !== undefined) {
+    put(typeAt, envelope.type);
   }
   if (plan.id !== undefined) {
     put(plan.id, envelope.id);
   }
-  for (const [name, value] of optionalValues(envelope, failures)) {
+  for (const [name, value] of optionalValues(envelope, { plan, failures })) {
     const location = plan.optional[name];
     if (location !== undefined && value !== null) {
       put(location, value);
     }
   }
+  const body = writeBody(envelope, { plan, root });
+  if (plan.topLevelHeaders) {
+    spreadHeaders(envelope, { plan, failures, root: body as Record<string, unknown> });
+  }
   return {
-    body: writeBody(envelope, { plan, root }),
-    headers: Object.fromEntries([...eventHeaderEntries(envelope, { plan, failures }), ...headers]),
+    body,
+    headers: Object.fromEntries([
+      ...eventHeaderEntries(envelope, { plan, failures }),
+      ...headers,
+      ...extraHeaderEntries(envelope, plan),
+    ]),
   };
+}
+
+/** Where the type is written; a fixed type is written nowhere and refuses any other type. */
+function typeLocation(envelope: EventEnvelope, { plan, failures }: Context): Location | undefined {
+  if (!('fixed' in plan.type)) {
+    return plan.type;
+  }
+  if (envelope.type !== plan.type.fixed) {
+    throw failures.unencodable(
+      `Event ${envelope.id} has type '${envelope.type}', but this route carries only '${plan.type.fixed}'`,
+    );
+  }
+  return undefined;
+}
+
+function extraHeaderEntries(envelope: EventEnvelope, plan: Plan): [string, string][] {
+  return plan.extraHeaders.map(([name, value]) => [
+    name,
+    typeof value === 'function' ? value(envelope) : value,
+  ]);
 }
 
 function optionalValues(
   envelope: EventEnvelope,
-  failures: JsonEnvelopeFailures,
-): [OptionalName, string | null][] {
+  { plan, failures }: Context,
+): [OptionalName, string | number | null][] {
   return [
     ['key', envelope.key],
     ['source', envelope.source],
-    ['occurredAt', formatTime(envelope, failures)],
+    [
+      'occurredAt',
+      timeValue(formatTime(envelope, failures), { envelope, format: plan.timeFormat }),
+    ],
     ['correlationId', envelope.correlationId],
     ['causationId', envelope.causationId],
   ];
@@ -77,7 +104,52 @@ function writeBody(
       value: Object.fromEntries(Object.entries(envelope.headers)),
     });
   }
-  return root;
+  for (const { path, value } of plan.extraBody) {
+    setAt(root, { path, value: typeof value === 'function' ? value(envelope) : value });
+  }
+  return ordered(root, plan.bodyOrder);
+}
+
+/** Event headers spread over the top level of the body, last; a name another value uses is refused. */
+function spreadHeaders(
+  envelope: EventEnvelope,
+  { plan, failures, root }: Context & { readonly root: Record<string, unknown> },
+): void {
+  for (const [name, value] of Object.entries(envelope.headers)) {
+    if (plan.topLevelNames.has(name)) {
+      throw failures.unencodable(
+        `Event ${envelope.id} has a header '${name}', which the mapping uses for another body field`,
+      );
+    }
+    setAt(root, { path: [name], value });
+  }
+}
+
+/** The time as the format writes it; the RFC 3339 text is checked first either way. */
+function timeValue(
+  text: string,
+  { envelope, format }: { readonly envelope: EventEnvelope; readonly format: TimeFormat },
+): string | number {
+  const milliseconds = envelope.occurredAt.getTime();
+  if (format === 'epoch-millis') {
+    return milliseconds;
+  }
+  return format === 'epoch-seconds' ? Math.floor(milliseconds / MILLISECONDS_PER_SECOND) : text;
+}
+
+/** The body with the listed top-level fields first, in the listed order. */
+function ordered(root: Record<string, unknown>, order: readonly string[]): Record<string, unknown> {
+  if (order.length === 0) {
+    return root;
+  }
+  const result: Record<string, unknown> = {};
+  const names = [...order.filter((name) => Object.hasOwn(root, name)), ...Object.keys(root)];
+  for (const name of names) {
+    if (!Object.hasOwn(result, name)) {
+      defineValue(result, { name, value: root[name] });
+    }
+  }
+  return result;
 }
 
 /** The event headers that travel as message headers; a name a mapped field uses is refused. */
@@ -85,7 +157,7 @@ function eventHeaderEntries(
   envelope: EventEnvelope,
   { plan, failures }: Context,
 ): [string, string][] {
-  if (plan.headers !== undefined) {
+  if (plan.headers !== undefined || plan.topLevelHeaders) {
     return [];
   }
   const entries = Object.entries(envelope.headers);
