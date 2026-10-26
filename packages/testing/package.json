@@ -1,7 +1,7 @@
 {
   "name": "@relaybus/testing",
   "version": "0.0.0",
-  "description": "Testing utilities for relaybus: the EventStore contract suite, a FakeClock and an in-memory transport for deterministic tests of retries, delays and dead letters.",
+  "description": "Testing utilities for relaybus: the EventStore contract suite, a FakeClock and an in-memory transport for deterministic tests of retries, delays and dead letters, and a codec contract that runs under Vitest, Jest or any other test framework.",
   "license": "MIT",
   "author": "Berkcan Şavur <berkcansavur@gmail.com>",
   "homepage": "https://berkcansavur.github.io/relaybus/packages/testing",
@@ -19,6 +19,7 @@
     "fake-clock",
     "in-memory",
     "vitest",
+    "jest",
     "event-bus",
     "transactional-outbox",
     "outbox-pattern",
@@ -45,6 +46,26 @@
         "default": "./dist/index.cjs"
       }
     },
+    "./codec-contract": {
+      "import": {
+        "types": "./dist/codec-contract.d.ts",
+        "default": "./dist/codec-contract.js"
+      },
+      "require": {
+        "types": "./dist/codec-contract.d.cts",
+        "default": "./dist/codec-contract.cjs"
+      }
+    },
+    "./jest": {
+      "import": {
+        "types": "./dist/jest.d.ts",
+        "default": "./dist/jest.js"
+      },
+      "require": {
+        "types": "./dist/jest.d.cts",
+        "default": "./dist/jest.cjs"
+      }
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -69,5 +90,20 @@
   },
   "devDependencies": {
     "@relaybus/core": "workspace:*"
+  },
+  "typesVersions": {
+    "*": {
+      "codec-contract": [
+        "dist/codec-contract.d.ts"
+      ],
+      "jest": [
+        "dist/jest.d.ts"
+      ]
+    }
+  },
+  "peerDependenciesMeta": {
+    "vitest": {
+      "optional": true
+    }
   }
 }

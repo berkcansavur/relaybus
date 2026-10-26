@@ -68,6 +68,7 @@ describe('kafkaCodecMismatches', () => {
     };
     expect(await kafkaCodecMismatches(kafkaOptions(), reordered)).toEqual([
       'value: expected {"total":10,"orderId":"1"}, encoded {"orderId":"1","total":10}',
+      'decoded payload: expected {"orderId":"1","total":10}, decoded {"total":10,"orderId":"1"} (same values, other key order)',
     ]);
     expect(await kafkaCodecMismatches(kafkaOptions({ compare: 'json' }), reordered)).toEqual([]);
   });

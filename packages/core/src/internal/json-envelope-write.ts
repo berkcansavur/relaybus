@@ -7,6 +7,8 @@ import {
   type OptionalName,
   type Plan,
 } from './json-envelope-plan.js';
+import { splitOtherFields } from './json-envelope-other-fields.js';
+import { wireTypeOf } from './json-envelope-wire-types.js';
 
 // Writing an envelope as a JSON message by a compiled mapping.
 
@@ -29,7 +31,7 @@ export function writeMessage(
   };
   const typeAt = typeLocation(envelope, { plan, failures });
   if (typeAt !== undefined) {
-    put(typeAt, envelope.type);
+    put(typeAt, wireTypeOf(envelope, { plan, failures }));
   }
   if (plan.id !== undefined) {
     put(plan.id, envelope.id);
@@ -40,12 +42,8 @@ export function writeMessage(
       put(location, value);
     }
   }
-  const body = writeBody(envelope, { plan, root });
-  if (plan.topLevelHeaders) {
-    spreadHeaders(envelope, { plan, failures, root: body as Record<string, unknown> });
-  }
   return {
-    body,
+    body: writeBody(envelope, { plan, failures, root }),
     headers: Object.fromEntries([
       ...eventHeaderEntries(envelope, { plan, failures }),
       ...headers,
@@ -90,14 +88,16 @@ function optionalValues(
   ];
 }
 
+/** The body: the payload alone, or every mapped, extra, header and kept field in body order. */
 function writeBody(
   envelope: EventEnvelope,
-  { plan, root }: { readonly plan: Plan; readonly root: Record<string, unknown> },
+  { plan, failures, root }: Context & { readonly root: Record<string, unknown> },
 ): unknown {
+  const { payload, fields } = splitOtherFields(envelope, { plan, failures });
   if (plan.payload === undefined) {
-    return envelope.payload;
+    return payload;
   }
-  setAt(root, { path: plan.payload, value: envelope.payload });
+  setAt(root, { path: plan.payload, value: payload });
   if (plan.headers !== undefined) {
     setAt(root, {
       path: plan.headers,
@@ -107,6 +107,10 @@ function writeBody(
   for (const { path, value } of plan.extraBody) {
     setAt(root, { path, value: typeof value === 'function' ? value(envelope) : value });
   }
+  if (plan.topLevelHeaders) {
+    spreadHeaders(envelope, { plan, failures, root });
+  }
+  spreadOtherFields(envelope, { failures, fields, root });
   return ordered(root, plan.bodyOrder);
 }
 
@@ -125,6 +129,29 @@ function spreadHeaders(
   }
 }
 
+/** The fields `otherFields` kept, spread over the top level after everything else; a taken name is refused. */
+function spreadOtherFields(
+  envelope: EventEnvelope,
+  {
+    failures,
+    fields,
+    root,
+  }: {
+    readonly failures: JsonEnvelopeFailures;
+    readonly fields: readonly [string, unknown][];
+    readonly root: Record<string, unknown>;
+  },
+): void {
+  for (const [name, value] of fields) {
+    if (Object.hasOwn(root, name)) {
+      throw failures.unencodable(
+        `Event ${envelope.id} keeps a top-level field '${name}' that an event header also writes`,
+      );
+    }
+    setAt(root, { path: [name], value });
+  }
+}
+
 /** The time as the format writes it; the RFC 3339 text is checked first either way. */
 function timeValue(
   text: string,
@@ -137,7 +164,7 @@ function timeValue(
   return format === 'epoch-seconds' ? Math.floor(milliseconds / MILLISECONDS_PER_SECOND) : text;
 }
 
-/** The body with the listed top-level fields first, in the listed order. */
+/** The body with the listed top-level fields first, in the listed order, spread headers and kept fields included. */
 function ordered(root: Record<string, unknown>, order: readonly string[]): Record<string, unknown> {
   if (order.length === 0) {
     return root;

@@ -1,7 +1,9 @@
-import { assertEventType, type EventHeaders } from '../event.js';
+import type { EventHeaders } from '../event.js';
 import { isJsonObject } from './cloudevents.js';
 import type { JsonEnvelopeFailures, JsonEnvelopeFields, JsonWireMessage } from './json-envelope.js';
 import type { Context, Location, Plan } from './json-envelope-plan.js';
+import { withOtherFields } from './json-envelope-other-fields.js';
+import { eventTypeOf } from './json-envelope-wire-types.js';
 
 // Reading the envelope fields of a JSON message by a compiled mapping.
 
@@ -44,13 +46,8 @@ function readType(message: JsonWireMessage, { plan, failures }: Context): string
     return plan.type.fixed;
   }
   const location = plan.type;
-  const type = requireText(readText(message, { location, failures }), { location, failures });
-  try {
-    assertEventType(type);
-  } catch (error) {
-    throw failures.invalid(`The event type is not a valid event type: ${(error as Error).message}`);
-  }
-  return type;
+  const wire = requireText(readText(message, { location, failures }), { location, failures });
+  return eventTypeOf(wire, { plan, failures });
 }
 
 function readPayload(body: unknown, { plan, failures }: Context): unknown {
@@ -61,7 +58,10 @@ function readPayload(body: unknown, { plan, failures }: Context): unknown {
   if (payload === undefined) {
     throw failures.invalid(`The message has no payload at '${plan.payload.join('.')}'`);
   }
-  return payload;
+  return withOtherFields(payload, {
+    body: body as Record<string, unknown>,
+    context: { plan, failures },
+  });
 }
 
 function readEventHeaders(message: JsonWireMessage, plan: Plan): EventHeaders {

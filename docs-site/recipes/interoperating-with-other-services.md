@@ -256,7 +256,33 @@ codec: jsonEnvelope({
 }),
 ```
 
-`headers: 'top-level-fields'` reads every top-level text field that no other value uses as an event header; other unknown fields (numbers, objects) are accepted and left out. A record without a key reads as an event without a key. relaybus still keeps the outbox order of one event key, but keyless records are spread over partitions by the producer, so consumers see events of one key in order only when the key reaches the wire.
+`headers: 'top-level-fields'` reads every top-level text field that no other value uses as an event header. Other unknown fields (numbers, booleans, null, objects, arrays) are left out unless you keep them with `otherFields`. `bodyOrder` orders every top-level field relaybus writes, the spread headers and kept fields included; fields it does not list follow in the order they are written.
+
+To keep the unknown fields that are not text, name a payload field for them:
+
+```ts
+codec: jsonEnvelope({ /* ...as above */ otherFields: { payloadField: 'wire' } }),
+```
+
+A record `{ ..., "data": { "orderId": 2 }, "userId": "u-9", "attempt": 2, "meta": { "v": 1 } }` then reads as the payload `{ "orderId": 2, "wire": { "attempt": 2, "meta": { "v": 1 } } }` with every JSON type unchanged and in body order, so the event's schema validates them with the rest of the payload. An object payload always gets the field, `{}` when the record has nothing to keep. Writing spreads `wire` back over the top level after the other fields, so the values survive a read and a write; to get the captured bytes back, list the fields in `bodyOrder` in their wire order (relaybus writes JSON without spaces). A payload that is not an object while there are fields to keep, or that already has the field, is invalid. Without `otherFields` nothing changes.
+
+### Type names the wire spells differently
+
+Event types are 1 to 255 letters, digits, `.`, `_`, `:`, `/` or `-`, starting with a letter or digit, so snake_case names such as `transfer_auto_dispatched` work as they are. When the wire names types in a way that is not an event type, or you want relaybus names of your own, map them per route with `wireTypes` instead of a `fixed` type per transport:
+
+```ts
+codec: jsonEnvelope({
+  type: { body: 'type' },
+  id: { body: 'id' },
+  payload: { body: 'data' },
+  wireTypes: {
+    'transfer.auto-dispatched.v1': 'Transfer Auto Dispatched',
+    'transfer.cancelled.v1': 'transfer_cancelled',
+  },
+}),
+```
+
+A listed type is written under its wire name and read back from it; any other type travels as itself. Wire names must be unique, an unlisted event type that equals another type's wire name is refused on write, and `wireTypes` cannot be combined with a `fixed` type. A record without a key reads as an event without a key. relaybus still keeps the outbox order of one event key, but keyless records are spread over partitions by the producer, so consumers see events of one key in order only when the key reaches the wire.
 
 ## Prove the format with captured messages
 
@@ -300,7 +326,14 @@ kafkaCodecContract('orders format', {
 });
 ```
 
-Each case checks both directions: `encode(envelope)` gives the captured key, value and headers (and the timestamp, when the codec sets one), and decoding the captured record gives `envelope`, filled in the way the transport fills it (`decodeKafkaRecord`). When the wire does not carry all of the event, for example a record without a key, give the event decoding yields as `decoded`; `only: 'decode'` checks a message only other producers write (one without an id, say), `only: 'encode'` one only other consumers read. `encode` may also be a transport's publish captured by an injected producer (`new KafkaTransport({ producer: recorder, codec })`, see [Reusing the application's producer](/packages/kafka#reusing-the-applications-producer)), so the test covers what the transport sends. `rabbitMqCodecContract` does the same for RabbitMQ with `decodeRabbitMqMessage`: the captured message has `properties` (as publish options name them, such as `persistent`), `headers` and `body`; `ignoreProperties` leaves out a per-send `timestamp`. The routing key is the route's destination, not part of the codec. `kafkaCodecMismatches` and `rabbitMqCodecMismatches` return the differences as lines, for other test runners.
+Each case checks both directions: `encode(envelope)` gives the captured key, value and headers (and the timestamp, when the codec sets one), and decoding the captured record gives `envelope`, filled in the way the transport fills it (`decodeKafkaRecord`). When the wire does not carry all of the event, for example a record without a key, give the event decoding yields as `decoded`; `only: 'decode'` checks a message only other producers write (one without an id, say), `only: 'encode'` one only other consumers read. `encode` may also be a transport's publish captured by an injected producer (`new KafkaTransport({ producer: recorder, codec })`, see [Reusing the application's producer](/packages/kafka#reusing-the-applications-producer)), so the test covers what the transport sends. `rabbitMqCodecContract` does the same for RabbitMQ with `decodeRabbitMqMessage`: the captured message has `properties` (as publish options name them, such as `persistent`), `headers` and `body`; `ignoreProperties` leaves out a per-send `timestamp`. The routing key is the route's destination, not part of the codec. `kafkaCodecMismatches` and `rabbitMqCodecMismatches` return the differences as lines. Compared byte for byte (the default), the decoded payload must also keep the key order of the expected one.
+
+The contract runs under any test framework. `@relaybus/testing` registers with Vitest; `@relaybus/testing/jest` exports the same `kafkaCodecContract` and `rabbitMqCodecContract` for Jest (it uses Jest's `describe` and `it` globals and needs no Vitest); `@relaybus/testing/codec-contract` imports no test framework at all: `assertKafkaCodecCase(options, testCase)` throws a `CodecContractError` listing the mismatches, and `registerKafkaCodecContract({ describe, it }, { name, options })` registers one test per case with the functions of Mocha, `node:test` or any other runner (RabbitMQ: `assertRabbitMqCodecCase`, `registerRabbitMqCodecContract`).
+
+```ts
+// Jest
+import { kafkaCodecContract } from '@relaybus/testing/jest';
+```
 
 ## Malformed input
 

@@ -34,10 +34,12 @@ export {
   type JsonEnvelopeFormat,
   type JsonEnvelopeMapping,
   type JsonWireMessage,
+  type OtherFields,
   type PayloadOnlyMapping,
   type TimeField,
   type TimeFormat,
   type WireField,
+  type WireTypes,
 } from './json-envelope.js';
 export { HandedOutLedger, type HandedOutEntry } from '../store-kit/handed-out-ledger.js';
 export {

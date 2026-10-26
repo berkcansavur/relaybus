@@ -6,6 +6,7 @@ import { PostgresEventStore } from '../src/index.js';
 import { startDatabase, uniqueSchema, type TestDatabase } from './support/postgres-container.js';
 
 class OrderPlaced extends defineEvent<{ orderId: string }>('order.placed.v1') {}
+class LegacyRecord extends defineEvent<Record<string, unknown>>('legacy.record.v1') {}
 
 let database: TestDatabase;
 
@@ -108,5 +109,28 @@ describe('RelayBus on PostgreSQL', () => {
     clock.advance(10 * 60_000);
     await bus.drain();
     expect(handled).toEqual(['first', 'second']);
+  });
+
+  it('hands handlers the payloads of publish and publishAll serialized exactly as published', async () => {
+    const { bus } = createBus(uniqueSchema(), new FakeClock());
+    const handled: string[] = [];
+    bus.subscribe(LegacyRecord, (event) => void handled.push(JSON.stringify(event.payload)), {
+      id: 'h',
+    });
+    await bus.start();
+    const payloads = [
+      { zulu: 1, alpha: { yy: [{ b: 2, a: 1 }], c: {} }, mid: 1e21 },
+      { z: 'çğ 🚀', a: null },
+      { longest_key_first: true, k: [] },
+    ];
+    await bus.transaction(async (transaction) => {
+      await bus.publish(new LegacyRecord(payloads[0]!), { transaction, key: 'one' });
+      await bus.publishAll(
+        payloads.slice(1).map((payload) => new LegacyRecord(payload)),
+        { transaction, key: 'one' },
+      );
+    });
+    expect(await bus.drain()).toBe(3);
+    expect(handled).toEqual(payloads.map((payload) => JSON.stringify(payload)));
   });
 });

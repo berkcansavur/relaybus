@@ -76,10 +76,31 @@ export function compareObjects(
   return left === right ? [] : [`${label}: expected ${left}, encoded ${right}`];
 }
 
-/** A mismatch line when the decoded event differs from the expected one. */
-export function compareDecoded(expected: unknown, decoded: unknown): string[] {
+/**
+ * A mismatch line when the decoded event differs from the expected one. Compared byte for byte,
+ * the decoded payload must also serialize exactly as the expected one, key order included: a codec
+ * that re-orders it would hand order-sensitive consumers different bytes.
+ */
+export function compareDecoded(
+  expected: { readonly payload: unknown },
+  {
+    decoded,
+    comparison,
+  }: { readonly decoded: { readonly payload: unknown }; readonly comparison: BodyComparison },
+): string[] {
   const [left, right] = [canonicalJson(expected), canonicalJson(decoded)];
-  return left === right ? [] : [`decoded: expected ${left}, decoded ${right}`];
+  if (left !== right) {
+    return [`decoded: expected ${left}, decoded ${right}`];
+  }
+  const [payload, decodedPayload] = [
+    JSON.stringify(expected.payload),
+    JSON.stringify(decoded.payload),
+  ];
+  return comparison === 'json' || payload === decodedPayload
+    ? []
+    : [
+        `decoded payload: expected ${payload}, decoded ${decodedPayload} (same values, other key order)`,
+      ];
 }
 
 /** The result of a step, or why it failed. */

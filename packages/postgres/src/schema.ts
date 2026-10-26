@@ -10,10 +10,16 @@ import { laneExpression } from './sql-fragments.js';
 /** Hex digits of the statement hash in the schema marker. */
 const SCHEMA_MARKER_DIGITS = 32;
 
+/** The payload and headers columns of the event table, and as 0.4.0 and earlier created them. */
+const PAYLOAD_COLUMNS = `  payload json NOT NULL,
+  headers json NOT NULL DEFAULT '{}'::json,`;
+const JSONB_PAYLOAD_COLUMNS = `  payload jsonb NOT NULL,
+  headers jsonb NOT NULL DEFAULT '{}'::jsonb,`;
+
 /**
  * Statements that create the schema, tables and indexes, in dependency order,
- * and upgrade a 0.1.0 schema in place. Every statement is idempotent
- * (`IF NOT EXISTS`, or guarded by a check for the 0.1.0 columns). Run them in
+ * and upgrade a 0.1.0 schema and the `jsonb` payload columns of schemas before 0.4.1 in place.
+ * Every statement is idempotent (`IF NOT EXISTS`, or guarded by a check for the old columns). Run them in
  * one transaction and serialize concurrent runs (see
  * {@link PostgresEventStore.setup}), or paste {@link createPostgresSchemaSql}
  * into your own migration tool.
@@ -31,6 +37,13 @@ const SCHEMA_MARKER_DIGITS = 32;
  */
 export function createPostgresSchemaStatements(options: PostgresSchemaOptions = {}): string[] {
   const names = resolvePostgresNames(options);
+  const statements = schemaBodyStatements(names);
+  statements.push(`COMMENT ON TABLE ${names.lanes} IS '${version040Marker(names, statements)}'`);
+  return statements;
+}
+
+/** The schema statements without the marker comment. */
+function schemaBodyStatements(names: PostgresNames): string[] {
   const statements = [...eventAndDeliveryStatements(names), ...laneAndCompletionStatements(names)];
   if (names.completionHistory) {
     statements.push(...completionHistoryStatements(names));
@@ -38,7 +51,6 @@ export function createPostgresSchemaStatements(options: PostgresSchemaOptions = 
   if (names.schema !== 'public') {
     statements.unshift(`CREATE SCHEMA IF NOT EXISTS ${names.quotedSchema}`);
   }
-  statements.push(`COMMENT ON TABLE ${names.lanes} IS '${postgresSchemaMarker(statements)}'`);
   return statements;
 }
 
@@ -56,14 +68,14 @@ function eventAndKeySequenceStatements(names: PostgresNames): string[] {
   source text NOT NULL,
   key text,
   sequence bigint,
-  payload jsonb NOT NULL,
-  headers jsonb NOT NULL DEFAULT '{}'::jsonb,
+${PAYLOAD_COLUMNS}
   correlation_id text,
   causation_id text,
   occurred_at timestamptz NOT NULL,
   created_at timestamptz NOT NULL,
   handlers text[] NOT NULL DEFAULT '{}'
 )`,
+    upgradePayloadToJson(names),
     `CREATE INDEX IF NOT EXISTS ${names.indexes.eventCreated} ON ${names.events} (created_at, id)`,
     `CREATE TABLE IF NOT EXISTS ${names.keySequences} (
   key text PRIMARY KEY,
@@ -141,12 +153,12 @@ function completionHistoryStatements(names: PostgresNames): string[] {
 }
 
 /**
- * The comment the last schema statement leaves on the lane table: a hash of every statement
- * before it. {@link PostgresEventStore.setup} reads it to skip the statements when the schema is
- * already current, because their table locks queue behind running claims and completions and
- * deadlock with them.
+ * A schema marker: the hash of `statements`. The last schema statement leaves one on the lane table
+ * ({@link version040SchemaMarker}), and {@link PostgresEventStore.setup} reads it to skip the
+ * statements when the schema is already current, because their table locks queue behind running
+ * claims and completions and deadlock with them.
  */
-export function postgresSchemaMarker(statements: readonly string[]): string {
+function postgresSchemaMarker(statements: readonly string[]): string {
   return `relaybus schema ${createHash('sha256').update(statements.join(';')).digest('hex').slice(0, SCHEMA_MARKER_DIGITS)}`;
 }
 
@@ -181,6 +193,55 @@ BEGIN
   END IF;
 END
 $relaybus_upgrade$`;
+}
+
+/**
+ * Turns the `jsonb` payload and headers columns of a schema created before 0.4.1 into `json`, which
+ * keeps the text the producer serialized: `jsonb` re-orders object keys, so an event read back
+ * serialized differently from what was published. One table rewrite under an exclusive lock; rows
+ * stored before the upgrade keep the key order `jsonb` gave them. A no-op once both columns are
+ * `json`, and when the table does not exist yet. {@link PostgresEventStore.setup} runs it in a
+ * transaction of its own before the other statements, so it holds no other table lock while it
+ * waits for the event table (a completion locks deliveries before the event rows it references).
+ */
+export function upgradePayloadToJson(names: PostgresNames): string {
+  return `DO $relaybus_payload_json$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid = to_regclass('${names.events}') AND attname IN ('payload', 'headers')
+      AND atttypid = 'jsonb'::regtype AND NOT attisdropped
+  ) THEN
+    ALTER TABLE ${names.events}
+      ALTER COLUMN headers DROP DEFAULT,
+      ALTER COLUMN payload TYPE json USING payload::json,
+      ALTER COLUMN headers TYPE json USING headers::json,
+      ALTER COLUMN headers SET DEFAULT '{}'::json;
+  END IF;
+END
+$relaybus_payload_json$`;
+}
+
+/**
+ * The schema marker 0.4.0 writes, which 0.4.1 keeps writing: the hash of the schema statements without
+ * the payload conversion and with the `jsonb` columns of 0.4.0. A 0.4.0 instance started next to 0.4.1,
+ * or after a rollback, then still finds its marker and runs no schema statement, whose table locks could
+ * deadlock with running claims. Whether the payload columns are converted is read from the column types
+ * instead (see {@link SetupStatements.schemaCurrent}).
+ */
+export function version040SchemaMarker(options: PostgresSchemaOptions = {}): string {
+  const names = resolvePostgresNames(options);
+  return version040Marker(names, schemaBodyStatements(names));
+}
+
+/** {@link version040SchemaMarker} of the body statements of {@link schemaBodyStatements}. */
+function version040Marker(names: PostgresNames, statements: readonly string[]): string {
+  const conversion = upgradePayloadToJson(names);
+  return postgresSchemaMarker(
+    statements
+      .filter((statement) => statement !== conversion)
+      .map((statement) => statement.replace(PAYLOAD_COLUMNS, JSONB_PAYLOAD_COLUMNS)),
+  );
 }
 
 /**

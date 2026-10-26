@@ -394,6 +394,7 @@ never renamed or reused once released, so branch on them in alerts and retry rul
 | `RELAYBUS_RABBITMQ_UNROUTABLE_MESSAGE`     | `UnroutableMessageError`        | `@relaybus/rabbitmq` |
 | `RELAYBUS_RABBITMQ_MALFORMED_MESSAGE`      | `MalformedMessageError`         | `@relaybus/rabbitmq` |
 | `RELAYBUS_RABBITMQ_UNSERIALIZABLE_PAYLOAD` | `UnserializablePayloadError`    | `@relaybus/rabbitmq` |
+| `RELAYBUS_TESTING_CODEC_CONTRACT`          | `CodecContractError`            | `@relaybus/testing`  |
 | `RELAYBUS_RABBITMQ_UNENCODABLE_EVENT`      | `RabbitMqUnencodableEventError` | `@relaybus/rabbitmq` |
 | `RELAYBUS_RABBITMQ_AMQP_LIMIT_EXCEEDED`    | `AmqpLimitExceededError`        | `@relaybus/rabbitmq` |
 

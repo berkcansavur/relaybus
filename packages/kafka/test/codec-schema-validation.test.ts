@@ -41,7 +41,7 @@ afterEach(async () => {
   await Promise.all(buses.splice(0).map((bus) => bus.stop()));
 });
 
-async function startService(codec: KafkaCodec) {
+async function startService(codec: KafkaCodec, event: typeof OrderPlaced = OrderPlaced) {
   const kafka = new FakeKafka();
   const handled: EventEnvelope[] = [];
   const dead: ErrorInfo[] = [];
@@ -50,16 +50,16 @@ async function startService(codec: KafkaCodec) {
     source: 'billing',
     transactionMode: 'optional',
     transports: [new KafkaTransport({ kafka, groupId: 'billing', codec, logger: createLogger() })],
-    routes: [{ event: OrderPlaced, transport: 'kafka', destination: 'orders.out' }],
+    routes: [{ event, transport: 'kafka', destination: 'orders.out' }],
     subscriptions: [{ transport: 'kafka', destinations: ['orders'] }],
     dispatcher: { pollInterval: 5 },
     observers: [{ onDeliveryDead: ({ error }) => dead.push(error) }],
     logger: createLogger(),
   });
   bus.subscribe(
-    OrderPlaced,
-    async (event) => {
-      handled.push(event);
+    event,
+    async (received) => {
+      handled.push(received);
     },
     { id: 'billing.on-order-placed' },
   );
@@ -141,5 +141,55 @@ describe('schema validation on publish', () => {
     await service.bus.drain();
     expect(encode).not.toHaveBeenCalled();
     expect(service.producer.sent).toEqual([]);
+  });
+});
+
+describe('schema validation of the top-level fields jsonEnvelope keeps', () => {
+  /** `{ orderId: string, wire: { attempt: number } }`: the kept fields are part of the payload. */
+  const keptSchema: StandardSchemaV1<unknown, { orderId: string }> = {
+    '~standard': {
+      version: 1,
+      vendor: 'test',
+      validate: (value) => {
+        const attempt = (value as { wire?: { attempt?: unknown } }).wire?.attempt;
+        return typeof attempt === 'number'
+          ? orderSchema['~standard'].validate(value)
+          : { issues: [{ message: 'wire.attempt must be a number', path: ['wire', 'attempt'] }] };
+      },
+    },
+  };
+
+  it('validates them with the schema of the event, with their JSON types', async () => {
+    class OrderKept extends defineEvent('order.placed.v1', { schema: keptSchema }) {}
+    const codec = jsonEnvelope({
+      type: { body: 'eventName' },
+      id: { body: 'messageId' },
+      payload: { body: 'data' },
+      otherFields: { payloadField: 'wire' },
+    });
+    const service = await startService(codec, OrderKept);
+    const body = (attempt: unknown, id: string) => ({
+      value: Buffer.from(
+        JSON.stringify({
+          eventName: 'order.placed.v1',
+          messageId: id,
+          data: { orderId: '7' },
+          attempt,
+        }),
+      ),
+      key: null,
+      headers: {},
+      timestamp: '1767225600000',
+    });
+    await service.consumer.deliver({ ...body('2', 'text-1'), offset: '1' });
+    await service.consumer.deliver({ ...body(2, 'number-1'), offset: '2' });
+
+    await waitFor(() => service.handled.length === 1 && service.dead.length >= 1);
+    expect(service.handled.map((event) => [event.id, event.payload])).toEqual([
+      ['number-1', { orderId: '7', wire: { attempt: 2 } }],
+    ]);
+    expect(service.dead[0]).toMatchObject({
+      message: expect.stringContaining('wire.attempt must be a number'),
+    });
   });
 });

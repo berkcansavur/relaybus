@@ -54,6 +54,7 @@ describe('exported error classes', () => {
       'rabbitmq.RabbitMqUnencodableEventError',
       'rabbitmq.UnroutableMessageError',
       'rabbitmq.UnserializablePayloadError',
+      'testing.CodecContractError',
     ]);
   });
 
@@ -115,6 +116,7 @@ describe('exported error classes', () => {
       RabbitMqUnencodableEventError: 'RELAYBUS_RABBITMQ_UNENCODABLE_EVENT',
       UnroutableMessageError: 'RELAYBUS_RABBITMQ_UNROUTABLE_MESSAGE',
       UnserializablePayloadError: 'RELAYBUS_RABBITMQ_UNSERIALIZABLE_PAYLOAD',
+      CodecContractError: 'RELAYBUS_TESTING_CODEC_CONTRACT',
     });
   });
 

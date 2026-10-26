@@ -161,6 +161,16 @@ export default tseslint.config(
     },
   },
   {
+    // pnpm install hooks: a CommonJS file pnpm loads before resolution, outside the TypeScript project.
+    files: ['.pnpmfile.cjs'],
+    ...tseslint.configs.disableTypeChecked,
+    languageOptions: {
+      ...tseslint.configs.disableTypeChecked.languageOptions,
+      sourceType: 'commonjs',
+      globals: { module: 'writable' },
+    },
+  },
+  {
     // Documentation site configuration: VitePress runs it on Node, outside the TypeScript project.
     files: ['docs-site/.vitepress/config.ts'],
     ...tseslint.configs.disableTypeChecked,

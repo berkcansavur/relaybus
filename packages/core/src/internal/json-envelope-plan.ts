@@ -1,6 +1,7 @@
 import { ConfigurationError } from '../errors.js';
 import { assertEventType } from '../event.js';
 import { isJsonObject } from './cloudevents.js';
+import { compileWireTypes, type WireTypePlan } from './json-envelope-wire-types.js';
 import type {
   ExtraValue,
   FixedType,
@@ -46,7 +47,9 @@ export type Plan = {
   readonly extraBody: readonly ExtraBodyValue[];
   readonly extraHeaders: readonly (readonly [string, ExtraValue<string>])[];
   readonly bodyOrder: readonly string[];
-};
+  /** The payload field that keeps the unused top-level fields; undefined when they are left out. */
+  readonly otherFields: string | undefined;
+} & WireTypePlan;
 
 /** An extra body value at its path. */
 export type ExtraBodyValue = {
@@ -80,8 +83,9 @@ export function compile(
   if (topLevelHeaders && payload === undefined) {
     throw new ConfigurationError("jsonEnvelope headers 'top-level-fields' needs a body payload");
   }
+  const type = compileType(mapping.type);
   const plan: Plan = {
-    type: compileType(mapping.type),
+    type,
     id: compileId(mapping.id, transportIds),
     idWhenMissing: isJsonObject(mapping.id) && 'whenMissing' in mapping.id,
     optional,
@@ -91,6 +95,8 @@ export function compile(
     topLevelNames: new Set(),
     mappedHeaders: new Set(),
     timeFormat: compileTimeFormat(mapping.occurredAt),
+    otherFields: compileOtherFields(mapping, payload !== undefined),
+    ...compileWireTypes(mapping.wireTypes, { fixed: 'fixed' in type }),
     ...compileExtras(mapping, payload !== undefined),
   };
   return assertDisjoint(plan);
@@ -132,6 +138,24 @@ function compileExtras(
     extraHeaders: Object.entries(extra.headers ?? {}),
     bodyOrder,
   };
+}
+
+function compileOtherFields(
+  mapping: JsonEnvelopeMapping<string>,
+  hasBody: boolean,
+): string | undefined {
+  const otherFields: unknown = (mapping as { readonly otherFields?: unknown }).otherFields;
+  if (otherFields === undefined) {
+    return undefined;
+  }
+  if (!hasBody) {
+    throw new ConfigurationError('jsonEnvelope otherFields needs a body payload');
+  }
+  const field = isJsonObject(otherFields) ? otherFields['payloadField'] : undefined;
+  if (typeof field !== 'string' || field.length === 0) {
+    throw new ConfigurationError("jsonEnvelope otherFields must be { payloadField: '<name>' }");
+  }
+  return field;
 }
 
 function compileType(type: unknown): Location | FixedType {

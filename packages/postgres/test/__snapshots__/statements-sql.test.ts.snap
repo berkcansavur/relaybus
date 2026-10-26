@@ -9,14 +9,29 @@ exports[`statement SQL > creates the same schema with custom names with completi
   source text NOT NULL,
   key text,
   sequence bigint,
-  payload jsonb NOT NULL,
-  headers jsonb NOT NULL DEFAULT '{}'::jsonb,
+  payload json NOT NULL,
+  headers json NOT NULL DEFAULT '{}'::json,
   correlation_id text,
   causation_id text,
   occurred_at timestamptz NOT NULL,
   created_at timestamptz NOT NULL,
   handlers text[] NOT NULL DEFAULT '{}'
 )",
+  "DO $relaybus_payload_json$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid = to_regclass('"bus"."x_events"') AND attname IN ('payload', 'headers')
+      AND atttypid = 'jsonb'::regtype AND NOT attisdropped
+  ) THEN
+    ALTER TABLE "bus"."x_events"
+      ALTER COLUMN headers DROP DEFAULT,
+      ALTER COLUMN payload TYPE json USING payload::json,
+      ALTER COLUMN headers TYPE json USING headers::json,
+      ALTER COLUMN headers SET DEFAULT '{}'::json;
+  END IF;
+END
+$relaybus_payload_json$",
   "CREATE INDEX IF NOT EXISTS "x_events_created_idx" ON "bus"."x_events" (created_at, id)",
   "CREATE TABLE IF NOT EXISTS "bus"."x_key_sequences" (
   key text PRIMARY KEY,
@@ -109,14 +124,29 @@ exports[`statement SQL > creates the same schema with defaults 1`] = `
   source text NOT NULL,
   key text,
   sequence bigint,
-  payload jsonb NOT NULL,
-  headers jsonb NOT NULL DEFAULT '{}'::jsonb,
+  payload json NOT NULL,
+  headers json NOT NULL DEFAULT '{}'::json,
   correlation_id text,
   causation_id text,
   occurred_at timestamptz NOT NULL,
   created_at timestamptz NOT NULL,
   handlers text[] NOT NULL DEFAULT '{}'
 )",
+  "DO $relaybus_payload_json$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid = to_regclass('"public"."relaybus_events"') AND attname IN ('payload', 'headers')
+      AND atttypid = 'jsonb'::regtype AND NOT attisdropped
+  ) THEN
+    ALTER TABLE "public"."relaybus_events"
+      ALTER COLUMN headers DROP DEFAULT,
+      ALTER COLUMN payload TYPE json USING payload::json,
+      ALTER COLUMN headers TYPE json USING headers::json,
+      ALTER COLUMN headers SET DEFAULT '{}'::json;
+  END IF;
+END
+$relaybus_payload_json$",
   "CREATE INDEX IF NOT EXISTS "relaybus_events_created_idx" ON "public"."relaybus_events" (created_at, id)",
   "CREATE TABLE IF NOT EXISTS "public"."relaybus_key_sequences" (
   key text PRIMARY KEY,
@@ -228,11 +258,11 @@ SELECT id FROM inserted WHERE (SELECT count(*) FROM woken) >= 0",
     "insertEvents": "INSERT INTO "bus"."x_events"
   (id, type, source, key, sequence, payload, headers, correlation_id, causation_id, occurred_at, created_at, handlers)
 SELECT incoming.id, incoming.type, incoming.source, incoming.key, incoming.sequence,
-  COALESCE(incoming.payload, 'null'::jsonb), COALESCE(incoming.headers, '{}'::jsonb),
+  COALESCE(incoming.payload, 'null'::json), COALESCE(incoming.headers, '{}'::json),
   incoming.correlation_id, incoming.causation_id, incoming.occurred_at, $2::timestamptz,
   COALESCE(incoming.handlers, '{}')
-FROM jsonb_to_recordset($1::jsonb) AS incoming (
-  id text, type text, source text, key text, sequence bigint, payload jsonb, headers jsonb,
+FROM json_to_recordset($1::json) AS incoming (
+  id text, type text, source text, key text, sequence bigint, payload json, headers json,
   correlation_id text, causation_id text, occurred_at timestamptz, handlers text[])
 ORDER BY incoming.id
 ON CONFLICT (id) DO NOTHING
@@ -250,15 +280,15 @@ RETURNING id",
       reserved.sequence - count(*) OVER (PARTITION BY incoming.key)
         + row_number() OVER (PARTITION BY incoming.key ORDER BY incoming.ordinal)
     END AS sequence
-  FROM jsonb_to_recordset($1::jsonb) AS incoming (
-    ordinal int, id text, type text, source text, key text, payload jsonb, headers jsonb,
+  FROM json_to_recordset($1::json) AS incoming (
+    ordinal int, id text, type text, source text, key text, payload json, headers json,
     correlation_id text, causation_id text, occurred_at timestamptz, handlers text[])
   LEFT JOIN reserved ON reserved.key = incoming.key
 ), inserted_events AS (
   INSERT INTO "bus"."x_events"
     (id, type, source, key, sequence, payload, headers, correlation_id, causation_id, occurred_at, created_at, handlers)
   SELECT incoming.id, incoming.type, incoming.source, incoming.key, incoming.sequence,
-    COALESCE(incoming.payload, 'null'::jsonb), COALESCE(incoming.headers, '{}'::jsonb),
+    COALESCE(incoming.payload, 'null'::json), COALESCE(incoming.headers, '{}'::json),
     incoming.correlation_id, incoming.causation_id, incoming.occurred_at, $2::timestamptz,
     COALESCE(incoming.handlers, '{}')
   FROM incoming
@@ -1543,7 +1573,14 @@ WHERE delivery.id = dead.id AND delivery.status = 'dead' RETURNING 1) SELECT cou
   JOIN pg_catalog.pg_description AS d
     ON d.objoid = c.oid AND d.classoid = 'pg_catalog.pg_class'::regclass AND d.objsubid = 0
   WHERE n.nspname = 'bus' AND c.relname = 'x_lanes' AND d.description = $1::text
-) AS current",
+) AS marked, (
+  SELECT count(*) FROM pg_catalog.pg_attribute AS a
+  JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid
+  JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'bus' AND c.relname = 'x_events'
+    AND a.attname IN ('payload', 'headers') AND a.atttypid = 'pg_catalog.json'::pg_catalog.regtype
+    AND NOT a.attisdropped
+) = 2 AS payload_json",
     "setupLock": "SELECT true AS locked FROM pg_advisory_xact_lock(hashtextextended($1::text, 0))",
     "setupLockKey": "relaybus:bus",
   },
@@ -1587,11 +1624,11 @@ SELECT id FROM inserted WHERE (SELECT count(*) FROM woken) >= 0",
     "insertEvents": "INSERT INTO "public"."relaybus_events"
   (id, type, source, key, sequence, payload, headers, correlation_id, causation_id, occurred_at, created_at, handlers)
 SELECT incoming.id, incoming.type, incoming.source, incoming.key, incoming.sequence,
-  COALESCE(incoming.payload, 'null'::jsonb), COALESCE(incoming.headers, '{}'::jsonb),
+  COALESCE(incoming.payload, 'null'::json), COALESCE(incoming.headers, '{}'::json),
   incoming.correlation_id, incoming.causation_id, incoming.occurred_at, $2::timestamptz,
   COALESCE(incoming.handlers, '{}')
-FROM jsonb_to_recordset($1::jsonb) AS incoming (
-  id text, type text, source text, key text, sequence bigint, payload jsonb, headers jsonb,
+FROM json_to_recordset($1::json) AS incoming (
+  id text, type text, source text, key text, sequence bigint, payload json, headers json,
   correlation_id text, causation_id text, occurred_at timestamptz, handlers text[])
 ORDER BY incoming.id
 ON CONFLICT (id) DO NOTHING
@@ -1609,15 +1646,15 @@ RETURNING id",
       reserved.sequence - count(*) OVER (PARTITION BY incoming.key)
         + row_number() OVER (PARTITION BY incoming.key ORDER BY incoming.ordinal)
     END AS sequence
-  FROM jsonb_to_recordset($1::jsonb) AS incoming (
-    ordinal int, id text, type text, source text, key text, payload jsonb, headers jsonb,
+  FROM json_to_recordset($1::json) AS incoming (
+    ordinal int, id text, type text, source text, key text, payload json, headers json,
     correlation_id text, causation_id text, occurred_at timestamptz, handlers text[])
   LEFT JOIN reserved ON reserved.key = incoming.key
 ), inserted_events AS (
   INSERT INTO "public"."relaybus_events"
     (id, type, source, key, sequence, payload, headers, correlation_id, causation_id, occurred_at, created_at, handlers)
   SELECT incoming.id, incoming.type, incoming.source, incoming.key, incoming.sequence,
-    COALESCE(incoming.payload, 'null'::jsonb), COALESCE(incoming.headers, '{}'::jsonb),
+    COALESCE(incoming.payload, 'null'::json), COALESCE(incoming.headers, '{}'::json),
     incoming.correlation_id, incoming.causation_id, incoming.occurred_at, $2::timestamptz,
     COALESCE(incoming.handlers, '{}')
   FROM incoming
@@ -2852,7 +2889,14 @@ WHERE delivery.id = dead.id AND delivery.status = 'dead' RETURNING 1) SELECT cou
   JOIN pg_catalog.pg_description AS d
     ON d.objoid = c.oid AND d.classoid = 'pg_catalog.pg_class'::regclass AND d.objsubid = 0
   WHERE n.nspname = 'public' AND c.relname = 'relaybus_lanes' AND d.description = $1::text
-) AS current",
+) AS marked, (
+  SELECT count(*) FROM pg_catalog.pg_attribute AS a
+  JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid
+  JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'public' AND c.relname = 'relaybus_events'
+    AND a.attname IN ('payload', 'headers') AND a.atttypid = 'pg_catalog.json'::pg_catalog.regtype
+    AND NOT a.attisdropped
+) = 2 AS payload_json",
     "setupLock": "SELECT true AS locked FROM pg_advisory_xact_lock(hashtextextended($1::text, 0))",
     "setupLockKey": "relaybus:public",
   },

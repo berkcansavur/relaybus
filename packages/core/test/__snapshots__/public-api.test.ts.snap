@@ -170,6 +170,7 @@ exports[`public API > @relaybus/core/internal keeps its exported surface 1`] = `
   "LeaseSettlement: value+type",
   "Milliseconds: value+type",
   "NonEmptyText: value+type",
+  "OtherFields: type",
   "OwnerSerializedClaims: value+type",
   "PayloadOnlyMapping: type",
   "PositiveInteger: value+type",
@@ -181,6 +182,7 @@ exports[`public API > @relaybus/core/internal keeps its exported surface 1`] = `
   "TimeFormat: type",
   "TransportSubscription: type",
   "WireField: type",
+  "WireTypes: type",
   "assertPositiveInteger: value",
   "createCloudEventReaders: value",
   "createJsonEnvelopeFormat: value",
@@ -378,6 +380,7 @@ exports[`public API > @relaybus/rabbitmq keeps its exported surface 1`] = `
 exports[`public API > @relaybus/testing keeps its exported surface 1`] = `
 [
   "BodyComparison: type",
+  "CodecContractError: value+type",
   "EventStoreContractOptions: type",
   "FakeClock: value+type",
   "InMemoryTransport: value+type",
@@ -392,7 +395,10 @@ exports[`public API > @relaybus/testing keeps its exported surface 1`] = `
   "RabbitMqCodecContractOptions: type",
   "RabbitMqDeliveredMessage: type",
   "RabbitMqWrittenMessage: type",
+  "TestFramework: type",
   "WireBytes: type",
+  "assertKafkaCodecCase: value",
+  "assertRabbitMqCodecCase: value",
   "at: value",
   "createDelivery: value",
   "createEnvelope: value",
@@ -401,5 +407,7 @@ exports[`public API > @relaybus/testing keeps its exported surface 1`] = `
   "kafkaCodecMismatches: value",
   "rabbitMqCodecContract: value",
   "rabbitMqCodecMismatches: value",
+  "registerKafkaCodecContract: value",
+  "registerRabbitMqCodecContract: value",
 ]
 `;

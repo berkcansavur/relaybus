@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { DeliveryQuery } from '@relaybus/core';
 import { resolvePostgresNames, type PostgresSchemaOptions } from '../src/names.js';
-import { createPostgresSchemaStatements } from '../src/schema.js';
+import { createPostgresSchemaStatements, version040SchemaMarker } from '../src/schema.js';
 import { PostgresStatements } from '../src/statements.js';
 
 const configurations: Record<string, PostgresSchemaOptions> = {
@@ -53,5 +53,15 @@ describe('statement SQL', () => {
 
   it.each(Object.entries(configurations))('creates the same schema with %s', (_label, options) => {
     expect(createPostgresSchemaStatements(options)).toMatchSnapshot();
+  });
+});
+
+// The markers 0.4.0 wrote (its SQL snapshot): setup() recognizes a 0.4.0 schema by them.
+describe('the 0.4.0 schema marker', () => {
+  it.each([
+    ['defaults', 'relaybus schema ae44fe2cd55d06183921bc5e2bb0db92'],
+    ['custom names with completion history', 'relaybus schema 22458fc899be38d2ee6edc6fd04a041b'],
+  ])('is the one 0.4.0 wrote with %s', (label, marker) => {
+    expect(version040SchemaMarker(configurations[label])).toBe(marker);
   });
 });

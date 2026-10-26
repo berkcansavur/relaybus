@@ -61,7 +61,17 @@ type MappingFields<TField extends WireField, TTransportId extends string> = {
   readonly causationId?: TField;
   /** Media type written with the message. Default `application/json`. Not checked on read. */
   readonly contentType?: string;
+  /**
+   * Wire names of event types, for a format whose type values are not relaybus event types or
+   * name them otherwise: `{ 'transfer.auto-dispatched.v1': 'Transfer Auto Dispatched' }`. A listed
+   * type is written as its wire name and read back from it; any other type travels as itself. One
+   * route then carries many types without a `fixed` type per transport. Not with a `fixed` type.
+   */
+  readonly wireTypes?: WireTypes;
 };
+
+/** Event type to the name the wire uses for it; see `wireTypes` of a jsonEnvelope mapping. */
+export type WireTypes = Readonly<Record<string, string>>;
 
 /**
  * A JSON object that wraps the payload with event metadata, such as
@@ -91,7 +101,18 @@ export type BodyEnvelopeMapping<TTransportId extends string> = MappingFields<
    * are written. Only the bytes change, for formats compared byte for byte.
    */
   readonly bodyOrder?: readonly string[];
+  /**
+   * Keeps the top-level body fields that no other value uses (and that are not read as event
+   * headers) with every JSON type, in body order, as one object under `payloadField` of the
+   * payload: `{ payloadField: 'wire' }` reads `{ "data": { "a": 1 }, "attempt": 2 }` as the payload
+   * `{ "a": 1, "wire": { "attempt": 2 } }`, so the handler's schema validates them with the payload.
+   * Writing spreads that object back over the top level. Default: such fields are left out on read.
+   */
+  readonly otherFields?: OtherFields;
 };
+
+/** Where {@link BodyEnvelopeMapping.otherFields} keeps the unused top-level fields. */
+export type OtherFields = { readonly payloadField: string };
 
 /**
  * The body is the payload itself, as a plain JSON producer writes it; every other value lives in

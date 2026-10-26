@@ -126,6 +126,10 @@ jobs:
       - name: Check type resolution (attw)
         run: pnpm -r --filter "./packages/*" exec attw --pack .
 
+      # Installing @relaybus/postgres into an app on Prisma 5 must keep that app's Prisma Client.
+      - name: Check the install next to Prisma 5
+        run: node scripts/check-prisma-install.mjs 5.22.0
+
   nestjs-compat:
     name: nestjs compat (@nestjs/* ${{ matrix.nest }})
     runs-on: ubuntu-latest
@@ -172,7 +176,7 @@ jobs:
       - name: Test packages/nestjs
         run: pnpm exec vitest run packages/nestjs
 
-  # Prisma 7 (latest) runs in the test job; this re-runs the Prisma tests on the previous major.
+  # Prisma 7 (latest) runs in the test job; this re-runs the Prisma tests on the previous majors.
   prisma-compat:
     name: prisma compat (prisma ${{ matrix.prisma }})
     runs-on: ubuntu-latest
@@ -180,7 +184,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        prisma: ['6']
+        prisma: ['5', '6']
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -192,12 +196,20 @@ jobs:
         with:
           node-version: 24.x
 
-      # Prisma 6 still requires a url in the datasource block (Prisma 7 rejects it there). This
+      # Prisma 5 and 6 still require a url in the datasource block (Prisma 7 rejects it there). This
       # runs before the pin because `pnpm add` triggers the root `prepare` script, which
       # generates the test client with the newly installed Prisma.
       - name: Add the datasource url for Prisma ${{ matrix.prisma }}
         run: >
           sed -i 's/^  provider = "postgresql"$/  provider = "postgresql"\n  url      = env("DATABASE_URL")/'
+          packages/postgres/test/prisma/schema.prisma
+
+      # Prisma 5 has no `prisma-client` generator and runs driver adapters as a preview feature. The
+      # generate script gives the `prisma-client-js` output the import path the tests use.
+      - name: Use the prisma-client-js generator for Prisma 5
+        if: matrix.prisma == '5'
+        run: >
+          sed -i 's/^  provider = "prisma-client"$/  provider        = "prisma-client-js"\n  previewFeatures = ["driverAdapters"]/'
           packages/postgres/test/prisma/schema.prisma
 
       # CI-only: re-resolve the Prisma dev dependencies of the postgres package to the matrix

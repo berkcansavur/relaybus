@@ -5,7 +5,7 @@
 Test utilities for relaybus.
 
 ```sh
-pnpm add -D @relaybus/testing vitest
+pnpm add -D @relaybus/testing vitest   # or jest: see the codec contract below
 ```
 
 ## Store contract suite
@@ -69,7 +69,22 @@ kafkaCodecContract('orders format', {
 
 `rabbitMqCodecContract` takes the same shape with `decodeRabbitMqMessage` from `@relaybus/rabbitmq` and captured messages
 (routing key, properties, headers, body). `kafkaCodecMismatches` and `rabbitMqCodecMismatches` return the differences as
-text lines instead of registering tests.
+text lines instead of registering tests. Compared byte for byte, the decoded payload must also keep the expected key order.
+
+The contract does not need Vitest:
+
+```ts
+// Jest: registers with Jest's describe and it globals
+import { kafkaCodecContract } from '@relaybus/testing/jest';
+
+// Any runner, or a plain script: no test framework imported
+import {
+  assertKafkaCodecCase, // throws CodecContractError listing the mismatches
+  registerKafkaCodecContract, // registerKafkaCodecContract({ describe, it }, { name, options })
+} from '@relaybus/testing/codec-contract';
+```
+
+The RabbitMQ counterparts are `assertRabbitMqCodecCase` and `registerRabbitMqCodecContract`.
 
 ## FakeClock
 
@@ -92,7 +107,7 @@ JSON copies to subscribers with `deliver(destination, envelope, maxRedeliveries)
 
 ## When to use @relaybus/testing, and when not to
 
-Use it in your test suite for fast, deterministic tests, or to prove that a custom `EventStore` satisfies the contract. It is a development dependency and requires `vitest` 3 or newer.
+Use it in your test suite for fast, deterministic tests, or to prove that a custom `EventStore` satisfies the contract. It is a development dependency. The store contract, the main entry and `kafkaCodecContract` / `rabbitMqCodecContract` need `vitest` 3 or newer (an optional peer); `@relaybus/testing/jest` and `@relaybus/testing/codec-contract` do not.
 
 Documentation: <https://berkcansavur.github.io/relaybus/packages/testing>
 

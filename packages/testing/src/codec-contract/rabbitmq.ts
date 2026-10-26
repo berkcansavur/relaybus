@@ -1,5 +1,4 @@
 import type { EventEnvelope } from '@relaybus/core';
-import { describe, expect, it } from 'vitest';
 import {
   attempt,
   compareBodies,
@@ -10,6 +9,7 @@ import {
   type BodyComparison,
   type WireBytes,
 } from './compare.js';
+import { assertNoMismatches, registerCases, type TestFramework } from './framework.js';
 
 /** A message as captured from a queue: what an existing publisher wrote. */
 export interface RabbitMqCapturedMessage {
@@ -96,19 +96,37 @@ export async function rabbitMqCodecMismatches(
     ...decoding.mismatches,
     ...(decoding.result === undefined
       ? []
-      : compareDecoded(testCase.decoded ?? testCase.envelope, decoding.result)),
+      : compareDecoded(testCase.decoded ?? testCase.envelope, {
+          decoded: decoding.result,
+          comparison: options.compare ?? 'bytes',
+        })),
   ];
 }
 
-/** Registers one test per case asserting {@link rabbitMqCodecMismatches} finds nothing. */
-export function rabbitMqCodecContract(name: string, options: RabbitMqCodecContractOptions): void {
-  describe(`${name} writes and reads the captured RabbitMQ messages`, () => {
-    it.each(options.cases.map((testCase) => [testCase.name, testCase] as const))(
-      '%s',
-      async (_name, testCase) => {
-        expect(await rabbitMqCodecMismatches(options, testCase)).toEqual([]);
-      },
-    );
+/**
+ * Throws a {@link CodecContractError} listing what {@link rabbitMqCodecMismatches} finds, so any test framework
+ * (or a plain script) can check one case.
+ */
+export async function assertRabbitMqCodecCase(
+  options: RabbitMqCodecContractOptions,
+  testCase: RabbitMqCodecCase,
+): Promise<void> {
+  assertNoMismatches(testCase.name, await rabbitMqCodecMismatches(options, testCase));
+}
+
+/**
+ * Registers one test per case through `framework` (the `describe` and `it` of Jest, Vitest,
+ * Mocha or `node:test`), each asserting {@link assertRabbitMqCodecCase}: a format of existing
+ * producers and consumers is adopted only once relaybus writes and reads it exactly.
+ */
+export function registerRabbitMqCodecContract(
+  framework: TestFramework,
+  { name, options }: { readonly name: string; readonly options: RabbitMqCodecContractOptions },
+): void {
+  registerCases(framework, {
+    title: `${name} writes and reads the captured RabbitMQ messages`,
+    cases: options.cases,
+    check: (testCase) => assertRabbitMqCodecCase(options, testCase),
   });
 }
 
