@@ -60,6 +60,10 @@ pnpm build
 node scripts/publish-packages.mjs 0.1.0 next --dry-run   # packs and runs `npm publish --dry-run`
 ```
 
+### Peer install safety
+
+The `build` CI job, which gates every release, runs `node scripts/check-prisma-install.mjs 5.22.0`: it installs the `@relaybus/core` and `@relaybus/postgres` tarballs of the checkout into a scratch app that already uses Prisma 5.22 and fails unless the app keeps exactly its `@prisma/client` and `prisma generate` still works. `--package @relaybus/postgres@<version>` runs the same check against a published version (0.4.0 fails it: npm refuses the install with `ERESOLVE`).
+
 ## Bootstrap (one time)
 
 npm only allows attaching a Trusted Publisher to a package that already exists, so each package is first published once from your machine.

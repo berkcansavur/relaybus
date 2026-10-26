@@ -126,6 +126,10 @@ jobs:
       - name: Check type resolution (attw)
         run: pnpm -r --filter "./packages/*" exec attw --pack .
 
+      # Installing @relaybus/postgres into an app on Prisma 5 must keep that app's Prisma Client.
+      - name: Check the install next to Prisma 5
+        run: node scripts/check-prisma-install.mjs 5.22.0
+
   nestjs-compat:
     name: nestjs compat (@nestjs/* ${{ matrix.nest }})
     runs-on: ubuntu-latest
