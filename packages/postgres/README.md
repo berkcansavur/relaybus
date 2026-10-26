@@ -155,14 +155,14 @@ import { createPostgresSchemaSql, createPostgresSchemaStatements } from '@relayb
 const migration = createPostgresSchemaSql({ schema: 'app', tablePrefix: 'bus_' });
 ```
 
-| Table                  | Purpose                                                                                                                                                                                                                                                                            |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `events`               | One row per event: `id` (**text**, so any caller id works), `type`, `source`, `key`, `sequence`, `payload jsonb`, `headers jsonb`, correlation and causation ids, `occurred_at`, `created_at`, and `handlers`, the handlers that ever got a delivery (it outlives the deliveries). |
-| `deliveries`           | One row per (event, handler) that is not finished: `lane`, `status` (`pending` or `dead`), `attempts`, `available_at`, `last_error jsonb`, key and sequence copied from the event, timestamps. `unique (event_id, handler)`, foreign key to events with `ON DELETE CASCADE`.       |
-| `lanes`                | 256 rows, one per lane: `epoch` (the fencing token), `lease_owner`, `lease_expires_at` and `in_flight` (ids of the deliveries the owner claimed). `fillfactor = 50` and no secondary index, so its updates are heap-only (HOT).                                                    |
-| `event_completions`    | One row per event that had a delivery complete, with the time of its last completion. Retention of completed work (`retention.completed`) is measured from it, however old the event is; events that never had a delivery complete are measured from their creation.               |
-| `key_sequences`        | One counter row per ordering key.                                                                                                                                                                                                                                                  |
-| `completed_deliveries` | Only with `completionHistory`: one insert-only row per completed delivery.                                                                                                                                                                                                         |
+| Table                  | Purpose                                                                                                                                                                                                                                                                          |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `events`               | One row per event: `id` (**text**, so any caller id works), `type`, `source`, `key`, `sequence`, `payload json`, `headers json`, correlation and causation ids, `occurred_at`, `created_at`, and `handlers`, the handlers that ever got a delivery (it outlives the deliveries). |
+| `deliveries`           | One row per (event, handler) that is not finished: `lane`, `status` (`pending` or `dead`), `attempts`, `available_at`, `last_error jsonb`, key and sequence copied from the event, timestamps. `unique (event_id, handler)`, foreign key to events with `ON DELETE CASCADE`.     |
+| `lanes`                | 256 rows, one per lane: `epoch` (the fencing token), `lease_owner`, `lease_expires_at` and `in_flight` (ids of the deliveries the owner claimed). `fillfactor = 50` and no secondary index, so its updates are heap-only (HOT).                                                  |
+| `event_completions`    | One row per event that had a delivery complete, with the time of its last completion. Retention of completed work (`retention.completed`) is measured from it, however old the event is; events that never had a delivery complete are measured from their creation.             |
+| `key_sequences`        | One counter row per ordering key.                                                                                                                                                                                                                                                |
+| `completed_deliveries` | Only with `completionHistory`: one insert-only row per completed delivery.                                                                                                                                                                                                       |
 
 A delivery row is inserted once and deleted once when it completes. Claiming, renewing a lease and completing never
 update it: they update the lane row (claim, renewal) or delete the delivery (completion), so the indexed columns of a
@@ -257,10 +257,12 @@ tool, run it as one transaction with the workers stopped. Running 0.1.0 and the 
 - **Key counters.** `key_sequences` keeps one row per key ever published and rows are never deleted; the table grows
   with the number of distinct keys (a bigint counter each). Pick keys with bounded cardinality, or prune counters of keys
   you know are retired once nothing for them is pending.
-- **Stored JSON.** Payloads and headers are stored as `jsonb`: object keys come back **reordered** (shorter keys first,
-  then bytewise) and duplicate keys collapse, values are otherwise identical. A string containing `\u0000` (NUL) or a
-  lone UTF-16 surrogate is rejected by PostgreSQL and fails the publish with a database error; strip or encode such
-  text before publishing.
+- **Stored JSON.** Payloads and headers are stored as `json`, the text the producer serialized: an event read back
+  serializes byte for byte as it was published, key order included. (Before 0.4.1 they were `jsonb`, which re-orders
+  object keys; `setup()` converts the columns, and rows stored before the upgrade keep the order `jsonb` gave them. See
+  [Upgrading](https://berkcansavur.github.io/relaybus/upgrading).) A string containing `\u0000` (NUL) or a lone UTF-16
+  surrogate is rejected by PostgreSQL and fails the publish with a database error; strip or encode such text before
+  publishing.
 - **Sequence gaps.** Republishing an existing event id consumes a sequence number. Gaps are normal; only order matters.
 - **Vacuum.** Completing a delivery deletes its row, which leaves a dead tuple until autovacuum runs. The tables are
   created with `autovacuum_vacuum_scale_factor = 0.02`; for sustained throughput above a few thousand deliveries per
@@ -315,8 +317,8 @@ tool, run it as one transaction with the workers stopped. Running 0.1.0 and the 
   `createPostgresSchemaSql()`.
 - `permission denied for schema`: the role needs `CREATE` on the schema for `setup()`; with `setupStore: false` it needs
   only DML rights.
-- `invalid input syntax for type json` / `\u0000 cannot be converted to text`: payloads with NUL characters are not valid
-  `jsonb`.
+- `invalid input syntax for type json` / `unsupported Unicode escape sequence`: the payload holds a NUL character or a
+  lone UTF-16 surrogate, which PostgreSQL rejects.
 - Foreign key error on append: the only known cause is republishing an event id in the same instant its last delivery
   is purged. The publishing transaction rolls back and can simply be retried.
 - A key looks stuck: a pending or processing head blocks it. Inspect `listDeliveries({ status: 'processing' })` and

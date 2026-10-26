@@ -47,8 +47,8 @@ WHERE (SELECT count(*) FROM woken) >= 0`;
       reserved.sequence - count(*) OVER (PARTITION BY incoming.key)
         + row_number() OVER (PARTITION BY incoming.key ORDER BY incoming.ordinal)
     END AS sequence
-  FROM jsonb_to_recordset($1::jsonb) AS incoming (
-    ordinal int, id text, type text, source text, key text, payload jsonb, headers jsonb,
+  FROM json_to_recordset($1::json) AS incoming (
+    ordinal int, id text, type text, source text, key text, payload json, headers json,
     correlation_id text, causation_id text, occurred_at timestamptz, handlers text[])
   LEFT JOIN reserved ON reserved.key = incoming.key
 )`;
@@ -60,7 +60,7 @@ WHERE (SELECT count(*) FROM woken) >= 0`;
   INSERT INTO ${this.#names.events}
     (id, type, source, key, sequence, payload, headers, correlation_id, causation_id, occurred_at, created_at, handlers)
   SELECT incoming.id, incoming.type, incoming.source, incoming.key, incoming.sequence,
-    COALESCE(incoming.payload, 'null'::jsonb), COALESCE(incoming.headers, '{}'::jsonb),
+    COALESCE(incoming.payload, 'null'::json), COALESCE(incoming.headers, '{}'::json),
     incoming.correlation_id, incoming.causation_id, incoming.occurred_at, $2::timestamptz,
     COALESCE(incoming.handlers, '{}')
   FROM incoming
@@ -117,11 +117,11 @@ WHERE (SELECT count(*) FROM woken) >= 0`;
     return `INSERT INTO ${this.#names.events}
   (id, type, source, key, sequence, payload, headers, correlation_id, causation_id, occurred_at, created_at, handlers)
 SELECT incoming.id, incoming.type, incoming.source, incoming.key, incoming.sequence,
-  COALESCE(incoming.payload, 'null'::jsonb), COALESCE(incoming.headers, '{}'::jsonb),
+  COALESCE(incoming.payload, 'null'::json), COALESCE(incoming.headers, '{}'::json),
   incoming.correlation_id, incoming.causation_id, incoming.occurred_at, $2::timestamptz,
   COALESCE(incoming.handlers, '{}')
-FROM jsonb_to_recordset($1::jsonb) AS incoming (
-  id text, type text, source text, key text, sequence bigint, payload jsonb, headers jsonb,
+FROM json_to_recordset($1::json) AS incoming (
+  id text, type text, source text, key text, sequence bigint, payload json, headers json,
   correlation_id text, causation_id text, occurred_at timestamptz, handlers text[])
 ORDER BY incoming.id
 ON CONFLICT (id) DO NOTHING

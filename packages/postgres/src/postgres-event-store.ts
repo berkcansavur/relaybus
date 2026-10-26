@@ -27,6 +27,7 @@ import { PostgresClaims } from './postgres-claim.js';
 import { PostgresCompletion } from './postgres-completion.js';
 import { OwnedConnections } from './owned-connections.js';
 import { PostgresMaintenance } from './postgres-maintenance.js';
+import { PostgresSetup } from './postgres-setup.js';
 import type { PostgresStoreState } from './postgres-store-state.js';
 import { resolveStoreSettings, type PostgresEventStoreOptions } from './postgres-store-options.js';
 import { createPostgresSchemaStatements, postgresSchemaMarker } from './schema.js';
@@ -84,6 +85,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   readonly #claims: PostgresClaims<TTransaction>;
   readonly #completion: PostgresCompletion<TTransaction>;
   readonly #maintenance: PostgresMaintenance<TTransaction>;
+  readonly #setup: PostgresSetup<TTransaction>;
   readonly #owned = new OwnedConnections();
 
   constructor(options: PostgresEventStoreOptions<TTransaction>) {
@@ -123,6 +125,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     this.#claims = new PostgresClaims(state);
     this.#completion = new PostgresCompletion(state);
     this.#maintenance = new PostgresMaintenance(state);
+    this.#setup = new PostgresSetup(state, options);
   }
 
   /**
@@ -136,32 +139,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
    * `createPostgresSchemaSql()` instead.
    */
   async setup(): Promise<void> {
-    // DDL on a current schema would still lock the tables, and those locks deadlock with running claims.
-    if (await this.#schemaIsCurrent()) {
-      return;
-    }
-    await this.#state.executor.transaction(async (transaction) => {
-      await this.#state.executor.query(
-        this.#state.statements.setup.setupLock,
-        [this.#state.setupLockKey],
-        transaction,
-      );
-      if (await this.#schemaIsCurrent(transaction)) {
-        return;
-      }
-      for (const statement of this.#state.schemaStatements) {
-        await this.#state.executor.query(statement, [], transaction);
-      }
-    });
-  }
-
-  async #schemaIsCurrent(transaction?: TTransaction): Promise<boolean> {
-    const rows = await this.#state.executor.query(
-      this.#state.statements.setup.schemaCurrent,
-      [this.#state.schemaMarker],
-      transaction,
-    );
-    return rows[0]!['current'] === true;
+    await this.#setup.run();
   }
 
   /**

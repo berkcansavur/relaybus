@@ -14,7 +14,9 @@ export type { PostgresStatement } from './statement-fragments.js';
  * parameters; only validated identifiers are interpolated. Documents travel
  * as one JSON text parameter expanded server-side with `jsonb_to_recordset`,
  * which keeps the statements identical across drivers and avoids array
- * literal encoding differences.
+ * literal encoding differences. Events go through `json_to_recordset` instead:
+ * it hands each payload and headers object to their `json` columns as the
+ * exact text the producer serialized, key order included.
  *
  * Leasing is per lane, not per delivery. A lane row carries the owner, an
  * `epoch` (the fencing token: it grows every time the lane changes hands) and
