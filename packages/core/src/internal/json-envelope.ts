@@ -91,7 +91,18 @@ export type BodyEnvelopeMapping<TTransportId extends string> = MappingFields<
    * are written. Only the bytes change, for formats compared byte for byte.
    */
   readonly bodyOrder?: readonly string[];
+  /**
+   * Keeps the top-level body fields that no other value uses (and that are not read as event
+   * headers) with every JSON type, in body order, as one object under `payloadField` of the
+   * payload: `{ payloadField: 'wire' }` reads `{ "data": { "a": 1 }, "attempt": 2 }` as the payload
+   * `{ "a": 1, "wire": { "attempt": 2 } }`, so the handler's schema validates them with the payload.
+   * Writing spreads that object back over the top level. Default: such fields are left out on read.
+   */
+  readonly otherFields?: OtherFields;
 };
+
+/** Where {@link BodyEnvelopeMapping.otherFields} keeps the unused top-level fields. */
+export type OtherFields = { readonly payloadField: string };
 
 /**
  * The body is the payload itself, as a plain JSON producer writes it; every other value lives in

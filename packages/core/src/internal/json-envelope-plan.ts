@@ -46,6 +46,8 @@ export type Plan = {
   readonly extraBody: readonly ExtraBodyValue[];
   readonly extraHeaders: readonly (readonly [string, ExtraValue<string>])[];
   readonly bodyOrder: readonly string[];
+  /** The payload field that keeps the unused top-level fields; undefined when they are left out. */
+  readonly otherFields: string | undefined;
 };
 
 /** An extra body value at its path. */
@@ -91,6 +93,7 @@ export function compile(
     topLevelNames: new Set(),
     mappedHeaders: new Set(),
     timeFormat: compileTimeFormat(mapping.occurredAt),
+    otherFields: compileOtherFields(mapping, payload !== undefined),
     ...compileExtras(mapping, payload !== undefined),
   };
   return assertDisjoint(plan);
@@ -132,6 +135,24 @@ function compileExtras(
     extraHeaders: Object.entries(extra.headers ?? {}),
     bodyOrder,
   };
+}
+
+function compileOtherFields(
+  mapping: JsonEnvelopeMapping<string>,
+  hasBody: boolean,
+): string | undefined {
+  const otherFields: unknown = (mapping as { readonly otherFields?: unknown }).otherFields;
+  if (otherFields === undefined) {
+    return undefined;
+  }
+  if (!hasBody) {
+    throw new ConfigurationError('jsonEnvelope otherFields needs a body payload');
+  }
+  const field = isJsonObject(otherFields) ? otherFields['payloadField'] : undefined;
+  if (typeof field !== 'string' || field.length === 0) {
+    throw new ConfigurationError("jsonEnvelope otherFields must be { payloadField: '<name>' }");
+  }
+  return field;
 }
 
 function compileType(type: unknown): Location | FixedType {

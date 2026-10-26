@@ -7,6 +7,7 @@ import {
   type OptionalName,
   type Plan,
 } from './json-envelope-plan.js';
+import { splitOtherFields } from './json-envelope-other-fields.js';
 
 // Writing an envelope as a JSON message by a compiled mapping.
 
@@ -40,10 +41,12 @@ export function writeMessage(
       put(location, value);
     }
   }
-  const body = writeBody(envelope, { plan, root });
+  const { payload, fields } = splitOtherFields(envelope, { plan, failures });
+  const body = writeBody(envelope, { plan, root, payload });
   if (plan.topLevelHeaders) {
     spreadHeaders(envelope, { plan, failures, root: body as Record<string, unknown> });
   }
+  spreadOtherFields(envelope, { failures, fields, root: body as Record<string, unknown> });
   return {
     body,
     headers: Object.fromEntries([
@@ -92,12 +95,16 @@ function optionalValues(
 
 function writeBody(
   envelope: EventEnvelope,
-  { plan, root }: { readonly plan: Plan; readonly root: Record<string, unknown> },
+  {
+    plan,
+    root,
+    payload,
+  }: { readonly plan: Plan; readonly root: Record<string, unknown>; readonly payload: unknown },
 ): unknown {
   if (plan.payload === undefined) {
-    return envelope.payload;
+    return payload;
   }
-  setAt(root, { path: plan.payload, value: envelope.payload });
+  setAt(root, { path: plan.payload, value: payload });
   if (plan.headers !== undefined) {
     setAt(root, {
       path: plan.headers,
@@ -119,6 +126,29 @@ function spreadHeaders(
     if (plan.topLevelNames.has(name)) {
       throw failures.unencodable(
         `Event ${envelope.id} has a header '${name}', which the mapping uses for another body field`,
+      );
+    }
+    setAt(root, { path: [name], value });
+  }
+}
+
+/** The fields `otherFields` kept, spread over the top level after everything else; a taken name is refused. */
+function spreadOtherFields(
+  envelope: EventEnvelope,
+  {
+    failures,
+    fields,
+    root,
+  }: {
+    readonly failures: JsonEnvelopeFailures;
+    readonly fields: readonly [string, unknown][];
+    readonly root: Record<string, unknown>;
+  },
+): void {
+  for (const [name, value] of fields) {
+    if (Object.hasOwn(root, name)) {
+      throw failures.unencodable(
+        `Event ${envelope.id} keeps a top-level field '${name}' that an event header also writes`,
       );
     }
     setAt(root, { path: [name], value });

@@ -2,6 +2,7 @@ import { assertEventType, type EventHeaders } from '../event.js';
 import { isJsonObject } from './cloudevents.js';
 import type { JsonEnvelopeFailures, JsonEnvelopeFields, JsonWireMessage } from './json-envelope.js';
 import type { Context, Location, Plan } from './json-envelope-plan.js';
+import { withOtherFields } from './json-envelope-other-fields.js';
 
 // Reading the envelope fields of a JSON message by a compiled mapping.
 
@@ -61,7 +62,10 @@ function readPayload(body: unknown, { plan, failures }: Context): unknown {
   if (payload === undefined) {
     throw failures.invalid(`The message has no payload at '${plan.payload.join('.')}'`);
   }
-  return payload;
+  return withOtherFields(payload, {
+    body: body as Record<string, unknown>,
+    context: { plan, failures },
+  });
 }
 
 function readEventHeaders(message: JsonWireMessage, plan: Plan): EventHeaders {

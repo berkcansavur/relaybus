@@ -34,6 +34,7 @@ export {
   type JsonEnvelopeFormat,
   type JsonEnvelopeMapping,
   type JsonWireMessage,
+  type OtherFields,
   type PayloadOnlyMapping,
   type TimeField,
   type TimeFormat,

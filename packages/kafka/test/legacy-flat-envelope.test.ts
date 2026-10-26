@@ -110,6 +110,55 @@ kafkaCodecContract('a legacy flat JSON envelope, as the transport publishes it',
   ],
 });
 
+/** The same envelope, keeping the top-level fields that are not text under `payload.wire`. */
+const keeping: KafkaCodec = jsonEnvelope({ ...LEGACY_FLAT, otherFields: { payloadField: 'wire' } });
+
+kafkaCodecContract('a legacy flat JSON envelope that keeps every top-level field', {
+  encode: keeping.encode,
+  decode: (record) => decodeKafkaRecord(keeping, record),
+  cases: [
+    {
+      name: 'numbers, booleans, null, objects and arrays at the top level, byte for byte both ways',
+      envelope: {
+        ...EVENT,
+        payload: { orderId: 1, wire: { attempt: 2, retried: true, meta: { v: 1, a: [null] } } },
+      },
+      record: {
+        topic: 'orders',
+        key: null,
+        value:
+          '{"id":"evt-1","requestId":"req-1","provider":"billing-api","timestamp":1792936800123,"createdDate":"2026-10-25T14:00:00.123Z","type":"order.created","data":{"orderId":1},"userId":"u-7","channel":"web","attempt":2,"retried":true,"meta":{"v":1,"a":[null]}}',
+      },
+      decoded: {
+        ...EVENT,
+        key: null,
+        payload: { orderId: 1, wire: { attempt: 2, retried: true, meta: { v: 1, a: [null] } } },
+      },
+    },
+    {
+      name: 'a record of an existing producer: the unknown fields that are not text',
+      only: 'decode',
+      envelope: {
+        ...EVENT,
+        id: 'kafka:orders:3:812',
+        key: null,
+        correlationId: null,
+        headers: { userId: 'u-9', region: 'eu' },
+        type: 'order.cancelled',
+        payload: { orderId: 2, wire: { attempt: 2, meta: { v: 1 } } },
+      },
+      record: {
+        topic: 'orders',
+        partition: 3,
+        offset: '812',
+        key: null,
+        value:
+          '{"provider":"billing-api","timestamp":1792936800123,"createdDate":"2026-10-25T14:00:00.123Z","type":"order.cancelled","data":{"orderId":2},"userId":"u-9","region":"eu","attempt":2,"meta":{"v":1}}',
+      },
+    },
+  ],
+});
+
 describe('record key', () => {
   const base: KafkaJsonEnvelopeMapping = {
     type: { body: 'type' },
