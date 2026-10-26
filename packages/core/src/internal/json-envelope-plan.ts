@@ -1,6 +1,7 @@
 import { ConfigurationError } from '../errors.js';
 import { assertEventType } from '../event.js';
 import { isJsonObject } from './cloudevents.js';
+import { compileWireTypes, type WireTypePlan } from './json-envelope-wire-types.js';
 import type {
   ExtraValue,
   FixedType,
@@ -48,7 +49,7 @@ export type Plan = {
   readonly bodyOrder: readonly string[];
   /** The payload field that keeps the unused top-level fields; undefined when they are left out. */
   readonly otherFields: string | undefined;
-};
+} & WireTypePlan;
 
 /** An extra body value at its path. */
 export type ExtraBodyValue = {
@@ -82,8 +83,9 @@ export function compile(
   if (topLevelHeaders && payload === undefined) {
     throw new ConfigurationError("jsonEnvelope headers 'top-level-fields' needs a body payload");
   }
+  const type = compileType(mapping.type);
   const plan: Plan = {
-    type: compileType(mapping.type),
+    type,
     id: compileId(mapping.id, transportIds),
     idWhenMissing: isJsonObject(mapping.id) && 'whenMissing' in mapping.id,
     optional,
@@ -94,6 +96,7 @@ export function compile(
     mappedHeaders: new Set(),
     timeFormat: compileTimeFormat(mapping.occurredAt),
     otherFields: compileOtherFields(mapping, payload !== undefined),
+    ...compileWireTypes(mapping.wireTypes, { fixed: 'fixed' in type }),
     ...compileExtras(mapping, payload !== undefined),
   };
   return assertDisjoint(plan);

@@ -8,6 +8,7 @@ import {
   type Plan,
 } from './json-envelope-plan.js';
 import { splitOtherFields } from './json-envelope-other-fields.js';
+import { wireTypeOf } from './json-envelope-wire-types.js';
 
 // Writing an envelope as a JSON message by a compiled mapping.
 
@@ -30,7 +31,7 @@ export function writeMessage(
   };
   const typeAt = typeLocation(envelope, { plan, failures });
   if (typeAt !== undefined) {
-    put(typeAt, envelope.type);
+    put(typeAt, wireTypeOf(envelope, { plan, failures }));
   }
   if (plan.id !== undefined) {
     put(plan.id, envelope.id);
@@ -41,14 +42,8 @@ export function writeMessage(
       put(location, value);
     }
   }
-  const { payload, fields } = splitOtherFields(envelope, { plan, failures });
-  const body = writeBody(envelope, { plan, root, payload });
-  if (plan.topLevelHeaders) {
-    spreadHeaders(envelope, { plan, failures, root: body as Record<string, unknown> });
-  }
-  spreadOtherFields(envelope, { failures, fields, root: body as Record<string, unknown> });
   return {
-    body,
+    body: writeBody(envelope, { plan, failures, root }),
     headers: Object.fromEntries([
       ...eventHeaderEntries(envelope, { plan, failures }),
       ...headers,
@@ -93,14 +88,12 @@ function optionalValues(
   ];
 }
 
+/** The body: the payload alone, or every mapped, extra, header and kept field in body order. */
 function writeBody(
   envelope: EventEnvelope,
-  {
-    plan,
-    root,
-    payload,
-  }: { readonly plan: Plan; readonly root: Record<string, unknown>; readonly payload: unknown },
+  { plan, failures, root }: Context & { readonly root: Record<string, unknown> },
 ): unknown {
+  const { payload, fields } = splitOtherFields(envelope, { plan, failures });
   if (plan.payload === undefined) {
     return payload;
   }
@@ -114,6 +107,10 @@ function writeBody(
   for (const { path, value } of plan.extraBody) {
     setAt(root, { path, value: typeof value === 'function' ? value(envelope) : value });
   }
+  if (plan.topLevelHeaders) {
+    spreadHeaders(envelope, { plan, failures, root });
+  }
+  spreadOtherFields(envelope, { failures, fields, root });
   return ordered(root, plan.bodyOrder);
 }
 
@@ -167,7 +164,7 @@ function timeValue(
   return format === 'epoch-seconds' ? Math.floor(milliseconds / MILLISECONDS_PER_SECOND) : text;
 }
 
-/** The body with the listed top-level fields first, in the listed order. */
+/** The body with the listed top-level fields first, in the listed order, spread headers and kept fields included. */
 function ordered(root: Record<string, unknown>, order: readonly string[]): Record<string, unknown> {
   if (order.length === 0) {
     return root;

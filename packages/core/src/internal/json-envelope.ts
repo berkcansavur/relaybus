@@ -61,7 +61,17 @@ type MappingFields<TField extends WireField, TTransportId extends string> = {
   readonly causationId?: TField;
   /** Media type written with the message. Default `application/json`. Not checked on read. */
   readonly contentType?: string;
+  /**
+   * Wire names of event types, for a format whose type values are not relaybus event types or
+   * name them otherwise: `{ 'transfer.auto-dispatched.v1': 'Transfer Auto Dispatched' }`. A listed
+   * type is written as its wire name and read back from it; any other type travels as itself. One
+   * route then carries many types without a `fixed` type per transport. Not with a `fixed` type.
+   */
+  readonly wireTypes?: WireTypes;
 };
+
+/** Event type to the name the wire uses for it; see `wireTypes` of a jsonEnvelope mapping. */
+export type WireTypes = Readonly<Record<string, string>>;
 
 /**
  * A JSON object that wraps the payload with event metadata, such as

@@ -159,6 +159,78 @@ kafkaCodecContract('a legacy flat JSON envelope that keeps every top-level field
   ],
 });
 
+/** requestId travels as an event header spread over the top level, at its bodyOrder position. */
+const headerFirst: KafkaCodec = jsonEnvelope({
+  type: { body: 'type' },
+  id: { body: 'id', whenMissing: 'record-position' },
+  payload: { body: 'data' },
+  source: { body: 'provider' },
+  occurredAt: { body: 'timestamp', format: 'epoch-millis' },
+  headers: 'top-level-fields',
+  extra: { body: { createdDate: (event) => event.occurredAt.toISOString() } },
+  bodyOrder: ['id', 'requestId', 'provider', 'timestamp', 'createdDate', 'type', 'data'],
+  recordKey: 'none',
+  contentTypeHeader: false,
+});
+
+kafkaCodecContract('a legacy flat JSON envelope whose bodyOrder names a spread header', {
+  encode: headerFirst.encode,
+  decode: (record) => decodeKafkaRecord(headerFirst, record),
+  cases: [
+    {
+      name: 'the requestId header is written second, as bodyOrder says',
+      envelope: { ...EVENT, correlationId: null, headers: { userId: 'u-7', requestId: 'req-1' } },
+      record: {
+        topic: 'orders',
+        key: null,
+        value:
+          '{"id":"evt-1","requestId":"req-1","provider":"billing-api","timestamp":1792936800123,"createdDate":"2026-10-25T14:00:00.123Z","type":"order.created","data":{"orderId":1,"total":10.5},"userId":"u-7"}',
+      },
+      decoded: {
+        ...EVENT,
+        key: null,
+        correlationId: null,
+        headers: { userId: 'u-7', requestId: 'req-1' },
+      },
+    },
+  ],
+});
+
+/** One route for many types, named on the wire as the existing producers name them. */
+const named: KafkaCodec = jsonEnvelope({
+  ...LEGACY_FLAT,
+  wireTypes: { 'order.created': 'ORDER CREATED', 'order.cancelled': 'order_cancelled' },
+});
+
+kafkaCodecContract('a legacy flat JSON envelope with wire type names', {
+  encode: named.encode,
+  decode: (record) => decodeKafkaRecord(named, record),
+  cases: [
+    {
+      name: 'a listed type travels under its wire name',
+      envelope: EVENT,
+      record: {
+        topic: 'orders',
+        key: null,
+        value:
+          '{"id":"evt-1","requestId":"req-1","provider":"billing-api","timestamp":1792936800123,"createdDate":"2026-10-25T14:00:00.123Z","type":"ORDER CREATED","data":{"orderId":1,"total":10.5},"userId":"u-7","channel":"web"}',
+      },
+      decoded: { ...EVENT, key: null },
+    },
+    {
+      name: 'a snake_case wire name reads back as its event type',
+      envelope: { ...EVENT, type: 'order.cancelled' },
+      record: {
+        topic: 'orders',
+        key: null,
+        value:
+          '{"id":"evt-1","requestId":"req-1","provider":"billing-api","timestamp":1792936800123,"createdDate":"2026-10-25T14:00:00.123Z","type":"order_cancelled","data":{"orderId":1,"total":10.5},"userId":"u-7","channel":"web"}',
+      },
+      decoded: { ...EVENT, type: 'order.cancelled', key: null },
+    },
+  ],
+});
+
 describe('record key', () => {
   const base: KafkaJsonEnvelopeMapping = {
     type: { body: 'type' },

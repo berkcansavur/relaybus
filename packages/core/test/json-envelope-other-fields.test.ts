@@ -161,3 +161,21 @@ describe('jsonEnvelope otherFields', () => {
     );
   });
 });
+
+describe('jsonEnvelope bodyOrder', () => {
+  it('orders spread event headers and kept fields too, byte for byte', () => {
+    const json = format({
+      ...FLAT,
+      bodyOrder: ['requestId', 'attempt', 'type', 'provider', 'data', 'tenant'],
+    });
+    const message = json.write(
+      envelope({
+        payload: { orderId: 1, wire: { meta: { z: 1 }, attempt: 2 } },
+        headers: { tenant: 'tr', channel: 'web', requestId: 'req-1' },
+      }),
+    );
+    expect(JSON.stringify(message.body)).toBe(
+      '{"requestId":"req-1","attempt":2,"type":"order_created","provider":"billing-api","data":{"orderId":1},"tenant":"tr","channel":"web","meta":{"z":1}}',
+    );
+  });
+});
