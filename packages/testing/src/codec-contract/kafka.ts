@@ -1,5 +1,4 @@
 import type { EventEnvelope } from '@relaybus/core';
-import { describe, expect, it } from 'vitest';
 import {
   attempt,
   compareBodies,
@@ -10,6 +9,7 @@ import {
   type BodyComparison,
   type WireBytes,
 } from './compare.js';
+import { assertNoMismatches, registerCases, type TestFramework } from './framework.js';
 
 /** A record as captured from a topic: what an existing producer wrote. */
 export interface KafkaCapturedRecord {
@@ -100,22 +100,37 @@ export async function kafkaCodecMismatches(
     ...decoding.mismatches,
     ...(decoding.result === undefined
       ? []
-      : compareDecoded(testCase.decoded ?? testCase.envelope, decoding.result)),
+      : compareDecoded(testCase.decoded ?? testCase.envelope, {
+          decoded: decoding.result,
+          comparison: options.compare ?? 'bytes',
+        })),
   ];
 }
 
 /**
- * Registers one test per case asserting {@link kafkaCodecMismatches} finds nothing: a format of
- * existing producers and consumers is adopted only once relaybus writes and reads it exactly.
+ * Throws a {@link CodecContractError} listing what {@link kafkaCodecMismatches} finds, so any test framework
+ * (or a plain script) can check one case.
  */
-export function kafkaCodecContract(name: string, options: KafkaCodecContractOptions): void {
-  describe(`${name} writes and reads the captured Kafka records`, () => {
-    it.each(options.cases.map((testCase) => [testCase.name, testCase] as const))(
-      '%s',
-      async (_name, testCase) => {
-        expect(await kafkaCodecMismatches(options, testCase)).toEqual([]);
-      },
-    );
+export async function assertKafkaCodecCase(
+  options: KafkaCodecContractOptions,
+  testCase: KafkaCodecCase,
+): Promise<void> {
+  assertNoMismatches(testCase.name, await kafkaCodecMismatches(options, testCase));
+}
+
+/**
+ * Registers one test per case through `framework` (the `describe` and `it` of Jest, Vitest,
+ * Mocha or `node:test`), each asserting {@link assertKafkaCodecCase}: a format of existing
+ * producers and consumers is adopted only once relaybus writes and reads it exactly.
+ */
+export function registerKafkaCodecContract(
+  framework: TestFramework,
+  { name, options }: { readonly name: string; readonly options: KafkaCodecContractOptions },
+): void {
+  registerCases(framework, {
+    title: `${name} writes and reads the captured Kafka records`,
+    cases: options.cases,
+    check: (testCase) => assertKafkaCodecCase(options, testCase),
   });
 }
 
