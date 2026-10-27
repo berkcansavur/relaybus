@@ -5,7 +5,7 @@ description: What is new in relaybus 0.5.0 (catalog routes and wire names declar
 
 # Releases
 
-- [0.5.0](#_0-5-0-2026-10-26): `route(produce(Catalog, { events }), settings)` routes several catalog events with shared settings; wire names declared on catalogs and routes reach the codec; transactions at an isolation level with automatic rerun of serialization failures
+- [0.5.0](#_0-5-0-2026-10-27): `route(produce(Catalog, { events }), settings)` routes several catalog events with shared settings; wire names declared on catalogs and routes reach the codec; transactions at an isolation level with automatic rerun of serialization failures
 - [0.4.1](#_0-4-1-2026-10-26): PostgreSQL hands out payloads exactly as published, Prisma 5 support, jsonEnvelope fixes, a codec contract for any test framework
 - [0.4.0](#_0-4-0-2026-10-25): Prisma 7 on a real database, wake-up at the caller's commit, the Confluent Kafka client, codec contract helpers, record keys, legacy flat envelopes, an application-owned producer
 - [0.3.1](#_0-3-1-2026-10-25): internal readability refactor, same behaviour
@@ -14,7 +14,7 @@ description: What is new in relaybus 0.5.0 (catalog routes and wire names declar
 - [0.1.x](#_0-1-x): first public release
 - [How versioning works](#how-versioning-works)
 
-## 0.5.0 (2026-10-26)
+## 0.5.0 (2026-10-27)
 
 A minor release with new API and nothing required when upgrading from 0.4.x: no export removed or renamed, every option additive, no database or default wire-format change, and per-event routes and `jsonEnvelope` `wireTypes` work as before. See [Upgrading from 0.4.1 to 0.5.0](/upgrading#upgrading-from-0-4-1-to-0-5-0).
 
@@ -24,7 +24,7 @@ A minor release with new API and nothing required when upgrading from 0.4.x: no 
 - Additive API: core `route`, `catalogWireTypes`, `CatalogRoute`, `CatalogRouteOptions`, `RouteDefinition`, `DuplicateRouteEventError`, `UnknownCatalogEventError`, `WireTypeCollisionError`, `WireTypesUnsupportedError`, `DefineCatalogOptions.wireTypes`, `Transport.declareWireTypes` (checks the names and returns the function that applies them); `RelayBusOptions.routes` accepts `RouteDefinition` (a plain route or a catalog route); Kafka and RabbitMQ `KafkaCodec.withWireTypes` / `RabbitMqCodec.withWireTypes` and `declareWireTypes` on both transports; `InMemoryTransport.declaredWireTypes` in `@relaybus/testing`; `mergeWireTypes` and `withDeclaredWireTypes` in `@relaybus/core/internal`.
 - **Isolation levels with automatic rerun.** `bus.transaction(work, { isolationLevel, maxAttempts })` and `@RelayBusTransaction({ isolationLevel, maxAttempts })` run a transaction at `'read committed'`, `'repeatable read'` or `'serializable'`. At the last two, a serialization failure (SQLSTATE `40001`, Prisma `P2034`) rolls the attempt back and runs `work` again in a new transaction, up to `maxAttempts` times (default 3), and the last failure is thrown unchanged. This lets PostgreSQL's optimistic SERIALIZABLE replace `pg_advisory_xact_lock` or `SELECT ... FOR UPDATE` for write-skew checks such as "count the active rows, check a limit, insert". `work` may run more than once, so keep external calls out of it; events of a failed attempt are rolled back with it, and `onPublished` and the dispatcher wake-up wait for the final commit. `PgExecutor` sets the level in the `BEGIN` round trip (no extra statement), TypeORM through its own isolation-level transaction, every other executor with `SET TRANSACTION ISOLATION LEVEL` as the first statement; MongoDB and the in-memory store reject a level with a `ConfigurationError`. A decorated method that asks for a level joins a running transaction only when relaybus opened it at the same level, else it throws `TransactionIsolationConflictError` (`RELAYBUS_TRANSACTION_ISOLATION_CONFLICT`). Without `isolationLevel` a transaction runs exactly as in 0.4.1: same statements, same round trips, no rerun. See [Serializable transactions](/recipes/serializable-transactions).
 - Additive API: core `TransactionOptions`, `TransactionIsolationLevel`, `TRANSACTION_ISOLATION_LEVELS`, `TransactionIsolationConflictError`, `RelayBus.currentIsolationLevel()`, `EventStoreTransactionOptions.isolationLevel`, and the optional `EventStore.isolationLevels` and `EventStore.isSerializationFailure`; `@RelayBusTransaction(options)`; postgres `PostgresIsolatedTransactionOptions` and the optional `PostgresExecutor.transactionWithIsolation` and `PostgresExecutor.isSerializationFailure`; a transaction-isolation section in the store contract of `@relaybus/testing`.
-- BENCHMARK_LINE
+- Benchmark against 0.4.1 (quick gate, interleaved; publish 6 pairs, dispatch 3 pairs per cell): publish 0.92–1.01x (batch 1 1.00x, batch 100 1.01x, batch 100 with 5 handlers 0.92x, every interval spans 1.0), dispatch 0.96–1.02x (PostgreSQL 1 instance 1.02x, 4 instances 1.01x, 10 hot keys 0.96x), so speed is unchanged; statements per event and per delivery are identical. MongoDB was not measured for this release: the harness could not load the 0.4.1 side's MongoDB template within its transaction budget. See [Performance](/performance#_0-5-0-vs-0-4-1).
 
 ## 0.4.1 (2026-10-26)
 
