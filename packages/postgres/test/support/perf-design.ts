@@ -1,12 +1,13 @@
 import type { Pool, PoolClient } from 'pg';
 import { expect } from 'vitest';
-import type { ClaimedDelivery, EventEnvelope } from '@relaybus/core';
+import type { ClaimedDelivery, EventEnvelope, EventStoreTransactionOptions } from '@relaybus/core';
 import { at, createDelivery, createEnvelope } from '@relaybus/testing';
 import { expectWithinBudget } from '../../../../test-support/perf-budget.js';
 import {
   PgExecutor,
   PostgresEventStore,
   type PostgresExecutor,
+  type PostgresIsolatedTransactionOptions,
   type PostgresParameter,
   type PostgresQueryOptions,
   type PostgresRow,
@@ -95,6 +96,14 @@ export class CountingExecutor implements PostgresExecutor<PoolClient> {
   ): Promise<T> {
     this.statements += 2;
     return this.#inner.transactionWithBudget(work, timeoutMs);
+  }
+
+  transactionWithIsolation<T>(
+    work: (transaction: PoolClient) => Promise<T>,
+    options: PostgresIsolatedTransactionOptions,
+  ): Promise<T> {
+    this.statements += 2;
+    return this.#inner.transactionWithIsolation(work, options);
   }
 
   async query(
@@ -224,7 +233,7 @@ export async function publishWith(
     readonly events: readonly EventEnvelope[];
     readonly handlers?: readonly string[];
     readonly now?: Date;
-    readonly options: { readonly timeoutMs: number } | undefined;
+    readonly options: EventStoreTransactionOptions | undefined;
   },
 ): Promise<void> {
   await store.transaction(

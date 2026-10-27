@@ -65,11 +65,20 @@ function valuesOf(samples: readonly Sample[], metric: string): number[] {
   return values;
 }
 
-/** Counters are compared on the median alone; a counter only moves when the code changes, not when the machine is loaded. */
-function counterVerdict(definition: MetricDefinition, base: number, candidate: number): Verdict {
+/**
+ * Counters are compared on the median alone; a counter only moves when the code changes, not when the machine is loaded.
+ * Some of them still drift with the state of the database over the run (lane updates per delivery follow how the claims
+ * batch up), and that drift hits both sides of one pair alike, so paired runs compare the median of the per-pair ratios.
+ */
+function counterVerdict(
+  definition: MetricDefinition,
+  base: number,
+  candidate: number,
+  pairedRatio?: number,
+): Verdict {
   if (base === 0 && candidate === 0) return 'unchanged';
   if (base === 0) return definition.better === 'lower' ? 'regression' : 'improvement';
-  const change = candidate / base - 1;
+  const change = (pairedRatio ?? candidate / base) - 1;
   if (Math.abs(change) <= definition.tolerance) return 'unchanged';
   const worse = definition.better === 'lower' ? change > 0 : change < 0;
   return worse ? 'regression' : 'improvement';
@@ -176,7 +185,17 @@ export function compareCell(
     const baseMedian = median(baseValues);
     const candidateMedian = median(candidateValues);
     if (definition.class === 'counter' || definition.class === 'info') {
-      const ratio = baseMedian === 0 ? Number.NaN : candidateMedian / baseMedian;
+      const pairedCounter =
+        paired &&
+        definition.class === 'counter' &&
+        baseValues.length === candidateValues.length &&
+        baseValues.length === usedBase.length &&
+        baseValues.every((value) => value > 0);
+      const ratio = pairedCounter
+        ? median(candidateValues.map((value, index) => value / (baseValues[index] ?? Number.NaN)))
+        : baseMedian === 0
+          ? Number.NaN
+          : candidateMedian / baseMedian;
       metrics.push({
         metric,
         definition,
@@ -188,7 +207,12 @@ export function compareCell(
         verdict:
           definition.class === 'info'
             ? 'n/a'
-            : counterVerdict(definition, baseMedian, candidateMedian),
+            : counterVerdict(
+                definition,
+                baseMedian,
+                candidateMedian,
+                pairedCounter ? ratio : undefined,
+              ),
       });
       continue;
     }

@@ -301,6 +301,37 @@ async place(orderId: string): Promise<void> {
 - **Async methods only.** On a method that does not return a Promise it fails to compile:
   `'@RelayBusTransaction() needs a method that returns a Promise: make the method async'`.
 
+### Isolation levels: `@RelayBusTransaction({ isolationLevel })`
+
+`@RelayBusTransaction({ isolationLevel: 'serializable', maxAttempts: 5 })` (and
+`bus.transaction(work, { isolationLevel, maxAttempts })`) runs the method at `'read committed'`,
+`'repeatable read'` or `'serializable'` (PostgreSQL stores; MongoDB and the in-memory store reject a
+level with a `ConfigurationError`). At `'repeatable read'` and `'serializable'` a serialization
+failure (SQLSTATE `40001`) rolls the attempt back and **runs the method again** in a new
+transaction, up to `maxAttempts` attempts in all (default 3); the last failure is thrown unchanged.
+That lets PostgreSQL detect write skew (count the active rows, check a limit, insert) without a
+`pg_advisory_xact_lock` or `SELECT ... FOR UPDATE`.
+
+```ts
+@RelayBusTransaction({ isolationLevel: 'serializable' })
+async reserve(userId: string): Promise<void> {
+  if ((await this.reservations.countActive(userId)) >= LIMIT) throw new LimitReachedError(userId);
+  await this.reservations.insert(userId);
+  await this.bus.publish(new ReservationCreated({ userId }));
+}
+```
+
+- **The method may run more than once.** Keep HTTP calls, broker publishes and other side effects
+  that are not database writes out of it. Events published by a failed attempt are rolled back
+  with it, and `onPublished` and the dispatcher wake-up wait for the attempt that committed.
+- **Joining.** A method with an `isolationLevel` joins a running transaction only when relaybus
+  opened it at the same level; otherwise it throws `TransactionIsolationConflictError`
+  (`RELAYBUS_TRANSACTION_ISOLATION_CONFLICT`), because the level of a running transaction cannot be
+  changed. A method without `isolationLevel` joins any transaction, as before.
+- Without `isolationLevel` nothing differs from `@RelayBusTransaction()`: same statements, no rerun.
+
+See [Serializable transactions](https://berkcansavur.github.io/relaybus/recipes/serializable-transactions).
+
 ### Time budget: `transactionTimeout`
 
 Every relaybus transaction (`bus.transaction` and `@RelayBusTransaction()`) is held to

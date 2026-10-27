@@ -3,10 +3,12 @@ import type { RelayBusLogger } from '@relaybus/core';
 import type { Pool, PoolClient } from 'pg';
 import type {
   PostgresExecutor,
+  PostgresIsolatedTransactionOptions,
   PostgresParameter,
   PostgresQueryOptions,
   PostgresRow,
 } from './executor.js';
+import { isolationKeywords } from './transaction-isolation.js';
 import { SESSION_DEFAULTS_SQL, budgetSettingsSql, budgetValue } from './transaction-timeouts.js';
 
 /**
@@ -92,17 +94,36 @@ export class PgExecutor implements PostgresExecutor<PoolClient> {
     work: (transaction: PoolClient) => Promise<T>,
     timeoutMs: number,
   ): Promise<T> {
+    return this.#transaction(work, this.#budgetStart(timeoutMs, 'BEGIN'));
+  }
+
+  /**
+   * Like {@link PgExecutor.transactionWithBudget} with `BEGIN ISOLATION LEVEL ...`: the level is set
+   * with the `BEGIN` of the same simple query, before the budget's first statement.
+   */
+  transactionWithIsolation<T>(
+    work: (transaction: PoolClient) => Promise<T>,
+    { isolationLevel, timeoutMs }: PostgresIsolatedTransactionOptions,
+  ): Promise<T> {
+    return this.#transaction(
+      work,
+      this.#budgetStart(timeoutMs, `BEGIN ISOLATION LEVEL ${isolationKeywords(isolationLevel)}`),
+    );
+  }
+
+  /** How a transaction starts on a connection when it is held to `timeoutMs`; `begin` is the `BEGIN` statement. */
+  #budgetStart(timeoutMs: number, begin: string): (client: PoolClient) => TransactionStart {
     const value = budgetValue(timeoutMs);
     const settings = (scope: 'transaction' | 'session'): string =>
       budgetSettingsSql({ value: `'${value}'`, sessionTimeouts: true, scope });
-    return this.#transaction(work, (client) => {
+    return (client) => {
       if (!this.#keepsSessionBudget()) {
-        return { begin: `BEGIN; ${settings('transaction')}` };
+        return { begin: `${begin}; ${settings('transaction')}` };
       }
       return this.#sessionValues.get(client) === value
-        ? { begin: 'BEGIN' }
-        : { begin: `BEGIN; ${settings('session')}`, sessionValue: value };
-    });
+        ? { begin }
+        : { begin: `${begin}; ${settings('session')}`, sessionValue: value };
+    };
   }
 
   #recordSession(client: PoolClient, sessionValue: string | null | undefined): void {

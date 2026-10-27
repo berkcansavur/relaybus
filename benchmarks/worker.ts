@@ -4,6 +4,7 @@ import { monitorEventLoopDelay, type IntervalHistogram } from 'node:perf_hooks';
 import type { EventStore, RelayBus, RelayBusObserver, Transport } from '@relaybus/core';
 import type { MongoClient } from 'mongodb';
 import { loadSide } from './lib/deps.ts';
+import { deterministicIdentifiers, deterministicKeys } from './lib/deterministic.ts';
 import { Hist } from './lib/hist.ts';
 import type { CommitItem, FromWorker, HandledItem, ToWorker, WorkerInit } from './lib/protocol.ts';
 
@@ -67,6 +68,8 @@ function adapt<TTransaction>(
     observer: RelayBusObserver;
     /** Route every event to a fake transport instead of registering local handlers. */
     transport?: Transport;
+    /** Reproducible event ids (publishers only: a dispatcher derives its lease owner from the generator and must stay unique). */
+    generateIdentifier?: () => string;
   },
 ): BenchBus {
   const silent = { log: () => undefined, warn: () => undefined, error: () => undefined };
@@ -77,6 +80,9 @@ function adapt<TTransaction>(
     retention: { completed: false, dead: false },
     observers: [options.observer],
     logger: silent,
+    ...(options.generateIdentifier === undefined
+      ? {}
+      : { generateIdentifier: options.generateIdentifier }),
     ...(options.transport === undefined
       ? {}
       : {
@@ -154,6 +160,10 @@ async function setup(message: WorkerInit): Promise<void> {
       : { enabled: false };
   const trackHandled = message.role === 'dispatcher' && message.cfg.trackHandled;
   const routed = cfg.routeAckMs !== undefined;
+  const generateIdentifier =
+    message.role === 'publisher'
+      ? deterministicIdentifiers(message.cfg.seed, message.cfg.w)
+      : undefined;
   const transport = routed
     ? fakeTransport(
         cfg.routeAckMs ?? 0,
@@ -172,6 +182,7 @@ async function setup(message: WorkerInit): Promise<void> {
       dispatcher,
       observer,
       ...(transport === undefined ? {} : { transport }),
+      ...(generateIdentifier === undefined ? {} : { generateIdentifier }),
     });
   } else {
     client = await new side.mongoDriver.MongoClient(url, {
@@ -182,6 +193,7 @@ async function setup(message: WorkerInit): Promise<void> {
       dispatcher,
       observer,
       ...(transport === undefined ? {} : { transport }),
+      ...(generateIdentifier === undefined ? {} : { generateIdentifier }),
     });
   }
   // Publishers register the handlers too, so that the store writes one delivery per handler (a route replaces them).
@@ -217,11 +229,13 @@ async function runDispatcher(startAt: number): Promise<void> {
   const began = nowMs();
   await activeBus.start();
   const flush = setInterval(() => {
-    send({ t: 'progress', handled: handledCount });
     if (trackHandled && tracked.length > 0) send({ t: 'handled', items: tracked.splice(0) });
   }, 200);
+  // Fine grained, so a window that ends after a fixed amount of work overshoots its target by milliseconds, not by 200 ms of work.
+  const progress = setInterval(() => send({ t: 'progress', handled: handledCount }), 20);
   while (!stopping) await sleep(50);
   clearInterval(flush);
+  clearInterval(progress);
   activeLoopDelay.disable();
   const cpu = process.cpuUsage(cpuStart);
   await activeBus.stop();
@@ -264,8 +278,7 @@ async function runPublisher(
   let issuedEvents = 0;
   const errorSamples: string[] = [];
 
-  const pickKey = (): string | undefined =>
-    cfg.keys.mode === 'none' ? undefined : `k${Math.floor(Math.random() * cfg.keys.count)}`;
+  const pickKey = deterministicKeys(cfg.seed, cfg.w, cfg.keys);
 
   const publishOnce = async (): Promise<void> => {
     const batchEvents: Bench[] = [];

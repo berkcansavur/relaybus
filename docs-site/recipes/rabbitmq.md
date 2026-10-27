@@ -33,6 +33,8 @@ const bus = new RelayBus({
 });
 ```
 
+Events of a [catalog](/concepts/event-catalogs) that share a routing key need one `route(produce(OrderEvents, { events: [...] }), { transport: 'rabbit', destination: 'billing.events' })` instead of a route per event; its optional `wireTypes` name the types for a `jsonEnvelope` codec.
+
 ## What you get
 
 - `publish` resolves only after the broker confirmed the message; otherwise the outbox keeps the delivery and retries.

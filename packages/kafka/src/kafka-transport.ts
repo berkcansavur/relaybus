@@ -23,7 +23,11 @@ import {
   toHandlerFailure,
   type KafkaSettings,
 } from './kafka-settings.js';
-import { assertCanSubscribe, type KafkaTransportState } from './kafka-subscription-rules.js';
+import {
+  assertCanSubscribe,
+  withDeclaredWireTypeSettings,
+  type KafkaTransportState,
+} from './kafka-subscription-rules.js';
 import { decodeRecord, deadLetterRecord } from './kafka-records.js';
 import { WakeableSleeps } from './wakeable-sleeps.js';
 
@@ -68,7 +72,7 @@ type MessageRoute = {
 export class KafkaTransport extends SubscribingTransport {
   readonly name: string;
   readonly system = 'kafka';
-  readonly #settings: KafkaSettings;
+  #settings: KafkaSettings;
   readonly #producer: KafkaProducerSession;
   readonly #groupJoin: GroupJoinWatch;
   readonly #sleeps = new WakeableSleeps();
@@ -113,6 +117,22 @@ export class KafkaTransport extends SubscribingTransport {
   /** Connects the producer. Called by the bus on start; `publish` also connects on demand. */
   async connect(): Promise<void> {
     await this.#producer.connected();
+  }
+
+  /**
+   * Checks the wire names a route or catalog declares and returns the function that makes the codec
+   * write and read events under them. The bus calls it when it is created, before the transport
+   * connects.
+   *
+   * @throws WireTypesUnsupportedError when the codec does not map type names (use `jsonEnvelope`),
+   * WireTypeCollisionError when a name clashes with one of the codec's own `wireTypes`.
+   */
+  declareWireTypes(wireTypes: Readonly<Record<string, string>>): () => void {
+    const settings = withDeclaredWireTypeSettings(this.#settings, {
+      wireTypes,
+      started: this.#state !== 'idle' || this.#producer.pending !== undefined,
+    });
+    return () => void (this.#settings = settings);
   }
 
   async publish(envelope: EventEnvelope, destination: string): Promise<void> {

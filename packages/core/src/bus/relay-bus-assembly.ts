@@ -97,6 +97,8 @@ export function assembleRelayBus<TTransaction>(
     settings,
     observation: DispatchObservation.create({ ...core, tracer: options.tracer }),
   });
+  const inboxAndOutbox = createInboxAndOutbox(core, hooks);
+  connections.commitWireTypes();
   return {
     ...core,
     maintenance,
@@ -105,7 +107,7 @@ export function assembleRelayBus<TTransaction>(
     dispatcherEnabled,
     shutdownTimeoutMs: settings.shutdownTimeoutMs,
     dispatcher,
-    ...createInboxAndOutbox(core, hooks),
+    ...inboxAndOutbox,
   };
 }
 

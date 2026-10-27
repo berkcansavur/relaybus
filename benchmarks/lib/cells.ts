@@ -1,6 +1,8 @@
 // The measurement plan: which cells run in the quick gate and in the full run, with fixed measurement windows.
 // Pure data; the fingerprint of a baseline includes it, so changing a window or a seed starts a fresh baseline.
 
+import { WORKLOAD_SEED } from './deterministic.ts';
+
 export type Store = 'pg' | 'mongo';
 export type Mode = 'quick' | 'full';
 
@@ -66,6 +68,13 @@ export interface DispatchCell extends CellBase, Windows, DispatchSettings {
   readonly template: string;
   readonly handlers: number;
   readonly routed?: boolean;
+  /**
+   * Fixed work: the sample lasts until this many deliveries were handled (`durationMs` is the time cap, and a sample that
+   * misses the target in time is invalid).
+   * Counters per delivery depend on how much of the template was consumed (pages touched, claims batching up), so a window
+   * of fixed duration measures something different on a fast and on a loaded machine. Without it the window has a fixed duration.
+   */
+  readonly targetDeliveries?: number;
 }
 
 export interface MixedCell extends CellBase, Windows, DispatchSettings {
@@ -85,6 +94,24 @@ export interface Plan {
   readonly cells: readonly Cell[];
   readonly templates: readonly TemplateDefinition[];
 }
+
+/** A template holds this many times the deliveries a cell handles, so the cell can never drain it. */
+export const TEMPLATE_SAFETY = 2;
+/** Template sizes are multiples of this, so the loading processes (2 of them, batches of up to 500) end on a whole batch. */
+const TEMPLATE_STEP = 10_000;
+
+/** Number of events a template needs so that a cell handling `targetDeliveries` deliveries cannot drain it. */
+export function templateEventsFor(targetDeliveries: number, handlers: number): number {
+  return Math.ceil((targetDeliveries * TEMPLATE_SAFETY) / handlers / TEMPLATE_STEP) * TEMPLATE_STEP;
+}
+
+/** Work of each quick dispatch cell: at least a second at the highest rate seen on a laptop (60k/s with 4 instances). */
+export const QUICK_TARGETS: Readonly<Record<string, number>> = {
+  'pg-disp-1i-tuned': 60_000,
+  'pg-disp-4i-tuned': 240_000,
+  'pg-disp-hot10-1i-tuned': 15_000,
+  'mongo-disp-1i-tuned': 30_000,
+};
 
 const DEFAULT_POOL: Record<Store, number> = { pg: 10, mongo: 100 };
 const DEFAULTS = { concurrency: 10, batchSize: 10, pollMs: 1000 } as const;
@@ -134,6 +161,7 @@ function dispatchCell(
   name: SettingsName,
   instances: number,
   routed = false,
+  targetDeliveries?: number,
 ): DispatchCell {
   return {
     kind: 'dispatch',
@@ -145,6 +173,7 @@ function dispatchCell(
     template,
     handlers,
     ...(routed ? { routed } : {}),
+    ...(targetDeliveries === undefined ? {} : { targetDeliveries }),
     ...settings(store, name, instances),
   };
 }
@@ -200,18 +229,33 @@ function mixedCell(
 
 /**
  * Quick gate: eight cells, fixed windows. Publish cells report events per second inside the window; dispatch cells
- * clone a preloaded database and count deliveries handled inside the window, so no run waits for a drain.
+ * clone a preloaded database and measure a fixed amount of handled deliveries, so no run waits for a drain.
  */
 export function quickPlan(pairs = 3): Plan {
   const publishWindow: Windows = { warmupMs: 1_500, durationMs: 5_000 };
-  const window: Windows = { warmupMs: 2_000, durationMs: 6_000 };
+  const target = (cellId: string): number => {
+    const work = QUICK_TARGETS[cellId];
+    if (work === undefined) throw new Error(`[cells](quickPlan) no target recorded for ${cellId}`);
+    return work;
+  };
+  const quickEvents = (cellId: string): number => templateEventsFor(target(cellId), 1);
+  // The time cap of a fixed work window; generous, because a loaded machine needs several times the usual time.
+  const capped: Windows = { warmupMs: 0, durationMs: 60_000 };
   return {
     mode: 'quick',
     pairs,
     templates: [
-      template('pg', 'unkeyed', 150_000, 1, NO_KEYS, 500),
-      template('pg', 'hot10', 20_000, 1, { mode: 'hot', count: 10 }, 100),
-      template('mongo', 'unkeyed', 50_000, 1, NO_KEYS, 500),
+      template('pg', 'unkeyed', quickEvents('pg-disp-1i-tuned'), 1, NO_KEYS, 500),
+      template('pg', 'unkeyed-wide', quickEvents('pg-disp-4i-tuned'), 1, NO_KEYS, 500),
+      template(
+        'pg',
+        'hot10',
+        quickEvents('pg-disp-hot10-1i-tuned'),
+        1,
+        { mode: 'hot', count: 10 },
+        100,
+      ),
+      template('mongo', 'unkeyed', quickEvents('mongo-disp-1i-tuned'), 1, NO_KEYS, 500),
     ],
     cells: [
       publishCell('pg', 'p8-b1', 'publish P=8 batch=1', publishWindow, pairs, {}),
@@ -227,45 +271,53 @@ export function quickPlan(pairs = 3): Plan {
         'pg',
         '1i-tuned',
         'dispatch 1 instance, tuned',
-        window,
+        capped,
         pairs,
         'pg-unkeyed',
         1,
         'tuned',
         1,
+        false,
+        target('pg-disp-1i-tuned'),
       ),
       dispatchCell(
         'pg',
         '4i-tuned',
         'dispatch 4 instances, tuned',
-        window,
+        capped,
         pairs,
-        'pg-unkeyed',
+        'pg-unkeyed-wide',
         1,
         'tuned',
         4,
+        false,
+        target('pg-disp-4i-tuned'),
       ),
       dispatchCell(
         'pg',
         'hot10-1i-tuned',
         'keyed dispatch hot:10, 1 instance, tuned',
-        window,
+        capped,
         pairs,
         'pg-hot10',
         1,
         'tuned',
         1,
+        false,
+        target('pg-disp-hot10-1i-tuned'),
       ),
       dispatchCell(
         'mongo',
         '1i-tuned',
         'dispatch 1 instance, tuned',
-        window,
+        capped,
         pairs,
         'mongo-unkeyed',
         1,
         'tuned',
         1,
+        false,
+        target('mongo-disp-1i-tuned'),
       ),
     ],
   };
@@ -532,6 +584,7 @@ export function filterPlan(plan: Plan, fragments: readonly string[]): Plan {
 export function planDescriptor(plan: Plan): unknown {
   return {
     mode: plan.mode,
+    seed: WORKLOAD_SEED,
     templates: plan.templates,
     cells: plan.cells.map((cell) =>
       Object.fromEntries(Object.entries(cell).filter(([name]) => name !== 'reps')),

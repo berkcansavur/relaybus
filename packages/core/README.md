@@ -72,6 +72,10 @@ await bus.transaction(async () => {
 });
 ```
 
+`bus.transaction(work, { isolationLevel: 'serializable', maxAttempts })` runs the transaction at an isolation
+level (PostgreSQL stores) and reruns `work` after a serialization failure; `work` may then run more than once. See
+[Serializable transactions](https://berkcansavur.github.io/relaybus/recipes/serializable-transactions).
+
 Use a database store in production: [`@relaybus/postgres`](../postgres) or
 [`@relaybus/mongodb`](../mongodb). `InMemoryEventStore` refuses to start when
 `NODE_ENV=production` unless `allowInProduction: true`.

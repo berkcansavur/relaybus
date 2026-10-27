@@ -1,12 +1,15 @@
+import { expandRoutes, type ExpandedRoutes, type RouteDefinition } from '../catalog-routes.js';
 import type { BusObservation, ReceiveOrigin } from '../bus-observation.js';
-import { ConfigurationError, toErrorInfo } from '../errors.js';
+import { ConfigurationError, WireTypesUnsupportedError, toErrorInfo } from '../errors.js';
 import type { EventEnvelope } from '../event.js';
 import type { HandlerRegistry } from '../handler-registry.js';
 import type { Notifier } from '../notifier.js';
-import type { InboundSubscriptionOptions, RouteOptions } from '../relay-bus-options.js';
+import type { InboundSubscriptionOptions } from '../relay-bus-options.js';
 import { DEFAULTS } from '../relay-bus-settings.js';
 import { DEFAULT_ROUTE_RETRY_POLICY } from '../retry-policy.js';
 import { groupRoutes, type RouteGroup } from '../route-groups.js';
+import { claimTransports } from './transport-claims.js';
+import type { TransportWireTypes } from '../route-wire-types.js';
 import type { Transport, TransportSubscriptionHooks } from '../transport.js';
 
 /** What the connections of a bus need. */
@@ -19,7 +22,7 @@ export type BusConnectionsParts = {
 /** The transports, routes and subscriptions a bus was configured with. */
 export type BusConnectionsOptions = {
   readonly transports: readonly Transport[];
-  readonly routes: readonly RouteOptions[];
+  readonly routes: readonly RouteDefinition[];
   readonly subscriptions: readonly InboundSubscriptionOptions[];
 };
 
@@ -31,6 +34,7 @@ export class BusConnections {
   readonly #parts: BusConnectionsParts;
   readonly #transports = new Map<string, Transport>();
   readonly #subscriptions: readonly InboundSubscriptionOptions[];
+  #pendingWireTypes: (() => void) | undefined;
 
   constructor(parts: BusConnectionsParts, subscriptions: readonly InboundSubscriptionOptions[]) {
     this.#parts = parts;
@@ -50,13 +54,23 @@ export class BusConnections {
       }
       this.#transports.set(transport.name, transport);
     }
-    this.#registerRoutes(routes);
+    const { wireTypes } = this.#registerRoutes(expandRoutes(routes));
     for (const subscription of this.#subscriptions) {
       const transport = this.#requireTransport(subscription.transport);
       if (transport.subscribe === undefined) {
         throw new ConfigurationError(`Transport '${transport.name}' cannot subscribe`);
       }
     }
+    this.#pendingWireTypes = this.#prepareWireTypes(wireTypes);
+  }
+
+  /**
+   * Applies the wire names the routes declared. The bus calls it last, after every check of its
+   * options, so a refused configuration leaves the transports as they were.
+   */
+  commitWireTypes(): void {
+    this.#pendingWireTypes?.();
+    this.#pendingWireTypes = undefined;
   }
 
   /** True while every transport reports itself ready. */
@@ -109,13 +123,38 @@ export class BusConnections {
     };
   }
 
-  #registerRoutes(routes: readonly RouteOptions[]): void {
+  #registerRoutes({ routes, wireTypes }: ExpandedRoutes): { wireTypes: TransportWireTypes } {
     for (const route of routes) {
       this.#requireTransport(route.transport);
     }
     for (const group of groupRoutes(routes)) {
       this.#registerRoute(group);
     }
+    return { wireTypes };
+  }
+
+  /**
+   * Hands the wire names that catalog routes declare to the transports whose codecs write them:
+   * every transport checks its names first, then all apply them. A transport carries one wire
+   * format, so a transport that two buses use cannot take names declared by either of them.
+   */
+  #prepareWireTypes(wireTypes: TransportWireTypes): () => void {
+    const applies = [...wireTypes].map(([name, types]) => {
+      const transport = this.#transports.get(name)!;
+      if (transport.declareWireTypes === undefined) {
+        throw new WireTypesUnsupportedError(
+          `Transport '${name}' cannot map event types to wire names, but routes or catalogs declare them for: ${Object.keys(types).join(', ')}`,
+        );
+      }
+      return transport.declareWireTypes(types);
+    });
+    const claim = claimTransports([...this.#transports.values()], new Set(wireTypes.keys()));
+    return () => {
+      for (const apply of applies) {
+        apply();
+      }
+      claim();
+    };
   }
 
   /** Registers one handler for every route to a destination, so a key's events reach it in commit order. */

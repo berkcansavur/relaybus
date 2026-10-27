@@ -16,6 +16,7 @@ Read the numbers as ratios on one laptop, not as capacity planning. Where a cell
 - [Mixed load and latency](#mixed-load-and-latency)
 - [What the database does per delivery](#what-the-database-does-per-delivery)
 - [Where it is not better](#where-it-is-not-better)
+- [0.5.0 vs 0.4.1](#_0-5-0-vs-0-4-1)
 - [0.4.0 vs 0.3.1](#_0-4-0-vs-0-3-1)
 - [0.3.0 vs 0.2.0](#_0-3-0-vs-0-2-0)
 - [Deep dives](#deep-dives)
@@ -165,6 +166,36 @@ In 0.1.0 a delivery row was updated three times (claim, lease renewals, completi
 - **MongoDB batch-100 publish:** 31,600 to 31,167 events/s (0.98x, three samples): no change, and a higher p99 for the transaction (79 ms to 126 ms, interval inconclusive).
 - **Mixed load near saturation:** p99 can be higher than 0.1.0's, see above.
 - **Single sample cells** may move by 10 % or more in either direction on a re-run. The directions are consistent with the exact counters, which is why they are listed.
+
+## 0.5.0 vs 0.4.1
+
+0.5.0 adds catalog routes, wire names and transactions at an isolation level; without `isolationLevel` a transaction runs the statements of 0.4.1. The numbers agree: publish and dispatch on PostgreSQL are within noise of 0.4.1, and the statements per event and per delivery are identical. Every sample was valid.
+
+Machine fingerprint `2c551bf14f01` (the setup has changed since the runs above), candidate `adadab2` against `v0.4.1`, interleaved. Publish was measured with **6 samples per side**, dispatch with **3**. The machine was busy (load average 5 to 28 during the publish run), which is why single pairs move by up to 30 % either way. Throughput is candidate / base, the median of the per-pair ratios:
+
+| Scenario                                     | Ratio | Interval (95 %) | Verdict      |
+| -------------------------------------------- | ----: | --------------- | ------------ |
+| PostgreSQL publish, P=8, 1 event per call    | 0.998 | 0.85 to 1.05    | inconclusive |
+| PostgreSQL publish, P=8, 100 per call        | 1.006 | 0.84 to 1.20    | inconclusive |
+| PostgreSQL publish, 100 per call, 5 handlers | 0.921 | 0.84 to 1.18    | inconclusive |
+| PostgreSQL dispatch, 1 instance, `tuned`     | 1.019 | -               | no change    |
+| PostgreSQL dispatch, 4 instances, `tuned`    | 1.014 | -               | within noise |
+| PostgreSQL dispatch, 10 hot keys, `tuned`    | 0.964 | -               | within noise |
+
+Database counters: publish counters (18 per cell) are all within 3 %, statements per event 1.000x. On the dispatch cells statements per delivery are 0.997x to 1.001x, WAL bytes per delivery 0.98x to 1.02x, and `lanes` updates per delivery 1.09x (1 instance), 1.08x (4 instances) and 1.00x (hot keys), inside the 15 % that this counter is gated at (it follows the timing of concurrent claims). The dispatch intervals are left out: that run stopped at the MongoDB cells, so its report was not written and the ratios above are computed from its stored samples.
+
+MongoDB was not measured. On this machine the harness could not load the MongoDB template of the 0.4.1 side: a 500-event transaction of the loader ran past the 5 s transaction budget, three times. The candidate side was never reached, so this says nothing about 0.5.0 on MongoDB; the MongoDB store has no change in this release.
+
+### Changes to the gate
+
+From this release the quick gate generates the same event ids and keys on both sides (a seeded generator per publisher), so the lane layout no longer differs between base and candidate; the dispatch cells measure a fixed amount of work instead of a fixed time; counters of interleaved runs are judged per pair; and `lanes` updates per delivery gate at 15 % instead of 3 %. Identical code now passes against itself (two runs), and a deliberate regression (one extra `lanes` update per completion batch) fails it at +97 % (1 instance) and +85 % (4 instances).
+
+### Reports
+
+The raw samples and environment are in `benchmarks/results/runs/`:
+
+- `2026-10-27T10-16-43-144Z`: the publish cells, 6 pairs (report written, gate PASS).
+- `2026-10-27T10-05-19-668Z`: the PostgreSQL dispatch cells, 3 pairs (stopped at the MongoDB cells, no report).
 
 ## 0.4.0 vs 0.3.1
 

@@ -18,6 +18,9 @@ export const PG_SETTINGS: Readonly<Record<string, string>> = {
   min_wal_size: '1GB',
   checkpoint_timeout: '10min',
   random_page_cost: '1.1',
+  // A page is logged in full on its first change after a checkpoint, so full page images depend on when checkpoints and
+  // page touches happen, not on the code; they swing WAL bytes per delivery by 2-3x between identical samples.
+  full_page_writes: 'off',
   synchronous_commit: process.env['BENCH_SYNC_COMMIT'] ?? 'on',
   shared_preload_libraries: 'pg_stat_statements',
   'pg_stat_statements.max': '10000',

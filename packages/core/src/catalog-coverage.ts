@@ -98,6 +98,11 @@ export function produce<
   return declare(catalog, { role: 'produce', options });
 }
 
+/** True for a declaration created by {@link consume} or {@link produce}. */
+export function isCatalogDeclaration(value: unknown): value is CatalogDeclaration {
+  return typeof value === 'object' && value !== null && declarations.has(value);
+}
+
 function declare<TCatalog extends Catalog, TName extends keyof TCatalog>(
   catalog: TCatalog,
   { role, options }: { readonly role: CatalogRole; readonly options: CatalogEventSelection<TName> },

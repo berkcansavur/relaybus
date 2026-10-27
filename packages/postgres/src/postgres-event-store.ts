@@ -14,6 +14,8 @@ import {
   type PurgeRequest,
   type PurgeResult,
   type RelayBusLogger,
+  type TransactionIsolationLevel,
+  TRANSACTION_ISOLATION_LEVELS,
 } from '@relaybus/core';
 import { HandedOutLedger } from '@relaybus/core/internal';
 import { Client, Pool, type PoolClient } from 'pg';
@@ -22,6 +24,7 @@ import { resolvePostgresNames } from './names.js';
 import { NotificationListener } from './notification-listener.js';
 import { PgExecutor } from './pg-executor.js';
 import { withRootPool } from './root-pool-executor.js';
+import { isPostgresSerializationFailure } from './serialization-failure.js';
 import { PostgresAppend } from './postgres-append.js';
 import { PostgresClaims } from './postgres-claim.js';
 import { PostgresCompletion } from './postgres-completion.js';
@@ -32,6 +35,7 @@ import type { PostgresStoreState } from './postgres-store-state.js';
 import { resolveStoreSettings, type PostgresEventStoreOptions } from './postgres-store-options.js';
 import { createPostgresSchemaStatements, version040SchemaMarker } from './schema.js';
 import { PostgresStatements } from './statements.js';
+import { inIsolatedTransaction } from './transaction-isolation.js';
 import { inBudgetedTransaction } from './transaction-timeouts.js';
 
 export type {
@@ -142,6 +146,21 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     await this.#setup.run();
   }
 
+  /** Every level PostgreSQL has (it runs `read uncommitted` as `read committed`, which the bus does not offer). */
+  readonly isolationLevels: readonly TransactionIsolationLevel[] = TRANSACTION_ISOLATION_LEVELS;
+
+  /**
+   * True for a serialization failure (SQLSTATE `40001`) raised through any executor, including
+   * Prisma's `P2034` and the wrappers of TypeORM and Drizzle; a custom executor can add its own
+   * test with {@link PostgresExecutor.isSerializationFailure}.
+   */
+  isSerializationFailure(error: unknown): boolean {
+    return (
+      isPostgresSerializationFailure(error) ||
+      this.#state.executor.isSerializationFailure?.(error) === true
+    );
+  }
+
   /**
    * Runs `work` in a transaction of the executor. With `options.timeoutMs` (from `bus.transaction`)
    * the server holds the transaction to the budget: `statement_timeout`, and for executors with
@@ -149,6 +168,9 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
    * `transaction_timeout`, all scoped to the transaction. An executor with `transactionWithBudget`
    * (`PgExecutor`) sets them with `BEGIN`, so the budget costs no round trip; on a pool the store
    * created they are kept per connection and sent only when the connection does not have them yet.
+   * With `options.isolationLevel` the transaction runs at that level: `PgExecutor` sends it with
+   * `BEGIN ISOLATION LEVEL ...` (no extra round trip), any other executor as `SET TRANSACTION
+   * ISOLATION LEVEL ...` before the budget statement.
    */
   async transaction<T>(
     work: (transaction: TTransaction) => Promise<T>,
@@ -163,13 +185,25 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
         this.#state.ownTransactions.delete(transaction);
       }
     };
-    const result = await (options === undefined
-      ? this.#state.executor.transaction(tracked)
-      : inBudgetedTransaction(this.#state, { work: tracked, timeoutMs: options.timeoutMs }));
+    const result = await this.#open(tracked, options);
     if (own.wake) {
       this.#appender.wakeAfterCommit();
     }
     return result;
+  }
+
+  /** Opens the transaction `work` runs in: plain, held to the budget, or at an isolation level too. */
+  #open<T>(
+    work: (transaction: TTransaction) => Promise<T>,
+    options: EventStoreTransactionOptions | undefined,
+  ): Promise<T> {
+    if (options === undefined) {
+      return this.#state.executor.transaction(work);
+    }
+    const { timeoutMs, isolationLevel } = options;
+    return isolationLevel === undefined
+      ? inBudgetedTransaction(this.#state, { work, timeoutMs })
+      : inIsolatedTransaction(this.#state, { work, timeoutMs, isolationLevel });
   }
 
   /**

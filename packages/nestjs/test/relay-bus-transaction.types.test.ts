@@ -24,6 +24,17 @@ describe('@RelayBusTransaction types', () => {
           return Promise.resolve();
         }
 
+        @RelayBusTransaction({ isolationLevel: 'serializable', maxAttempts: 5 })
+        reserve(): Promise<void> {
+          return Promise.resolve();
+        }
+
+        // @ts-expect-error: only the levels relaybus knows
+        @RelayBusTransaction({ isolationLevel: 'snapshot' })
+        snapshot(): Promise<void> {
+          return Promise.resolve();
+        }
+
         // @ts-expect-error: @RelayBusTransaction() needs a method that returns a Promise
         @RelayBusTransaction()
         count(): number {

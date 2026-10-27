@@ -1,6 +1,13 @@
 export { systemClock, type Clock } from './clock.js';
 export { MAX_TIMER_DELAY_MS, toMilliseconds, type Duration } from './duration.js';
 export { CatalogPublisher, type PublishTarget } from './catalog-publisher.js';
+export {
+  catalogWireTypes,
+  route,
+  type CatalogRoute,
+  type CatalogRouteOptions,
+  type RouteDefinition,
+} from './catalog-routes.js';
 export { consume, produce, type CatalogDeclaration, type CatalogRole } from './catalog-coverage.js';
 export {
   defineCatalog,
@@ -27,6 +34,7 @@ export {
   ConfigurationError,
   DispatcherStoppedError,
   DrainIncompleteError,
+  DuplicateRouteEventError,
   EventValidationError,
   HandlerTimeoutError,
   InvalidEnvelopeError,
@@ -34,8 +42,12 @@ export {
   LifecycleError,
   NonRetryableError,
   RelayBusError,
+  TransactionIsolationConflictError,
   TransactionRequiredError,
   TransactionTimeoutError,
+  UnknownCatalogEventError,
+  WireTypeCollisionError,
+  WireTypesUnsupportedError,
   toErrorInfo,
   type ErrorInfo,
   type ValidationIssue,
@@ -56,6 +68,7 @@ export {
 } from './event.js';
 export {
   DELIVERY_STATUSES,
+  TRANSACTION_ISOLATION_LEVELS,
   type AppendEntry,
   type AppendResult,
   type ClaimRequest,
@@ -71,6 +84,7 @@ export {
   type NewDelivery,
   type PurgeRequest,
   type PurgeResult,
+  type TransactionIsolationLevel,
 } from './event-store.js';
 export type {
   EventHandler,
@@ -108,6 +122,7 @@ export {
   type RetentionOptions,
   type RouteOptions,
   type TransactionMode,
+  type TransactionOptions,
   type UnroutedEventPolicy,
 } from './relay-bus-options.js';
 export {

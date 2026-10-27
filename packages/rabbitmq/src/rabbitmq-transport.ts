@@ -1,5 +1,14 @@
-import { ConfigurationError, type CloseOptions, type EventEnvelope } from '@relaybus/core';
-import { SubscribingTransport, type TransportSubscription } from '@relaybus/core/internal';
+import {
+  ConfigurationError,
+  WireTypesUnsupportedError,
+  type CloseOptions,
+  type EventEnvelope,
+} from '@relaybus/core';
+import {
+  SubscribingTransport,
+  withDeclaredWireTypes,
+  type TransportSubscription,
+} from '@relaybus/core/internal';
 import type { AmqpConnection, AmqpMessage } from './amqp-types.js';
 import {
   ConfirmedPublishing,
@@ -10,6 +19,7 @@ import {
 import { ConnectionSupervisor } from './connection-supervisor.js';
 import { RabbitMqUnavailableError } from './errors.js';
 import {
+  codecSettings,
   resolveQueueName,
   resolveSettings,
   type RabbitMqTransportOptions,
@@ -55,7 +65,7 @@ interface Subscription {
 export class RabbitMqTransport extends SubscribingTransport {
   readonly name: string;
   readonly system = 'rabbitmq';
-  readonly #settings: ResolvedTransportSettings;
+  #settings: ResolvedTransportSettings;
   readonly #supervisor: ConnectionSupervisor;
   readonly #publishing: ConfirmedPublishing;
   /** Serializes topology work so a subscription never races a reconnect. */
@@ -63,6 +73,8 @@ export class RabbitMqTransport extends SubscribingTransport {
   #live: LiveConnection | undefined;
   #subscription: Subscription | undefined;
   #closing: Promise<void> | undefined;
+  /** Set when the transport first connects, publishes or subscribes: its wire format is fixed from then on. */
+  #used = false;
 
   constructor(options: RabbitMqTransportOptions) {
     super();
@@ -101,6 +113,7 @@ export class RabbitMqTransport extends SubscribingTransport {
 
   /** Connects to the broker. Rejects when it is unreachable unless `failOnConnectError` is false. */
   async connect(): Promise<void> {
+    this.#used = true;
     await this.#supervisor.start(this.#settings.failOnConnectError);
   }
 
@@ -115,7 +128,28 @@ export class RabbitMqTransport extends SubscribingTransport {
    * @throws {UnroutableMessageError} no queue is bound to `destination` (unless `allowUnroutable`)
    * @throws whatever the `codec`'s `encode` throws, such as {@link RabbitMqUnencodableEventError}
    */
+  /**
+   * Checks the wire names a route or catalog declares and returns the function that makes the codec
+   * write and read events under them. The bus calls it when it is created, before the transport
+   * connects.
+   *
+   * @throws WireTypesUnsupportedError when the codec does not map type names (use `jsonEnvelope`),
+   * WireTypeCollisionError when a name clashes with one of the codec's own `wireTypes`.
+   */
+  declareWireTypes(wireTypes: Readonly<Record<string, string>>): () => void {
+    if (this.#used) {
+      throw new WireTypesUnsupportedError(
+        `Transport '${this.name}' already started; declare wire names before it connects or subscribes`,
+      );
+    }
+    const codec = withDeclaredWireTypes(this.#settings.codec, { wireTypes, transport: this.name });
+    return () => {
+      this.#settings = { ...this.#settings, ...codecSettings(codec) };
+    };
+  }
+
   async publish(envelope: EventEnvelope, destination: string): Promise<void> {
+    this.#used = true;
     assertShortString('Destination (routing key)', destination);
     const { content, options } = this.#settings.encode(envelope);
     await this.#publishing.publish(this.#live?.publisher, {
@@ -137,6 +171,7 @@ export class RabbitMqTransport extends SubscribingTransport {
     onMessage,
     hooks,
   }: TransportSubscription): Promise<void> {
+    this.#used = true;
     if (this.#subscription !== undefined) {
       throw new ConfigurationError(
         `Transport '${this.name}' already has a subscription; create another transport for another consumer group`,
@@ -209,6 +244,7 @@ export class RabbitMqTransport extends SubscribingTransport {
    * the connection's socket is destroyed instead of waiting for the broker.
    */
   async close(options: CloseOptions = {}): Promise<void> {
+    this.#used = true;
     const { signal } = options;
     const force = (): void => this.#supervisor.forceClose();
     if (signal?.aborted === true) {

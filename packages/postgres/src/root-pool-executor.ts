@@ -21,6 +21,15 @@ export function withRootPool<TTransaction>(
           transactionWithBudget: (work, timeoutMs) =>
             executor.transactionWithBudget!(work, timeoutMs),
         }),
+    ...(executor.transactionWithIsolation === undefined
+      ? {}
+      : {
+          transactionWithIsolation: (work, options) =>
+            executor.transactionWithIsolation!(work, options),
+        }),
+    ...(executor.isSerializationFailure === undefined
+      ? {}
+      : { isSerializationFailure: (error) => executor.isSerializationFailure!(error) }),
     // eslint-disable-next-line relaybus/max-two-params -- PostgresExecutor port signature
     query: (sql, parameters, transaction, options) =>
       transaction === undefined

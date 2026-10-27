@@ -1,5 +1,9 @@
 import type { EventEnvelope } from '@relaybus/core';
-import { createJsonEnvelopeFormat, type JsonEnvelopeMapping } from '@relaybus/core/internal';
+import {
+  createJsonEnvelopeFormat,
+  mergeWireTypes,
+  type JsonEnvelopeMapping,
+} from '@relaybus/core/internal';
 import type { AmqpMessage } from './amqp-types.js';
 import { MalformedMessageError, RabbitMqUnencodableEventError } from './errors.js';
 import {
@@ -37,6 +41,12 @@ import {
 export interface RabbitMqCodec {
   readonly encode: (envelope: EventEnvelope) => EncodedMessage;
   readonly decode: RabbitMqMessageDecoder;
+  /**
+   * Returns this codec with more wire names for event types, which a route or catalog declares
+   * (`wireTypes` of `route(...)` or `defineCatalog`). Only a codec that maps type names has it
+   * ({@link jsonEnvelope}); declaring wire names for a transport whose codec lacks it fails at boot.
+   */
+  readonly withWireTypes?: (wireTypes: Readonly<Record<string, string>>) => RabbitMqCodec;
 }
 
 /**
@@ -103,6 +113,8 @@ export function jsonEnvelope(mapping: RabbitMqJsonEnvelopeMapping): RabbitMqCode
   });
   const contentType = mapping.contentType ?? DEFAULT_CONTENT_TYPE;
   return {
+    withWireTypes: (declared) =>
+      jsonEnvelope({ ...mapping, wireTypes: mergeWireTypes(mapping, declared) }),
     encode: (envelope) => {
       assertJsonPayload(envelope.payload, envelope.id);
       assertShortString('Event id', envelope.id);

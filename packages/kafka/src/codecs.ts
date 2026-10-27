@@ -1,6 +1,7 @@
 import { ConfigurationError, type EventEnvelope } from '@relaybus/core';
 import {
   createJsonEnvelopeFormat,
+  mergeWireTypes,
   type JsonEnvelopeFormat,
   type JsonEnvelopeMapping,
 } from '@relaybus/core/internal';
@@ -40,6 +41,12 @@ export type KafkaEncodedRecord = KafkaOutgoingMessage & { readonly timestamp?: s
 export interface KafkaCodec {
   readonly encode: (envelope: EventEnvelope) => KafkaEncodedRecord;
   readonly decode: KafkaMessageDecoder;
+  /**
+   * Returns this codec with more wire names for event types, which a route or catalog declares
+   * (`wireTypes` of `route(...)` or `defineCatalog`). Only a codec that maps type names has it
+   * ({@link jsonEnvelope}); declaring wire names for a transport whose codec lacks it fails at boot.
+   */
+  readonly withWireTypes?: (wireTypes: Readonly<Record<string, string>>) => KafkaCodec;
 }
 
 /**
@@ -131,6 +138,8 @@ export function jsonEnvelope(mapping: KafkaJsonEnvelopeMapping): KafkaCodec {
       : contentType;
   const recordKey = resolveRecordKey(mapping.recordKey);
   return {
+    withWireTypes: (declared) =>
+      jsonEnvelope({ ...mapping, wireTypes: mergeWireTypes(mapping, declared) }),
     encode: (envelope) => encodeJson(envelope, { format, stampsTime, ownHeaders, recordKey }),
     decode: (record) => decodeJson(record, format),
   };

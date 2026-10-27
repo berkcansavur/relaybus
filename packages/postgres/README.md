@@ -91,6 +91,16 @@ released. The other adapters keep only `statement_timeout`, because a server-end
 (the optional executor method `transactionWithBudget`), so the budget costs no extra round trip; executors without it
 send them as the first statement of the transaction.
 
+**Isolation levels.** `bus.transaction(work, { isolationLevel })` opens the transaction at `'read committed'`,
+`'repeatable read'` or `'serializable'`, and at the last two reruns `work` after a serialization failure
+(SQLSTATE `40001`; see the `@relaybus/nestjs` README). `PgExecutor` sends `BEGIN ISOLATION LEVEL ...` in the same round
+trip as the budget settings, so a level costs no statement. The TypeORM adapter uses TypeORM's own `transaction('SERIALIZABLE', ...)` (so the level is set before TypeORM subscribers run). Any other executor gets `SET TRANSACTION ISOLATION LEVEL ...`
+as the first statement of the transaction and the budget statement second (PostgreSQL refuses the level once a query ran,
+and the budget's `set_config` is a query). The store recognizes `40001` through `pg` (also what Kysely and Knex pass
+through), TypeORM's `driverError`, the `cause` of a Drizzle error and Prisma's `P2034`, `meta.code` and driver-adapter
+errors. A custom executor implements the optional `transactionWithIsolation` to send the level with its `BEGIN`, and the
+optional `isSerializationFailure` for an error shape the store does not know.
+
 Where the budget lives depends on who owns the pool:
 
 - **A pool the store created** (`connectionString`/`poolConfig`): each connection keeps the budget as a session setting.

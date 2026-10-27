@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { filterPlan, fullPlan, planDescriptor, quickPlan } from '../lib/cells.ts';
+import {
+  filterPlan,
+  fullPlan,
+  planDescriptor,
+  QUICK_TARGETS,
+  quickPlan,
+  TEMPLATE_SAFETY,
+  templateEventsFor,
+} from '../lib/cells.ts';
+import { WORKLOAD_SEED } from '../lib/deterministic.ts';
 import { fingerprintOf } from '../lib/baseline.ts';
 
 describe('plans', () => {
@@ -42,7 +51,9 @@ describe('plans', () => {
     expect(
       plan.cells.every(
         (cell) =>
-          cell.reps === 4 && cell.warmupMs + cell.durationMs <= 10_000 && cell.kind !== 'mixed',
+          cell.reps === 4 &&
+          cell.kind !== 'mixed' &&
+          (cell.kind === 'dispatch' || cell.warmupMs + cell.durationMs <= 10_000),
       ),
     ).toBe(true);
   });
@@ -68,5 +79,40 @@ describe('plans', () => {
     expect(fingerprintOf(planDescriptor(quickPlan()))).not.toBe(
       fingerprintOf(planDescriptor(fullPlan())),
     );
+  });
+
+  it('sizes a template from the work of its cell, with a safety factor, in whole loading batches', () => {
+    expect(templateEventsFor(200_000, 1)).toBe(400_000);
+    expect(templateEventsFor(200_000, 5)).toBe(80_000);
+    expect(templateEventsFor(1, 1)).toBe(10_000);
+    expect(templateEventsFor(60_000, 1)).toBeGreaterThanOrEqual(60_000 * TEMPLATE_SAFETY);
+  });
+
+  it('gives every quick dispatch cell a fixed amount of work that its template cannot run out of', () => {
+    const plan = quickPlan();
+    const dispatch = plan.cells.filter((cell) => cell.kind === 'dispatch');
+    expect(dispatch.map((cell) => cell.id).sort()).toEqual(Object.keys(QUICK_TARGETS).sort());
+    for (const cell of dispatch) {
+      const template = plan.templates.find((candidate) => candidate.name === cell.template);
+      expect(cell.targetDeliveries).toBe(QUICK_TARGETS[cell.id]);
+      expect((template?.events ?? 0) * cell.handlers).toBeGreaterThanOrEqual(
+        (cell.targetDeliveries ?? Number.NaN) * TEMPLATE_SAFETY,
+      );
+    }
+    expect(plan.templates.find((candidate) => candidate.name === 'pg-unkeyed-wide')?.events).toBe(
+      480_000,
+    );
+  });
+
+  it('leaves the full run on fixed duration windows', () => {
+    expect(
+      fullPlan().cells.every(
+        (cell) => cell.kind !== 'dispatch' || cell.targetDeliveries === undefined,
+      ),
+    ).toBe(true);
+  });
+
+  it('starts a fresh baseline when the workload seed changes', () => {
+    expect((planDescriptor(quickPlan()) as { seed: number }).seed).toBe(WORKLOAD_SEED);
   });
 });

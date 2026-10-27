@@ -50,7 +50,7 @@ function counterSummary(comparison: CellComparison): string {
   );
   const moved = counters.filter((metric) => metric.verdict !== 'unchanged');
   if (counters.length === 0) return '-';
-  if (moved.length === 0) return `${counters.length} counters within 3 %`;
+  if (moved.length === 0) return `${counters.length} counters within tolerance`;
   return moved
     .map(
       (metric) =>
@@ -88,7 +88,7 @@ export function renderReport(input: ReportInput): string {
   lines.push(
     '## Summary',
     '',
-    'Ratios are candidate / base (median based). Throughput: higher is better; latency: lower is better. Intervals are 95 % bootstrap intervals; with fewer than 3 samples a ratio is shown without a verdict. Counters are database-side counters per event (publish) or per delivery (dispatch) and gate at 3 %.',
+    'Ratios are candidate / base (median based). Throughput: higher is better; latency: lower is better. Intervals are 95 % bootstrap intervals; with fewer than 3 samples a ratio is shown without a verdict. Counters are database-side counters per event (publish) or per delivery (dispatch) and gate at 3 % (lanes.updPerUnit, which follows the timing of concurrent claims: 15 %), judged per pair when the run was interleaved.',
     '',
     '| cell | samples (base/candidate) | throughput ratio | p99 latency ratio | counters | validation | notes |',
     '|---|---|---|---|---|---|---|',

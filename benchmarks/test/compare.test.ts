@@ -61,6 +61,63 @@ describe('counters', () => {
     expect(find(result, 'ctr.deliveries.updPerUnit').verdict).toBe('improvement');
   });
 
+  it('judges paired runs by the median of the per-pair ratios, so drift over the run cancels', () => {
+    // The counter drifts from 0.045 to 0.057 over the run on both sides; every pair is within 5 %, the medians alone differ by 3.3 %.
+    const base = series('base', [0.0455, 0.0449, 0.0446, 0.0563, 0.0563], 'ctr.statementsPerUnit');
+    const candidate = series(
+      'candidate',
+      [0.045, 0.047, 0.0454, 0.0536, 0.057],
+      'ctr.statementsPerUnit',
+    );
+    const paired = find(
+      compareCell('cell', base, candidate, { pairing: 'paired' }),
+      'ctr.statementsPerUnit',
+    );
+    expect(paired.verdict).toBe('unchanged');
+    expect(paired.ratio).toBeCloseTo(1.0124, 3);
+    expect(find(compareCell('cell', base, candidate), 'ctr.statementsPerUnit').verdict).toBe(
+      'regression',
+    );
+  });
+
+  it('still flags a counter that rises in every pair, and keeps zero baselines on the medians', () => {
+    const base = series('base', [0.045, 0.05, 0.056], 'ctr.deliveries.updPerUnit');
+    const candidate = base.map((entry) => ({
+      ...entry,
+      side: 'candidate' as const,
+      metrics: {
+        'ctr.deliveries.updPerUnit': (entry.metrics['ctr.deliveries.updPerUnit'] ?? 0) + 1,
+      },
+    }));
+    const result = compareCell('cell', base, candidate, { pairing: 'paired' });
+    expect(find(result, 'ctr.deliveries.updPerUnit').verdict).toBe('regression');
+    const zero = compareCell(
+      'cell',
+      series('base', [0, 0, 0], 'ctr.x'),
+      series('candidate', [1, 1, 1], 'ctr.x'),
+      {
+        pairing: 'paired',
+      },
+    );
+    expect(find(zero, 'ctr.x').verdict).toBe('regression');
+  });
+
+  it('gives the timing dependent lane counter a wide tolerance and every other counter 3 %', () => {
+    const base = [
+      sample('base', 0, { 'ctr.lanes.updPerUnit': 0.04, 'ctr.deliveries.updPerUnit': 1 }),
+    ];
+    const candidate = [
+      sample('candidate', 0, { 'ctr.lanes.updPerUnit': 0.044, 'ctr.deliveries.updPerUnit': 1.1 }),
+    ];
+    const result = compareCell('cell', base, candidate);
+    expect(find(result, 'ctr.lanes.updPerUnit').verdict).toBe('unchanged');
+    expect(find(result, 'ctr.deliveries.updPerUnit').verdict).toBe('regression');
+    const doubled = compareCell('cell', base, [
+      sample('candidate', 0, { 'ctr.lanes.updPerUnit': 0.08, 'ctr.deliveries.updPerUnit': 1 }),
+    ]);
+    expect(find(doubled, 'ctr.lanes.updPerUnit').verdict).toBe('regression');
+  });
+
   it('treats a higher HOT update share as an improvement', () => {
     const result = compareCell(
       'cell',

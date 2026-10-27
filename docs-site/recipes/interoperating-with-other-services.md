@@ -282,7 +282,7 @@ codec: jsonEnvelope({
 }),
 ```
 
-A listed type is written under its wire name and read back from it; any other type travels as itself. Wire names must be unique, an unlisted event type that equals another type's wire name is refused on write, and `wireTypes` cannot be combined with a `fixed` type. A record without a key reads as an event without a key. relaybus still keeps the outbox order of one event key, but keyless records are spread over partitions by the producer, so consumers see events of one key in order only when the key reaches the wire.
+A listed type is written under its wire name and read back from it; any other type travels as itself. The same names can be declared next to the events instead: `wireTypes` of `defineCatalog` (by catalog event name) and of `route(produce(Catalog, { events }), { ... })` reach the codec of the route's transport when the bus is created and write the same bytes, so a catalog shared between services carries its wire names with it; see [Wire names](/concepts/event-catalogs#wire-names-next-to-the-catalog-and-the-route). Wire names must be unique, an unlisted event type that equals another type's wire name is refused on write, and `wireTypes` cannot be combined with a `fixed` type. A record without a key reads as an event without a key. relaybus still keeps the outbox order of one event key, but keyless records are spread over partitions by the producer, so consumers see events of one key in order only when the key reaches the wire.
 
 ## Prove the format with captured messages
 

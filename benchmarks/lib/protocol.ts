@@ -10,6 +10,8 @@ export interface PublisherConfig {
   readonly batch: number;
   readonly handlers: number;
   readonly keys: KeySpec;
+  /** Seed of the event ids and ordering keys this worker generates; the same seed gives the same database content on every side. */
+  readonly seed: number;
   /** Route events to the fake transport instead of registering local handlers (ack delay in ms). */
   readonly routeAckMs?: number;
   readonly pool: number;

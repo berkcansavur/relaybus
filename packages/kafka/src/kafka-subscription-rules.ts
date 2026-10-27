@@ -1,4 +1,5 @@
-import { ConfigurationError } from '@relaybus/core';
+import { ConfigurationError, WireTypesUnsupportedError } from '@relaybus/core';
+import { withDeclaredWireTypes } from '@relaybus/core/internal';
 import { TransportClosedError } from './errors.js';
 import { deadLetterTopicFor, type KafkaSettings } from './kafka-settings.js';
 
@@ -42,4 +43,24 @@ export function assertCanSubscribe(
       );
     }
   }
+}
+
+/**
+ * The settings with the codec taking `wireTypes` too. Wire names go into the codec before the
+ * transport connects or subscribes; after that it is too late.
+ */
+export function withDeclaredWireTypeSettings(
+  settings: KafkaSettings,
+  {
+    wireTypes,
+    started,
+  }: { readonly wireTypes: Readonly<Record<string, string>>; readonly started: boolean },
+): KafkaSettings {
+  if (started) {
+    throw new WireTypesUnsupportedError(
+      `Transport '${settings.name}' already started; declare wire names before it connects or subscribes`,
+    );
+  }
+  const codec = withDeclaredWireTypes(settings.codec, { wireTypes, transport: settings.name });
+  return { ...settings, codec };
 }

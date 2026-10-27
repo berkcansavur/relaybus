@@ -1,3 +1,5 @@
+import type { TransactionIsolationLevel } from '@relaybus/core';
+
 /** Values the store binds: always text, numbers or null (documents travel as JSON text). */
 export type PostgresParameter = string | number | null;
 
@@ -51,10 +53,35 @@ export interface PostgresExecutor<TTransaction> {
     work: (transaction: TTransaction) => Promise<T>,
     timeoutMs: number,
   ): Promise<T>;
+  /**
+   * Optional. Opens a transaction at `isolationLevel` that the server holds to `timeoutMs`, like
+   * {@link PostgresExecutor.transactionWithBudget}, with the level set in the same round trip as its
+   * `BEGIN` (`BEGIN ISOLATION LEVEL ...`). Without it the store sends `SET TRANSACTION ISOLATION
+   * LEVEL ...` as the first statement of {@link PostgresExecutor.transaction}, then the budget:
+   * two round trips more, on the transactions that ask for a level only. `PgExecutor` implements it.
+   */
+  transactionWithIsolation?<T>(
+    work: (transaction: TTransaction) => Promise<T>,
+    options: PostgresIsolatedTransactionOptions,
+  ): Promise<T>;
+  /**
+   * Optional. True when `error` is a serialization failure (SQLSTATE `40001`) of this library, for
+   * errors the store does not recognize itself. The store already finds `40001` in `code`, in
+   * `cause` and `driverError` chains, and in Prisma's `P2034` / `meta.code`; implement it only for
+   * a library that wraps the error in another shape.
+   */
+  isSerializationFailure?(error: unknown): boolean;
   query(
     sql: string,
     parameters: readonly PostgresParameter[],
     transaction?: TTransaction,
     options?: PostgresQueryOptions,
   ): Promise<readonly PostgresRow[]>;
+}
+
+/** What {@link PostgresExecutor.transactionWithIsolation} opens a transaction with. */
+export interface PostgresIsolatedTransactionOptions {
+  readonly isolationLevel: TransactionIsolationLevel;
+  /** The time budget, as for {@link PostgresExecutor.transactionWithBudget}. */
+  readonly timeoutMs: number;
 }

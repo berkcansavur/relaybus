@@ -1,5 +1,6 @@
 export type {
   PostgresExecutor,
+  PostgresIsolatedTransactionOptions,
   PostgresParameter,
   PostgresQueryOptions,
   PostgresRow,

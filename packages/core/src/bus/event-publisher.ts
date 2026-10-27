@@ -136,19 +136,32 @@ export class EventPublisher<TTransaction> {
       delayMs,
     }: { readonly context: PublishContext<TTransaction>; readonly delayMs: number },
   ): Promise<void> {
-    const { result, committed } = await this.#appendInTransaction(entries, context);
+    const { result, committed, transaction } = await this.#appendInTransaction(entries, context);
     const appended = new Set(result.appendedEventIds);
     const published = entries
       .map((entry) => entry.event)
       .filter((envelope) => appended.has(envelope.id));
     if (published.length > 0) {
-      this.#parts.notifier.notify('onPublished', {
-        envelopes: published,
-        deliveries: result.appendedDeliveryCount,
-      });
-      if (delayMs === 0) {
-        this.#parts.scheduleWake(committed);
+      const report = { envelopes: published, deliveries: result.appendedDeliveryCount };
+      const wake = delayMs === 0 ? committed : undefined;
+      const isolation = context.scope?.isolation;
+      if (!committed && isolation !== undefined && isolation.transaction === transaction) {
+        // An attempt of a transaction with an isolation level may be rolled back and rerun.
+        isolation.afterCommit.push(() => this.#announce(report, wake));
+      } else {
+        this.#announce(report, wake);
       }
+    }
+  }
+
+  /** Tells the observers about a publish, and wakes the dispatcher (`wake` is `committed`) when the events are due now. */
+  #announce(
+    report: { readonly envelopes: readonly EventEnvelope[]; readonly deliveries: number },
+    wake: boolean | undefined,
+  ): void {
+    this.#parts.notifier.notify('onPublished', report);
+    if (wake !== undefined) {
+      this.#parts.scheduleWake(wake);
     }
   }
 
@@ -156,14 +169,22 @@ export class EventPublisher<TTransaction> {
   async #appendInTransaction(
     entries: readonly AppendEntry[],
     { options, scope, now }: PublishContext<TTransaction>,
-  ): Promise<{ readonly result: AppendResult; readonly committed: boolean }> {
+  ): Promise<{
+    readonly result: AppendResult;
+    readonly committed: boolean;
+    readonly transaction: TTransaction | undefined;
+  }> {
     const { store, transactionMode, transactionResolver } = this.#parts;
     const transaction =
       options.transaction ??
       (scope?.transaction as TTransaction | undefined) ??
       transactionResolver?.();
     if (transaction !== undefined) {
-      return { result: await store.append(transaction, entries, now), committed: false };
+      return {
+        result: await store.append(transaction, entries, now),
+        committed: false,
+        transaction,
+      };
     }
     if (transactionMode === 'required') {
       throw new TransactionRequiredError(
@@ -173,7 +194,7 @@ export class EventPublisher<TTransaction> {
     const result = await store.transaction((ownTransaction) =>
       store.append(ownTransaction, entries, now),
     );
-    return { result, committed: true };
+    return { result, committed: true, transaction: undefined };
   }
 
   async #createEnvelope(input: CreateEnvelopeInput<TTransaction>): Promise<EventEnvelope> {

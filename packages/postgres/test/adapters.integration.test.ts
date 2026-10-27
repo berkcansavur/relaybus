@@ -7,7 +7,12 @@ import { DataSource, type EntityManager } from 'typeorm';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from './prisma/generated/client.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { RelayBus, defineEvent, type EventStore } from '@relaybus/core';
+import {
+  RelayBus,
+  defineEvent,
+  type EventStore,
+  type TransactionIsolationLevel,
+} from '@relaybus/core';
 import { eventStoreContract } from '@relaybus/testing';
 import { PostgresEventStore, type PostgresExecutor } from '../src/index.js';
 import { createDrizzleExecutor } from '../src/drizzle/index.js';
@@ -24,6 +29,8 @@ import {
 } from './support/postgres-container.js';
 
 class OrderPlaced extends defineEvent<{ orderId: string }>('order.placed.v1') {}
+
+class LimitReachedError extends Error {}
 
 /** Everything the shared tests need from one ORM, on one schema. */
 interface Harness<TTransaction> {
@@ -120,6 +127,47 @@ const drizzleAdapter: Adapter<DrizzleTransaction> = {
 type PrismaTransaction = Parameters<Parameters<PrismaClient['$transaction']>[0]>[0];
 
 /** A real Prisma Client (generated from test/prisma/schema.prisma) on the `pg` driver adapter. */
+describe('TypeORM subscribers and isolation levels', () => {
+  it('sets the level before a subscriber that queries right after the transaction begins', async () => {
+    const connectionString = database.connectionString;
+    const schema = uniqueSchema();
+    const seen: string[] = [];
+    const dataSource = await new DataSource({
+      type: 'postgres',
+      url: connectionString,
+      extra: { max: 5 },
+    }).initialize();
+    dataSource.subscribers.push({
+      async afterTransactionStart(event) {
+        await event.queryRunner.query('SELECT 1');
+        seen.push('subscriber');
+      },
+    });
+    try {
+      const store = new PostgresEventStore<EntityManager>({
+        executor: createTypeOrmExecutor(dataSource) as unknown as PostgresExecutor<EntityManager>,
+        schema,
+      });
+      await store.setup();
+      seen.length = 0;
+      const level = await store.transaction(
+        async (manager) => {
+          const rows = await manager.query<Array<{ level: string }>>(
+            "SELECT current_setting('transaction_isolation') AS level",
+          );
+          return rows[0]!.level;
+        },
+        { timeoutMs: 5_000, isolationLevel: 'serializable' },
+      );
+      expect(level).toBe('serializable');
+      expect(seen).toEqual(['subscriber']);
+    } finally {
+      await dataSource.destroy();
+      await dropSchema(database.pool, schema);
+    }
+  });
+});
+
 const prismaAdapter = (withPool: boolean): Adapter<PrismaTransaction> => ({
   name: withPool ? 'Prisma with pool' : 'Prisma',
   async create(connectionString, schema) {
@@ -195,6 +243,87 @@ function defineAdapterTests<TTransaction>(adapter: Adapter<TTransaction>): void 
     eventStoreContract<TTransaction>(`PostgresEventStore through ${adapter.name}`, {
       createStore: async () => (await createStore()).store,
       destroyStore: destroy,
+    });
+
+    describe('with an isolation level', () => {
+      async function createBus() {
+        const created = await createStore();
+        const bus = new RelayBus<TTransaction>({
+          store: created.store,
+          setupStore: false,
+          dispatcher: { enabled: false },
+        });
+        bus.subscribe(OrderPlaced, () => undefined, { id: 'listener' });
+        return { ...created, bus };
+      }
+
+      const levelOf = (
+        harness: Harness<TTransaction>,
+        transaction: TTransaction,
+      ): Promise<unknown> =>
+        harness.executor
+          .query("SELECT current_setting('transaction_isolation') AS level", [], transaction)
+          .then((rows) => rows[0]!['level']);
+
+      it.each(['read committed', 'repeatable read', 'serializable'] as const)(
+        'opens the transaction of the ORM at %s',
+        async (isolationLevel) => {
+          const { bus, harness, store } = await createBus();
+
+          const level = await bus.transaction((transaction) => levelOf(harness, transaction), {
+            isolationLevel,
+          });
+          const outside = await bus.transaction((transaction) => levelOf(harness, transaction));
+
+          expect(level).toBe(isolationLevel);
+          expect(outside).toBe('read committed');
+          await destroy(store);
+        },
+      );
+
+      it('stops the write skew of two concurrent reservations by rerunning the loser', async () => {
+        const { bus, harness, schema, store } = await createBus();
+        let arrived = 0;
+        let release!: () => void;
+        const open = new Promise<void>((resolve) => (release = resolve));
+        const attempts: string[] = [];
+        const reserve = (id: string, isolationLevel?: TransactionIsolationLevel): Promise<void> =>
+          bus.transaction(
+            async (transaction) => {
+              attempts.push(id);
+              const rows = await harness.executor.query(
+                `SELECT count(*)::int AS n FROM "${schema}".orders`,
+                [],
+                transaction,
+              );
+              arrived += 1;
+              if (arrived >= 2) {
+                release();
+              }
+              await open;
+              if ((rows[0]!['n'] as number) >= 1) {
+                throw new LimitReachedError(`limit reached for ${id}`);
+              }
+              await harness.insertOrder(transaction, id);
+              await bus.publish(new OrderPlaced({ orderId: id }));
+            },
+            isolationLevel === undefined ? undefined : { isolationLevel },
+          );
+
+        const outcomes = await Promise.allSettled([
+          reserve('a', 'serializable'),
+          reserve('b', 'serializable'),
+        ]);
+
+        const rejected = outcomes.filter((outcome) => outcome.status === 'rejected');
+        expect(rejected).toHaveLength(1);
+        expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(LimitReachedError);
+        // The loser ran twice: the serialization failure, whichever shape the ORM gave it, then the rerun.
+        expect(attempts).toHaveLength(3);
+        expect(await countOrders(schema)).toBe(1);
+        expect(await store.listDeliveries({})).toHaveLength(1);
+        await destroy(store);
+      });
     });
 
     describe('with the application transaction', () => {

@@ -7,6 +7,7 @@ import { orderingAndLeasesContract } from './contract/ordering-and-leases.js';
 import { completionContract } from './contract/completion.js';
 import { lostLeasesContract } from './contract/lost-leases.js';
 import { payloadFidelityContract } from './contract/payload-fidelity.js';
+import { transactionIsolationContract } from './contract/transaction-isolation.js';
 import { LEASE_MS, at } from './contract/contract-fixtures.js';
 import type { ContractSuite } from './contract/contract-suite.js';
 
@@ -107,5 +108,6 @@ export function eventStoreContract<TTransaction>(
     completionContract(suite);
     lostLeasesContract(suite);
     payloadFidelityContract(suite);
+    transactionIsolationContract(suite);
   });
 }

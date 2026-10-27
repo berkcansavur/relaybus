@@ -1,4 +1,9 @@
 import 'reflect-metadata';
+import {
+  TransactionIsolationConflictError,
+  type RelayBus,
+  type TransactionOptions,
+} from '@relaybus/core';
 import { resolveBus } from './relay-bus-registry.js';
 
 /** The compile error a `@RelayBusTransaction()` on a method that does not return a Promise reads. */
@@ -36,6 +41,14 @@ type AsyncMethod = (this: unknown, ...args: unknown[]) => Promise<unknown>;
  *   `@nestjs-cls/transactional`) joins it instead of opening a second one.
  * - The bus is the one of the application's `RelayBusModule`; the class does not inject it.
  * - Only methods that return a Promise compile.
+ * - With `{ isolationLevel }` the transaction runs at that level (PostgreSQL stores only). At
+ *   `'repeatable read'` and `'serializable'` a serialization failure (SQLSTATE `40001`) reruns the
+ *   method in a new transaction, up to `maxAttempts` times (default 3), so **the method may run
+ *   more than once**: keep calls to other services and anything else that is not a database
+ *   write through the transaction out of it. A call inside a transaction joins it only when
+ *   relaybus opened that transaction at the same level; any other call throws a
+ *   {@link TransactionIsolationConflictError}, because the level of a running transaction cannot
+ *   change. Without `isolationLevel` nothing differs from `@RelayBusTransaction()`.
  *
  * ```ts
  * @Injectable()
@@ -45,10 +58,18 @@ type AsyncMethod = (this: unknown, ...args: unknown[]) => Promise<unknown>;
  *     await this.orders.insert(orderId);
  *     await this.bus.publish(new OrderPlaced({ orderId }));
  *   }
+ *
+ *   // Count, check the limit, insert: two concurrent calls cannot both pass under SERIALIZABLE.
+ *   @RelayBusTransaction({ isolationLevel: 'serializable' })
+ *   async reserve(userId: string): Promise<void> {
+ *     if ((await this.reservations.countActive(userId)) >= LIMIT) throw new LimitReachedError();
+ *     await this.reservations.insert(userId);
+ *   }
  * }
  * ```
  */
-export function RelayBusTransaction(): RelayBusTransactionDecorator {
+export function RelayBusTransaction(options?: TransactionOptions): RelayBusTransactionDecorator {
+  const isolationLevel = options?.isolationLevel;
   // eslint-disable-next-line relaybus/max-two-params -- TypeScript calls a method decorator with three arguments
   return (target, propertyKey, descriptor) => {
     const original = descriptor.value as unknown as AsyncMethod;
@@ -56,9 +77,12 @@ export function RelayBusTransaction(): RelayBusTransactionDecorator {
     const transactional: AsyncMethod = async function (this: unknown, ...args: unknown[]) {
       const bus = resolveBus(this, label);
       if (bus.currentTransaction() !== undefined) {
+        if (isolationLevel !== undefined) {
+          assertJoinableAt(bus, { label, isolationLevel });
+        }
         return original.apply(this, args);
       }
-      return bus.transaction(() => original.apply(this, args));
+      return bus.transaction(() => original.apply(this, args), options);
     };
     Object.defineProperty(transactional, 'name', { value: original.name });
     // Decorators applied before this one (route, guard, interceptor metadata) keep their metadata.
@@ -67,4 +91,22 @@ export function RelayBusTransaction(): RelayBusTransactionDecorator {
     }
     descriptor.value = transactional as never;
   };
+}
+
+/** Throws unless the active transaction was opened by relaybus at `isolationLevel`. */
+function assertJoinableAt(
+  bus: RelayBus,
+  { label, isolationLevel }: { readonly label: string; readonly isolationLevel: string },
+): void {
+  const active = bus.currentIsolationLevel();
+  if (active !== isolationLevel) {
+    throw new TransactionIsolationConflictError(
+      `${label} asks for isolationLevel '${isolationLevel}' but runs inside a transaction ` +
+        (active === undefined
+          ? 'that relaybus did not open at an isolation level (without isolationLevel, or opened by a transactionResolver or the application)'
+          : `opened at '${active}'`) +
+        ', and the isolation level of a running transaction cannot be changed. Open the outer ' +
+        'transaction at the same level, or leave isolationLevel off this method',
+    );
+  }
 }

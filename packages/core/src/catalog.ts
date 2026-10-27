@@ -1,3 +1,4 @@
+import { checkWireNames, type WireNames } from './catalog-wire-names.js';
 import { ConfigurationError } from './errors.js';
 import { assertEventType, type DomainEvent, type EventEnvelope, type PayloadOf } from './event.js';
 import type { EventHandler, HandlerContext, SubscribeOptions } from './handler-registry.js';
@@ -95,12 +96,20 @@ export interface CatalogEventSelection<TName> {
 }
 
 /** Options of {@link defineCatalog}. */
-export interface DefineCatalogOptions {
+export interface DefineCatalogOptions<TCatalog extends Catalog = Catalog> {
   /**
    * Name of the catalog, used in boot-check messages and as the default prefix
    * of the handler ids that `subscribeCatalog` registers.
    */
   readonly name?: string;
+  /**
+   * Names the wire format uses for events instead of their event types, by catalog event name:
+   * `{ OrderPlaced: 'Order Placed' }`. A route of the catalog (`route(produce(...))`) hands them
+   * to its transport's codec, which writes and reads the event under that name, exactly as the
+   * `wireTypes` of `jsonEnvelope` would; a `wireTypes` of the route wins for its events. Events
+   * without a name travel under their event type.
+   */
+  readonly wireTypes?: WireNames<Extract<keyof TCatalog, string>>;
 }
 
 /**
@@ -152,6 +161,7 @@ export interface CatalogHandlerBinding {
 const EVENT_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 const descriptions = new WeakMap<object, CatalogDescription>();
+const catalogWireNames = new WeakMap<object, ReadonlyMap<string, string>>();
 
 /**
  * Groups event classes into a catalog: the complete set of events one service
@@ -169,31 +179,23 @@ const descriptions = new WeakMap<object, CatalogDescription>();
  *
  * Throws {@link ConfigurationError} for an empty catalog, an entry that is not
  * an event class, a name that is not made of letters, digits and underscores,
- * or two entries with the same event type.
+ * or two entries with the same event type; `UnknownCatalogEventError` for a wire name of an
+ * event the catalog does not have, `WireTypeCollisionError` for one wire name given twice.
  */
 export function defineCatalog<const TCatalog extends Catalog>(
   events: TCatalog,
-  options: DefineCatalogOptions = {},
+  options: DefineCatalogOptions<TCatalog> = {},
 ): Readonly<TCatalog> {
   const label = options.name === undefined ? 'Catalog' : `Catalog '${options.name}'`;
   const names = Object.keys(events);
   if (names.length === 0) {
     throw new ConfigurationError(`${label} must contain at least one event`);
   }
+  const wireTypes = checkWireNames(options.wireTypes, { events: names, label });
   const owners = new Map<string, string>();
   const entries = names.map((name): CatalogEntry => {
     const eventClass = events[name] as CatalogEventClass;
-    if (!EVENT_NAME_PATTERN.test(name)) {
-      throw new ConfigurationError(
-        `${label} entry '${name}' must be a valid identifier made of letters, digits and underscores ` +
-          `because it names the handler method on${name} and its handler id`,
-      );
-    }
-    if (typeof eventClass !== 'function' || typeof eventClass.type !== 'string') {
-      throw new ConfigurationError(
-        `${label} entry '${name}' must be an event class created with defineEvent`,
-      );
-    }
+    assertCatalogEntry(name, { eventClass, label });
     assertEventType(eventClass.type);
     const owner = owners.get(eventClass.type);
     if (owner !== undefined) {
@@ -206,7 +208,34 @@ export function defineCatalog<const TCatalog extends Catalog>(
   });
   const catalog = Object.freeze({ ...events });
   descriptions.set(catalog, Object.freeze({ name: options.name, entries: Object.freeze(entries) }));
+  catalogWireNames.set(catalog, wireTypes);
   return catalog;
+}
+
+/**
+ * The wire names (`wireTypes` of {@link defineCatalog}) of a catalog by event name; empty for a
+ * catalog without any. Kept apart from the entries so that {@link CatalogEntry} is unchanged.
+ */
+export function wireNamesOf(catalog: Catalog): ReadonlyMap<string, string> {
+  describeCatalog(catalog);
+  return catalogWireNames.get(catalog)!;
+}
+
+function assertCatalogEntry(
+  name: string,
+  { eventClass, label }: { readonly eventClass: CatalogEventClass; readonly label: string },
+): void {
+  if (!EVENT_NAME_PATTERN.test(name)) {
+    throw new ConfigurationError(
+      `${label} entry '${name}' must be a valid identifier made of letters, digits and underscores ` +
+        `because it names the handler method on${name} and its handler id`,
+    );
+  }
+  if (typeof eventClass !== 'function' || typeof eventClass.type !== 'string') {
+    throw new ConfigurationError(
+      `${label} entry '${name}' must be an event class created with defineEvent`,
+    );
+  }
 }
 
 /**
