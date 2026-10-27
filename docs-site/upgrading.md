@@ -1,6 +1,6 @@
 ---
 title: Upgrading relaybus
-description: 'Step-by-step upgrades between relaybus releases: 0.4.1 to 0.5.0 (nothing required; optional catalog routes and wire names), 0.4.0 to 0.4.1 (PostgreSQL payload columns become json), 0.3 to 0.4 (nothing required; optional pool, wake, Confluent client, record keys, injected producer), 0.2 to 0.3 (route ids, transaction budget, StopResult, decorator and codec renames, error codes) and 0.1 to 0.2 (completed deliveries deleted, completionHistory, schema upgrade, PgBouncer settings).'
+description: 'Step-by-step upgrades between relaybus releases: 0.4.1 to 0.5.0 (nothing required; optional catalog routes, wire names and transaction isolation levels), 0.4.0 to 0.4.1 (PostgreSQL payload columns become json), 0.3 to 0.4 (nothing required; optional pool, wake, Confluent client, record keys, injected producer), 0.2 to 0.3 (route ids, transaction budget, StopResult, decorator and codec renames, error codes) and 0.1 to 0.2 (completed deliveries deleted, completionHistory, schema upgrade, PgBouncer settings).'
 ---
 
 # Upgrading relaybus
@@ -23,7 +23,7 @@ rollback: 'safe; 0.5.0 stores and sends nothing 0.4.1 cannot read'
 
 **Nothing is required.** 0.5.0 adds API and changes no behaviour of existing code: routes, `jsonEnvelope` `wireTypes`, handler ids, stored deliveries and the wire format are as in 0.4.1.
 
-Two optional steps for services that publish a catalog:
+Optional steps:
 
 1. **Replace per-event routes with a catalog route.** Routes of one destination written event by event can become one `route`; the handler id `relaybus.transport:<transport>:<destination>` and the routed event types stay the same, so deliveries stored under the old routes are still sent. Do it in one deploy; there is nothing to migrate.
 
@@ -45,8 +45,11 @@ Two optional steps for services that publish a catalog:
 
 2. **Move wire names to the catalog.** Names from the `wireTypes` of a `jsonEnvelope` can be declared by `defineCatalog(..., { wireTypes })` or `route(..., { wireTypes })` instead. The bytes are identical; naming the same pair in both places is allowed, naming another name for the same event type fails the boot with `RELAYBUS_WIRE_TYPE_COLLISION`.
 
+3. **Replace a lock with SERIALIZABLE.** A `pg_advisory_xact_lock` or `SELECT ... FOR UPDATE` that only guards a count-check-insert can become `@RelayBusTransaction({ isolationLevel: 'serializable' })` (or `bus.transaction(work, { isolationLevel: 'serializable' })`), which does not block and reruns the transaction after a serialization failure. The method may then run more than once, so keep calls to other services out of it. Test it under concurrency first; see [Serializable transactions](/recipes/serializable-transactions). Nothing changes for code that does not pass `isolationLevel`.
+
 Things to know:
 
+- A custom `PostgresExecutor` keeps working: without the new optional `transactionWithIsolation` the store sends `SET TRANSACTION ISOLATION LEVEL ...` as the first statement of its `transaction`, and it recognizes SQLSTATE `40001` in `code`, `cause` and `driverError` on its own (the optional `isSerializationFailure` covers other shapes). A custom `EventStore` that does not declare `isolationLevels` rejects every `isolationLevel`, so a service that never passes one is not affected.
 - A custom `Transport` written outside relaybus keeps working. It only needs `declareWireTypes(wireTypes)` if you declare wire names for it; without the method, declaring them fails the boot with `RELAYBUS_WIRE_TYPES_UNSUPPORTED`. Without wire names, it is never called.
 - `RelayBusOptions.routes` is now `readonly RouteDefinition[]` (`RouteOptions | CatalogRoute`). Code that only passes routes compiles unchanged; code that reads `options.routes` and expects `RouteOptions` now has to narrow.
 - A service that only consumes a catalog with wire names has no route to declare them: give its codec `wireTypes: catalogWireTypes(OrderEvents)`.

@@ -59,6 +59,8 @@ export class OrderRepository {
 - The class does not inject anything for the decorator: the bus is the one of the application's `RelayBusModule`. Without a running module the call throws a `ConfigurationError` saying so.
 - Only async methods compile: on a method that does not return a Promise, TypeScript reports `'@RelayBusTransaction() needs a method that returns a Promise: make the method async'`.
 
+- `@RelayBusTransaction({ isolationLevel: 'serializable' })` runs the method at that level and reruns it after a serialization failure; see [Serializable transactions](/recipes/serializable-transactions). A method that asks for a level can join only a transaction relaybus opened at the same level.
+
 ## Repositories with your data library
 
 `RelayBusTransactionHost<T>` is typed with the store's transaction handle. `current()` throws `TransactionRequiredError` outside a transaction; `find()` returns `undefined`. Outside NestJS, `bus.currentTransaction()` does the same as `find()`.

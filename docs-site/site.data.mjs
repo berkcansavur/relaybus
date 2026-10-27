@@ -143,6 +143,12 @@ export const sections = [
           'Run NestJS service methods in an outbox transaction with @RelayBusTransaction(), share it with repositories, hold it to a time budget and lint external calls out of it.',
       },
       {
+        title: 'Serializable transactions',
+        path: 'recipes/serializable-transactions',
+        description:
+          'Run a relaybus transaction at repeatable read or serializable so PostgreSQL detects write skew without locks, with automatic rerun of serialization failures.',
+      },
+      {
         title: 'Prisma',
         path: 'recipes/prisma',
         description:

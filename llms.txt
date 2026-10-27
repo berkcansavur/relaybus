@@ -37,6 +37,7 @@ relaybus stores every event in the same database transaction as your business da
 ## Recipes
 
 - [Transactions in NestJS](https://berkcansavur.github.io/relaybus/recipes/transactions-in-nestjs.md): Run NestJS service methods in an outbox transaction with @RelayBusTransaction(), share it with repositories, hold it to a time budget and lint external calls out of it.
+- [Serializable transactions](https://berkcansavur.github.io/relaybus/recipes/serializable-transactions.md): Run a relaybus transaction at repeatable read or serializable so PostgreSQL detects write skew without locks, with automatic rerun of serialization failures.
 - [Prisma](https://berkcansavur.github.io/relaybus/recipes/prisma.md): Publish transactional outbox events from a Prisma interactive transaction with @relaybus/postgres.
 - [TypeORM](https://berkcansavur.github.io/relaybus/recipes/typeorm.md): Publish events in the same TypeORM transaction as your entities using the TypeORM executor.
 - [Mongoose](https://berkcansavur.github.io/relaybus/recipes/mongoose.md): Use the MongoDB transactional outbox with Mongoose sessions and replica sets.
