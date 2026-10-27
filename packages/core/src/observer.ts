@@ -137,7 +137,9 @@ export interface BacklogEvent {
 export interface RelayBusObserver {
   /**
    * Events were written into the publishing transaction. Called before that
-   * transaction commits, so it can still roll back. Duplicates are not reported.
+   * transaction commits, so it can still roll back, except in a `bus.transaction` with an
+   * `isolationLevel`, whose publishes are reported once the attempt that committed is over (an
+   * attempt may be rolled back and rerun). Duplicates are not reported.
    */
   onPublished?(event: {
     readonly envelopes: readonly EventEnvelope[];

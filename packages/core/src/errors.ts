@@ -72,6 +72,17 @@ export class TransactionTimeoutError extends RelayBusError {
 }
 
 /**
+ * A `@RelayBusTransaction({ isolationLevel })` method was called inside a transaction that was not
+ * opened by relaybus at that same level. The isolation level of a running transaction cannot be
+ * changed, so the method cannot join it: open the outer transaction at the level, or leave the
+ * level off the inner method.
+ */
+export class TransactionIsolationConflictError extends RelayBusError {
+  override name = 'TransactionIsolationConflictError';
+  override readonly code: string = 'RELAYBUS_TRANSACTION_ISOLATION_CONFLICT';
+}
+
+/**
  * Throw from a handler to dead-letter the delivery immediately, skipping the
  * remaining retry attempts.
  */

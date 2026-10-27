@@ -174,6 +174,23 @@ describe('round trips per publish and completion', () => {
     expectWithinBudget('postgres.publish.budgetedSingle.sqlStatements', keyed.sqlStatements);
   });
 
+  it('publishes at an isolation level with the statements and round trips of a budgeted publish', async () => {
+    const fixture = await createFixture();
+    // The level travels in the BEGIN of the budget statement: asking for one costs no round trip.
+    for (const key of [null, 'k']) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const measured = await fixture.executor.countBoth(() =>
+        publishWith(fixture.store, {
+          events: events(1, () => key),
+          options: { timeoutMs: 5_000, isolationLevel: 'serializable' },
+        }),
+      );
+      expectWithinBudget('postgres.publish.unkeyedSingle.statements', measured.statements);
+      expectWithinBudget('postgres.publish.unkeyedSingle.statements', measured.roundTrips);
+      expectWithinBudget('postgres.publish.budgetedSingle.sqlStatements', measured.sqlStatements);
+    }
+  });
+
   it('publishes on a pool of its own with no budget statement once the connection keeps the budget', async () => {
     const fixture = await createFixture({ sessionBudget: true });
     // The first budgeted transaction on the connection sets the budget for the session, with BEGIN.

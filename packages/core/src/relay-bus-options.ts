@@ -3,7 +3,7 @@ import type { RouteDefinition } from './catalog-routes.js';
 import type { Catalog } from './catalog.js';
 import type { Clock } from './clock.js';
 import type { Duration } from './duration.js';
-import type { EventStore } from './event-store.js';
+import type { EventStore, TransactionIsolationLevel } from './event-store.js';
 import type { EventHeaders, EventReference } from './event.js';
 import type { IdentifierGenerator } from './identifier.js';
 import type { RelayBusLogger, RelayBusObserver } from './observer.js';
@@ -19,6 +19,28 @@ import type { Transport } from './transport.js';
  *   but no longer atomic with business writes made outside that transaction.
  */
 export type TransactionMode = 'required' | 'optional';
+
+/** Options of one `bus.transaction` (and `@RelayBusTransaction()` method). */
+export interface TransactionOptions {
+  /**
+   * Runs the transaction at this isolation level; the store must support it, else the call
+   * throws a {@link ConfigurationError} (PostgreSQL stores do; MongoDB and the in-memory store
+   * do not). Without it the transaction runs exactly as before, at the database default.
+   *
+   * With `'repeatable read'` or `'serializable'`, a serialization failure (PostgreSQL SQLSTATE
+   * `40001`) rolls the transaction back and `work` runs again in a new one, up to
+   * {@link TransactionOptions.maxAttempts} times, so **`work` may run more than once**: keep
+   * everything but database writes through the transaction (HTTP calls, broker publishes,
+   * counters, emails) out of it. Events published by a failed attempt are rolled back with it.
+   */
+  readonly isolationLevel?: TransactionIsolationLevel;
+  /**
+   * How many times `work` may run when `isolationLevel` is `'repeatable read'` or `'serializable'`
+   * and the transaction fails with a serialization failure; the last failure is rethrown unchanged.
+   * Each attempt is held to its own `transactionTimeout`. A positive integer. Default 3.
+   */
+  readonly maxAttempts?: number;
+}
 
 /**
  * What `publish` does with an event that has no handler or route in this

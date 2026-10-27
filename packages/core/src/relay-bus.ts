@@ -23,23 +23,21 @@ import type {
   EventStore,
   EventStoreStatistics,
   PurgeResult,
+  TransactionIsolationLevel,
 } from './event-store.js';
 import type { DomainEvent, EventClass, EventEnvelope } from './event.js';
-import { getCurrentScope, runInScope } from './execution-scope.js';
+import { getCurrentIsolationLevel, getCurrentScope, runInScope } from './execution-scope.js';
 import type { EventHandler, HandlerDescriptor, SubscribeOptions } from './handler-registry.js';
+import { runIsolatedTransaction, type IsolatedOptions } from './isolated-transaction.js';
 import { PublishWakeUps } from './bus/publish-wake-ups.js';
 import type {
   PublishOneOptions,
   PublishOptions,
   ReceiveStatus,
   RelayBusOptions,
+  TransactionOptions,
 } from './relay-bus-options.js';
-import {
-  withinDeadline,
-  type ShutdownDeadline,
-  type StopOptions,
-  type StopResult,
-} from './shutdown-deadline.js';
+import { type ShutdownDeadline, type StopOptions, type StopResult } from './shutdown-deadline.js';
 import { runBudgetedTransaction } from './transaction-budget.js';
 import { Milliseconds } from './values/milliseconds.js';
 
@@ -213,8 +211,19 @@ export class RelayBus<TTransaction = unknown> {
    * Runs `work` in a new store transaction. `publish` calls inside it join the
    * transaction without passing it explicitly. The transaction is held to `transactionTimeout`
    * and rolled back with a {@link TransactionTimeoutError} when it runs past it.
+   *
+   * With `options.isolationLevel` it runs at that level, and at `'repeatable read'` or
+   * `'serializable'` a serialization failure reruns `work` in a new transaction (see
+   * {@link TransactionOptions}), so `work` may run more than once. Without options nothing
+   * changes. The call always opens a transaction of its own, also inside another one.
    */
-  async transaction<T>(work: (transaction: TTransaction) => Promise<T>): Promise<T> {
+  async transaction<T>(
+    work: (transaction: TTransaction) => Promise<T>,
+    options?: TransactionOptions,
+  ): Promise<T> {
+    if (options?.isolationLevel !== undefined) {
+      return runIsolatedTransaction(this.#parts, { options: options as IsolatedOptions, work });
+    }
     return runBudgetedTransaction(this.#parts.store, {
       clock: this.#parts.clock,
       timeoutMs: this.#parts.transactionTimeoutMs,
@@ -232,6 +241,16 @@ export class RelayBus<TTransaction = unknown> {
       (getCurrentScope()?.transaction as TTransaction | undefined) ??
       this.#parts.transactionResolver?.()
     );
+  }
+
+  /**
+   * The isolation level the transaction `publish` would join was opened at by
+   * `bus.transaction({ isolationLevel })` (or `@RelayBusTransaction({ isolationLevel })`);
+   * undefined for every other transaction, including those without a level and the one of
+   * `transactionResolver`.
+   */
+  currentIsolationLevel(): TransactionIsolationLevel | undefined {
+    return getCurrentIsolationLevel();
   }
 
   /**
@@ -360,7 +379,7 @@ export class RelayBus<TTransaction = unknown> {
         );
       }
     } catch (error) {
-      await this.#closeAfterFailedStart();
+      await this.#lifecycle.closeAfterFailedStart(this.#parts.shutdownTimeoutMs);
       this.#lifecycle.markStopped();
       throw error;
     }
@@ -375,17 +394,6 @@ export class RelayBus<TTransaction = unknown> {
     this.#lifecycle.markRunning();
     this.#parts.logger.log(
       `[RelayBus](startComponents) relaybus started | handlers=${this.#parts.registry.all().length} dispatcher=${this.#parts.dispatcherEnabled}`,
-    );
-  }
-
-  /** Closes the transports a failed start may have connected, within the shutdown timeout. */
-  #closeAfterFailedStart(): Promise<StopResult> {
-    return withinDeadline(
-      { clock: this.#parts.clock, timeoutMs: this.#parts.shutdownTimeoutMs },
-      async (deadline) => {
-        await this.#closeTransports(deadline);
-        return 0;
-      },
     );
   }
 

@@ -20,6 +20,19 @@ export const DELIVERY_STATUSES: readonly DeliveryStatus[] = [
   'dead',
 ];
 
+/**
+ * Isolation level of a `bus.transaction`, in the vocabulary of SQL. `repeatable read` and
+ * `serializable` can fail with a serialization failure that succeeds when the transaction runs
+ * again; the bus then reruns `work` (see {@link TransactionOptions}).
+ */
+export type TransactionIsolationLevel = 'read committed' | 'repeatable read' | 'serializable';
+
+export const TRANSACTION_ISOLATION_LEVELS: readonly TransactionIsolationLevel[] = [
+  'read committed',
+  'repeatable read',
+  'serializable',
+];
+
 export interface NewDelivery {
   readonly id: string;
   /** Stable handler id. Together with the event id it is unique. */
@@ -144,6 +157,12 @@ export interface EventStoreTransactionOptions {
    * a transaction that still ran past the budget, so a store may also ignore it.
    */
   readonly timeoutMs: number;
+  /**
+   * Isolation level the transaction runs at, set before its first statement. Only passed when
+   * `bus.transaction` was given one, and only to a store that lists it in
+   * {@link EventStore.isolationLevels}.
+   */
+  readonly isolationLevel?: TransactionIsolationLevel;
 }
 
 /**
@@ -163,6 +182,19 @@ export interface EventStore<TTransaction = unknown> {
     work: (transaction: TTransaction) => Promise<T>,
     options?: EventStoreTransactionOptions,
   ): Promise<T>;
+  /**
+   * Optional. The isolation levels `transaction` can run at. `bus.transaction` with another
+   * `isolationLevel` is rejected with a {@link ConfigurationError} before it opens a transaction;
+   * a store without the list supports none. A store lists a level only when the database gives
+   * the guarantee the name promises.
+   */
+  readonly isolationLevels?: readonly TransactionIsolationLevel[];
+  /**
+   * Optional. True when `error`, raised by `transaction` (by `work`, or by the commit), means the
+   * database rolled the transaction back because of a conflict with a concurrent one and running
+   * it again can succeed (PostgreSQL SQLSTATE `40001`). Without it `bus.transaction` never reruns.
+   */
+  isSerializationFailure?(error: unknown): boolean;
   /**
    * Writes events and their deliveries inside `transaction`. Idempotent on
    * event id and on (event id, handler). Assigns a per-key sequence to keyed

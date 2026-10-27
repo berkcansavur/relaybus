@@ -1,12 +1,14 @@
 import type { Clock } from './clock.js';
 import { TransactionTimeoutError, toErrorInfo } from './errors.js';
-import type { EventStore } from './event-store.js';
+import type { EventStore, TransactionIsolationLevel } from './event-store.js';
 
 /** One `bus.transaction` with the time it may take. */
 export type BudgetedTransaction<TTransaction, T> = {
   readonly clock: Clock;
   readonly timeoutMs: number;
   readonly work: (transaction: TTransaction) => Promise<T>;
+  /** Passed to the store when set; a transaction without it is opened exactly as before. */
+  readonly isolationLevel?: TransactionIsolationLevel;
 };
 
 /**
@@ -18,7 +20,7 @@ export type BudgetedTransaction<TTransaction, T> = {
  */
 export async function runBudgetedTransaction<TTransaction, T>(
   store: EventStore<TTransaction>,
-  { clock, timeoutMs, work }: BudgetedTransaction<TTransaction, T>,
+  { clock, timeoutMs, work, isolationLevel }: BudgetedTransaction<TTransaction, T>,
 ): Promise<T> {
   const startedAt = clock.now().getTime();
   const overrun = (): boolean => clock.now().getTime() - startedAt >= timeoutMs;
@@ -36,7 +38,7 @@ export async function runBudgetedTransaction<TTransaction, T>(
         committing = true;
         return result;
       },
-      { timeoutMs },
+      isolationLevel === undefined ? { timeoutMs } : { timeoutMs, isolationLevel },
     );
   } catch (error) {
     if (error instanceof TransactionTimeoutError || committing || !overrun()) {

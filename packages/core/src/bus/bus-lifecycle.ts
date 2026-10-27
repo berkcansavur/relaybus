@@ -71,6 +71,14 @@ export class BusLifecycle {
     this.#state = 'stopped';
   }
 
+  /** Closes the transports a failed start may have connected, within `timeoutMs`. */
+  closeAfterFailedStart(timeoutMs: number): Promise<StopResult> {
+    return withinDeadline({ clock: this.#parts.clock, timeoutMs }, async (deadline) => {
+      await this.#parts.closeTransports(deadline);
+      return 0;
+    });
+  }
+
   /** The stop of the bus within `timeoutMs`; a later call shares the first one's. */
   stop(timeoutMs: number): StopRequest {
     if (this.#stopping !== undefined) {
