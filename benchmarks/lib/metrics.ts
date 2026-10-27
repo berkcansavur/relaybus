@@ -15,6 +15,12 @@ export interface MetricDefinition {
 export const COUNTER_TOLERANCE = 0.03;
 export const THROUGHPUT_TOLERANCE = 0.07;
 export const LATENCY_TOLERANCE = 0.15;
+/**
+ * Lane updates per delivery follow how the claims of concurrent dispatchers batch up, which is a matter of timing: identical
+ * code on identical data moves by 10-20 % between samples. Extra lane work shows as whole updates per delivery, far beyond this.
+ */
+export const TIMING_COUNTER_TOLERANCE = 0.15;
+const TIMING_COUNTERS = new Set(['ctr.lanes.updPerUnit']);
 
 const THROUGHPUT_METRICS = new Set(['eventsPerSec', 'deliveriesPerSec', 'achievedPerSec']);
 const LATENCY_METRICS = new Set(['txP99Ms', 'publishP99Ms', 'e2eP99Ms']);
@@ -40,7 +46,7 @@ export function definitionFor(metric: string): MetricDefinition {
     return {
       class: 'counter',
       better: metric === 'ctr.hotUpdPct' ? 'higher' : 'lower',
-      tolerance: COUNTER_TOLERANCE,
+      tolerance: TIMING_COUNTERS.has(metric) ? TIMING_COUNTER_TOLERANCE : COUNTER_TOLERANCE,
       label: metric.slice(4),
     };
   }

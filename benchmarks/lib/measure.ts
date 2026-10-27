@@ -6,6 +6,7 @@ import type { Cell, DispatchCell, MixedCell, PublishCell, TemplateDefinition } f
 import { NO_KEYS, ROUTED_ACK_MS } from './cells.ts';
 import { counterMetrics } from './db-metrics.ts';
 import type { SideModules } from './deps.ts';
+import { WORKLOAD_SEED } from './deterministic.ts';
 import { Fleet, nowMs, sleep, sleepUntil } from './fleet.ts';
 import { Hist } from './hist.ts';
 import { LoadMeter } from './load.ts';
@@ -66,6 +67,7 @@ function publisherInits(
       batch: cell.batch,
       handlers: cell.handlers,
       keys: cell.keys,
+      seed: WORKLOAD_SEED,
       ...(cell.routed === true ? { routeAckMs: ROUTED_ACK_MS } : {}),
       pool: cell.pool,
       warmupMs: cell.warmupMs,
@@ -271,12 +273,24 @@ async function measureDispatch(
   try {
     await fleet.ready();
     const monitor = backend.monitor(database);
+    // The statistics are reset while the workers are idle, so none of their pending statistics leaks across the reset.
     await monitor.begin();
     const startAt = nowMs() + 300;
     const measureStart = startAt + cell.warmupMs;
-    const measureEnd = measureStart + cell.durationMs;
+    const capAt = measureStart + cell.durationMs;
+    const target = cell.targetDeliveries;
+    let measureEnd = capAt;
+    let reachedTarget = true;
+    let handledAtEnd = 0;
     fleet.go(startAt);
-    await sleepUntil(measureEnd);
+    if (target === undefined) await sleepUntil(measureEnd);
+    else {
+      // Fixed work: the counters cover the first `target` deliveries, which is the same data on every machine and side.
+      while (fleet.handledTotal < target && nowMs() < capAt) await sleep(10);
+      reachedTarget = fleet.handledTotal >= target;
+      measureEnd = nowMs();
+      handledAtEnd = fleet.handledTotal;
+    }
     fleet.stop();
     const results = dispatcherResults(await fleet.done());
     const window = await monitor.end();
@@ -297,20 +311,26 @@ async function measureDispatch(
       routed: cell.routed === true,
     });
     const reasons = [...validation.reasons];
-    if (seconds < 1)
+    if (!reachedTarget)
+      reasons.push(
+        `only ${handledAtEnd} of the ${target ?? 0} deliveries of the fixed work were handled before the time cap; counters per delivery are not comparable`,
+      );
+    // A fixed-work sample is as short as the machine is fast; only a fixed window can be too short for its template.
+    if (target === undefined && seconds < 1)
       reasons.push(
         `the template drained ${round(seconds, 2)} s into the window; it is too small for this cell`,
       );
     const notes = drained
       ? [`template drained inside the window; rate measured over ${round(seconds)} s`]
       : [];
+
     if (window.waits !== '') notes.push(`waits: ${window.waits}`);
     const metrics: Record<string, number | null> = {
       deliveriesPerSec: seconds > 0 ? round(handledInWindow / seconds) : null,
       'info.clientCores': round(
         results.reduce((total, result) => total + result.cpuMs, 0) /
           1000 /
-          Math.max(1, (cell.warmupMs + cell.durationMs) / 1000),
+          Math.max(1, (measureEnd - startAt) / 1000),
         2,
       ),
       'info.loopDelayP99Ms': round(Math.max(...results.map((result) => result.loopDelayP99)), 1),
@@ -373,6 +393,7 @@ async function measureMixed(
         batch: 1,
         handlers: 1,
         keys: NO_KEYS,
+        seed: WORKLOAD_SEED,
         pool: cell.pubPool,
         warmupMs: cell.warmupMs,
         durationMs: cell.durationMs,

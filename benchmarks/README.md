@@ -42,11 +42,18 @@ Exit code: 0 gate passed, 1 gate failed, 2 harness error. Output goes to `benchm
    candidate is measured. Otherwise base and candidate are measured **interleaved**: for every cell, pair 0 runs base then
    candidate, pair 1 candidate then base, and so on, so drift of the machine (thermal state, other processes) hits both
    sides alike.
-3. Every sample uses a **fixed window**: a warm-up, then a steady-state window (quick: 1.5 s + 5 s for publish and 2 s + 6 s for
+3. Base and candidate see **identical data**. Every publisher worker generates its event ids and ordering keys from a seeded
+   generator (`lib/deterministic.ts`, seed `WORKLOAD_SEED`, one stream per worker), so the templates of both sides have the
+   same lane layout (a lane is a hash of the key or id). The seed is part of the baseline fingerprint. PostgreSQL runs with
+   `full_page_writes=off`: full page images depend on checkpoint timing, not on the code.
+4. Every sample uses a **fixed window**: a warm-up, then a steady-state window (quick: 1.5 s + 5 s for publish and 2 s + 6 s for
    dispatch, full: 3 s + 15 s, mixed: 4 s + 20 s). Nothing waits for a drain. Dispatch cells clone a preloaded template database (built once per
    side, from that side's own code) and count the deliveries handled inside the window; a template that drains before the
-   window ends is reported and the rate is taken over the time it was busy.
-4. Compares and writes the report.
+   window ends is reported and the rate is taken over the time it was busy. The quick gate's dispatch cells measure a fixed
+   amount of **work** instead (the first 60k / 240k / 15k / 30k deliveries; the window length is
+   only a 60 s cap, and a sample that misses it is invalid): a counter per delivery depends on how much of the data was touched, so a window of fixed length
+   measures something different on a fast and on a loaded machine. Templates hold twice the work of their cell.
+5. Compares and writes the report.
 
 Each publisher and each dispatcher instance is a separate Node process with its own pool and `RelayBus`; handlers are
 no-ops, so the numbers are the cost of the bus and the store.
@@ -54,8 +61,8 @@ no-ops, so the numbers are the cost of the bus and the store.
 ## Cells
 
 Quick gate (8 cells): PostgreSQL publish P=8 with batch 1, batch 100 and batch 100 with 5 handlers; MongoDB publish P=8
-batch 100; PostgreSQL dispatch with 1 and 4 instances (tuned) from a 120k-event template; PostgreSQL keyed dispatch
-`hot:10`; MongoDB dispatch with 1 instance (tuned) from a 10k-event template.
+batch 100; PostgreSQL dispatch with 1 and 4 instances (tuned) from templates of 120k (one instance) and 480k events (four instances); PostgreSQL keyed dispatch
+`hot:10`; MongoDB dispatch with 1 instance (tuned) from a 60k-event template.
 
 Full run (about 40 cells): publish P=1/8/32 x batch 1/100, 5-handler fan-out, keyed publish (`distinct:1000`, `hot:10`,
 `hot:1`), 4-process ceiling; dispatch 1/4/8 instances x `defaults` / `mid` / `tuned`, fan-out, keyed (`distinct:1000`,
@@ -77,7 +84,11 @@ seconds instead of a minute.
 **Primary gate: database-side counters.** For every sample the harness resets the database's statistics before the
 workers start, reads them after the last worker exited (so lazily flushed statistics are complete), and divides them by
 the number of events added (publish) or deliveries completed (dispatch), counted exactly in the database. The counters
-therefore cover the whole sample, warm-up included; per event or delivery that is the same work on both sides:
+therefore cover the whole sample, warm-up included (fixed-work dispatch cells: up to the target); per
+event or delivery that is the same work on both sides. Counters of interleaved runs are judged by the median of the
+per-pair ratios, so drift over the run cancels. `lanes.updPerUnit` follows how concurrent claims batch up and moves by
+10-20 % between identical samples, so its tolerance is 15 % (extra lane work shows as whole updates per delivery); every other
+counter has 3 %:
 
 - PostgreSQL: statements (`pg_stat_statements`), WAL bytes and records (`pg_current_wal_lsn`, `pg_stat_wal`), tuples
   inserted / updated / deleted per relaybus table and the HOT update share (`pg_stat_user_tables`).
