@@ -20,7 +20,7 @@ All automation lives in `.github/`. Every third-party action is pinned to a full
 
 - `quality`: `pnpm format:check`, `pnpm lint`, `pnpm typecheck`.
 - `test (node 22.x | 24.x)`: `pnpm coverage` runs unit and integration projects (Testcontainers use the Docker daemon on `ubuntu-latest`). The Docker servers are started once by `vitest.global-setup.ts` and shared by the integration files (see CONTRIBUTING.md). It fails when any 100% threshold from `vitest.config.ts` is missed. `coverage/lcov.info` and `coverage-summary.json` are uploaded as an artifact and to Codecov with OIDC (`use_oidc: true`, `fail_ci_if_error: false`), so no `CODECOV_TOKEN` is needed.
-- `build`: `pnpm build`, per-package `typecheck`, `publint` and `attw --pack` for every package.
+- `build`: `pnpm build`, per-package `typecheck`, `pnpm api:check`, `publint` and `attw --pack` for every package. `pnpm api:check` (`scripts/api-report.mjs`) runs API Extractor on every entry point in `exports` and fails when `packages/*/etc/*.api.md` no longer matches the built declarations. After changing an exported declaration run `pnpm build && pnpm api:report` and commit the updated reports with the change.
 - `nestjs compat (@nestjs/* 11 | 12)`: re-resolves the `@nestjs/*` dev dependencies of `packages/nestjs` to the matrix major with `pnpm --filter @relaybus/nestjs add --save-dev`, asserts the resolved major, then runs the typecheck and the nestjs tests. The changed manifest and lockfile exist only on the runner.
 - `prisma compat (prisma 6)`: re-resolves `prisma`, `@prisma/client` and `@prisma/adapter-pg` in `packages/postgres` to the previous major (the test job runs the latest, 7), adds the datasource `url` Prisma 6 needs to the test schema, regenerates the test client and runs the Prisma integration tests (contract suite, prepared statements, wake-up after commit). The changed files exist only on the runner.
 - `CI pass`: succeeds only when all of the above succeeded. Use this single check in branch protection.
@@ -76,7 +76,7 @@ pnpm add -w -D @stryker-mutator/core@10.0.0 @stryker-mutator/vitest-runner@10.0.
 ```bash
 pnpm format:check && pnpm lint && pnpm typecheck   # quality
 pnpm coverage                                      # test job (needs Docker)
-pnpm build && pnpm -r exec publint . && pnpm -r exec attw --pack .   # build job
+pnpm build && pnpm api:check && pnpm -r exec publint . && pnpm -r exec attw --pack .   # build job
 pnpm mutation                                      # after installing Stryker
 ```
 

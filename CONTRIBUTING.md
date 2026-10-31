@@ -20,21 +20,23 @@ pnpm test
 
 ## Scripts
 
-| Script                  | What it does                                                       |
-| ----------------------- | ------------------------------------------------------------------ |
-| `pnpm build`            | Builds every package in `packages/*` with tsup (ESM + CJS + types) |
-| `pnpm typecheck`        | Type checks sources, tests and examples with the root `tsconfig`   |
-| `pnpm lint`             | ESLint with type-aware rules                                       |
-| `pnpm format`           | Prettier, write mode                                               |
-| `pnpm format:check`     | Prettier, check mode (used by CI)                                  |
-| `pnpm test`             | All tests (unit + integration)                                     |
-| `pnpm test:unit`        | Unit project only, no Docker needed                                |
-| `pnpm test:integration` | Integration projects only, needs Docker                            |
-| `pnpm test:affected`    | Only tests that import files changed since `HEAD` (`--changed`)    |
-| `pnpm test:pull-images` | Pre-pulls the Docker images the integration tests use              |
-| `pnpm coverage`         | All tests with V8 coverage; fails below the thresholds             |
-| `pnpm mutation`         | Stryker mutation testing                                           |
-| `pnpm release:dry-run`  | semantic-release dry run (needs a GitHub token, see docs)          |
+| Script                  | What it does                                                            |
+| ----------------------- | ----------------------------------------------------------------------- |
+| `pnpm build`            | Builds every package in `packages/*` with tsup (ESM + CJS + types)      |
+| `pnpm typecheck`        | Type checks sources, tests and examples with the root `tsconfig`        |
+| `pnpm lint`             | ESLint with type-aware rules                                            |
+| `pnpm api:report`       | Rewrites the public API reports `packages/*/etc/*.api.md` (build first) |
+| `pnpm api:check`        | Fails when an API report is out of date (used by CI)                    |
+| `pnpm format`           | Prettier, write mode                                                    |
+| `pnpm format:check`     | Prettier, check mode (used by CI)                                       |
+| `pnpm test`             | All tests (unit + integration)                                          |
+| `pnpm test:unit`        | Unit project only, no Docker needed                                     |
+| `pnpm test:integration` | Integration projects only, needs Docker                                 |
+| `pnpm test:affected`    | Only tests that import files changed since `HEAD` (`--changed`)         |
+| `pnpm test:pull-images` | Pre-pulls the Docker images the integration tests use                   |
+| `pnpm coverage`         | All tests with V8 coverage; fails below the thresholds                  |
+| `pnpm mutation`         | Stryker mutation testing                                                |
+| `pnpm release:dry-run`  | semantic-release dry run (needs a GitHub token, see docs)               |
 
 ## Test strategy
 

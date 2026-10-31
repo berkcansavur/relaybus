@@ -120,6 +120,11 @@ jobs:
       - name: Typecheck each package build
         run: pnpm -r run typecheck
 
+      # Fails when an exported declaration changed but packages/*/etc/*.api.md was
+      # not regenerated (`pnpm api:report`) and committed with the change.
+      - name: Check public API reports (API Extractor)
+        run: pnpm api:check
+
       - name: Lint package manifests (publint)
         run: pnpm -r --filter "./packages/*" exec publint .
 

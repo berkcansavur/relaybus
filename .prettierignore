@@ -14,3 +14,5 @@ docs-site/packages/*.md
 !docs-site/packages/index.md
 llms.txt
 packages/postgres/test/prisma/generated
+# API Extractor reports (scripts/api-report.mjs): compared byte for byte in CI
+packages/*/etc/*.api.md

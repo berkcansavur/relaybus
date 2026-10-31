@@ -26,3 +26,6 @@ stryker.log
 
 # Prisma Client generated for the integration tests (scripts/generate-test-prisma-client.mjs)
 packages/postgres/test/prisma/generated/
+
+# API Extractor working files (scripts/api-report.mjs)
+packages/*/temp/
