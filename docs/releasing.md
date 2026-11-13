@@ -1,6 +1,6 @@
 # Releasing
 
-Releases are fully automated with [semantic-release](https://semantic-release.org). Every push to `main` that contains releasable Conventional Commits publishes **all seven `@relaybus/*` packages with one shared version** (lockstep). There is no version-bump commit, no committed `CHANGELOG`, and no npm token: GitHub Releases are the changelog and npm Trusted Publishing (OIDC) authenticates the publish.
+Releases are fully automated with [semantic-release](https://semantic-release.org). Every push to `main` that contains releasable Conventional Commits publishes **all nine `@relaybus/*` packages with one shared version** (lockstep). There is no version-bump commit, no committed `CHANGELOG`, and no npm token: GitHub Releases are the changelog and npm Trusted Publishing (OIDC) authenticates the publish.
 
 Configuration lives in `release.config.mjs`; the workflow is `.github/workflows/release.yml`.
 
@@ -8,18 +8,18 @@ Configuration lives in `release.config.mjs`; the workflow is `.github/workflows/
 
 The baseline is the git tag `v0.0.0` (see [bootstrap](#bootstrap-one-time)). semantic-release analyzes the commits between the last `v*` tag reachable from the branch and `HEAD`, takes the highest bump, and applies it. PRs are squash-merged, so the PR title is the commit message that counts (`pr-title.yml` validates it).
 
-| Commit (0.x phase)                               | Bump  | Example                         |
+| Commit                                           | Bump  | Example                         |
 | ------------------------------------------------ | ----- | ------------------------------- |
 | `feat`                                           | minor | `feat(postgres): lease batches` |
 | `fix`, `perf`, `refactor`, `revert`              | patch | `fix(core): clamp retry delay`  |
-| Any type with `!` or a `BREAKING CHANGE:` footer | minor | `feat(core)!: rename publish()` |
+| Any type with `!` or a `BREAKING CHANGE:` footer | major | `feat(core)!: rename publish()` |
 | `docs`, `chore`, `test`, `ci`, `build`, `style`  | none  | `chore(deps): bump vitest`      |
 
-Examples: from `v0.0.0`, a `feat` gives `0.1.0`, only `fix` gives `0.0.1`, a breaking change gives `0.1.0` (not `1.0.0`). From `v0.3.2`, a breaking change gives `0.4.0`. Only `docs`/`chore`/... commits produce no release and the workflow ends successfully.
+Examples: from `v1.2.3`, a `feat` gives `1.3.0`, only `fix` gives `1.2.4`, a breaking change gives `2.0.0`. Before 1.0.0 a breaking change released a minor (`v0.3.2` to `0.4.0`). Only `docs`/`chore`/... commits produce no release and the workflow ends successfully.
 
 Allowed scopes (commitlint and PR title check): `core`, `nestjs`, `postgres`, `mongodb`, `kafka`, `rabbitmq`, `testing`, `eslint-plugin`, `otel`, `repo`, `ci`, `deps`, `release`. Scopes do not influence the version because all packages release together; they only group the release notes.
 
-Because the packages are in lockstep, `peerDependencies` on `@relaybus/core` are published as `^<version>`. In the 0.x range `^0.1.0` means `>=0.1.0 <0.2.0`, so consumers upgrade the adapters together with core on every minor.
+Because the packages are in lockstep, `peerDependencies` on `@relaybus/core` are published as `^<version>`. `^1.2.0` means `>=1.2.0 <2.0.0`, so an adapter keeps working with every later core of the same major. (In the 0.x range `^0.1.0` meant `>=0.1.0 <0.2.0`.)
 
 ### Dependabot
 
