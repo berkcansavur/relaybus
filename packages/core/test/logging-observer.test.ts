@@ -85,6 +85,30 @@ describe('createLoggingObserver', () => {
     expect(logger.log.mock.calls).toEqual([['written order.placed.v1']]);
   });
 
+  it('writes every committed line when one of them fails, then reports the failure', async () => {
+    const logger = createLogger();
+    logger.log.mockImplementationOnce(() => {
+      throw new Error('log sink down');
+    });
+    const failures: string[] = [];
+    const test = createTestBus({
+      observers: [
+        createLoggingObserver({ logger, events: ['committed'] }),
+        { onFailure: ({ stage, error }) => failures.push(`${stage}: ${error.message}`) },
+      ],
+      transactionMode: 'optional',
+    });
+    test.bus.subscribe(OrderPlaced, () => undefined, { id: 'h' });
+
+    await test.bus.publishAll([
+      new OrderPlaced({ orderId: 'a' }),
+      new OrderPlaced({ orderId: 'b' }),
+    ]);
+
+    expect(logger.log).toHaveBeenCalledTimes(2);
+    expect(failures).toEqual(['observer: log sink down']);
+  });
+
   it('implements only the hooks of the events it logs', () => {
     const observer = createLoggingObserver({ logger: createLogger(), events: ['dead'] });
 

@@ -59,11 +59,8 @@ export function createLoggingObserver({
   return {
     ...(enabled.has('committed')
       ? {
-          onPublishCommitted: ({ envelopes }) => {
-            for (const eventEnvelope of envelopes) {
-              write('log', lines.committed(eventEnvelope));
-            }
-          },
+          onPublishCommitted: ({ envelopes }) =>
+            writeEach(envelopes, (eventEnvelope) => write('log', lines.committed(eventEnvelope))),
         }
       : {}),
     ...(enabled.has('succeeded')
@@ -76,4 +73,18 @@ export function createLoggingObserver({
       ? { onDeliveryDead: (event) => write('error', lines.dead(event)) }
       : {}),
   };
+}
+
+function writeEach<T>(items: readonly T[], writeOne: (item: T) => void): void {
+  const failures: unknown[] = [];
+  for (const item of items) {
+    try {
+      writeOne(item);
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) {
+    throw failures[0];
+  }
 }
