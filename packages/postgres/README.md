@@ -119,6 +119,10 @@ transactions. The adapter is typed structurally, so the package has no Prisma de
 transactions default to a 5 s timeout, so pass `createPrismaExecutor(prisma, { timeout, maxWait })` if handlers run
 longer.
 
+Behind PgBouncer in transaction mode, `?pgbouncer=true` on the connection string works. At an isolation level, `createPrismaExecutor` opens the transaction with Prisma's own `$transaction(work, { isolationLevel })` (`'ReadCommitted'`, `'RepeatableRead'` or `'Serializable'`, the type `PrismaIsolationLevel`). Before 1.1.0 it sent `SET TRANSACTION ISOLATION LEVEL`, which failed with SQLSTATE `25001` (Prisma `P2010`) on Prisma 5 and 6 with `?pgbouncer=true`, because their query engine sends `DEALLOCATE ALL` right after `BEGIN`.
+
+If the work of a transaction that relaybus opened caught a statement error, PostgreSQL has aborted it and answers `COMMIT` with `ROLLBACK`. The store throws a `TransactionRolledBackError` (`RELAYBUS_TRANSACTION_ROLLED_BACK`) instead of reporting success. `PgExecutor` reads the result of `COMMIT`; the other executors, Prisma included, run one `SELECT 1` at the end of each transaction relaybus opens, unless they declare `verifiesCommit: true`. A transaction your application opens itself is not checked.
+
 **Give an ORM store the `pg` pool too.** ORMs send raw statements unprepared and offer no connection to `LISTEN` on.
 Pass the `pg` pool your ORM's driver uses as `pool` next to `executor`: the statements the store sends outside your
 transactions (the dispatcher's claims, completions and renewals) then run on it as prepared statements, and the

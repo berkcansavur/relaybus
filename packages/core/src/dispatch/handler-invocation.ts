@@ -15,6 +15,7 @@ export type InvokeInput = {
   readonly delivery: ClaimedDelivery;
   readonly controller: AbortController;
   readonly transaction: unknown;
+  readonly afterCommit: Array<() => void>;
 };
 
 export function rejectOnAbort(signal: AbortSignal): Promise<never> {
@@ -41,11 +42,14 @@ export class HandlerInvocation {
   }
 
   async invoke(input: InvokeInput): Promise<void> {
-    const { registration, event, delivery, controller, transaction } = input;
+    const { registration, event, delivery, controller, transaction, afterCommit } = input;
     const context = contextOf(input);
     // An isolated scope keeps a caller's transaction (for example a test calling
     // runOnce inside bus.transaction) from leaking into the handler.
-    const scope = transaction === undefined ? { event } : { event, transaction };
+    const scope =
+      transaction === undefined
+        ? { event }
+        : { event, transaction, commit: { transaction, afterCommit, enclosing: undefined } };
     if (controller.signal.aborted) {
       // The lease was lost (or the bus stopped) while the payload was validated.
       throw controller.signal.reason;

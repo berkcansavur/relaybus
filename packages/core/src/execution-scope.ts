@@ -2,6 +2,12 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { TransactionIsolationLevel } from './event-store.js';
 import type { EventEnvelope } from './event.js';
 
+export interface CommitScope {
+  readonly transaction: unknown;
+  readonly afterCommit: Array<() => void>;
+  readonly enclosing: CommitScope | undefined;
+}
+
 export interface ExecutionScope {
   /** Transaction that `publish` joins when none is passed explicitly. */
   readonly transaction?: unknown;
@@ -15,6 +21,7 @@ export interface ExecutionScope {
     readonly level: TransactionIsolationLevel;
     readonly afterCommit: Array<() => void>;
   };
+  readonly commit?: CommitScope;
   /** Event being handled. Events published while handling it inherit correlation. */
   readonly event?: EventEnvelope;
 }
@@ -29,6 +36,17 @@ export function runInScope<T>(scope: ExecutionScope, work: () => T): T {
 /** Runs `work` in exactly `scope`, ignoring the caller's scope. */
 export function runInIsolatedScope<T>(scope: ExecutionScope, work: () => T): T {
   return storage.run(scope, work);
+}
+
+export async function runThenAfterCommit<T>(
+  afterCommit: Array<() => void>,
+  run: () => Promise<T>,
+): Promise<T> {
+  const value = await run();
+  for (const callback of afterCommit) {
+    callback();
+  }
+  return value;
 }
 
 export function getCurrentScope(): ExecutionScope | undefined {

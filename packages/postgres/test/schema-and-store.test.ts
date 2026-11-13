@@ -399,6 +399,7 @@ describe('wake-up notifications', () => {
     const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
     const store = new PostgresEventStore<undefined>({
       executor: {
+        verifiesCommit: true,
         transaction: (work) => work(undefined),
         query: async (sql, parameters) => {
           if (sql.startsWith('SELECT true AS notified FROM pg_notify')) {

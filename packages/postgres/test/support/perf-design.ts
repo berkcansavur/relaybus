@@ -46,6 +46,7 @@ export function startPerfDatabase(): Promise<TestDatabase> {
  */
 export class CountingExecutor implements PostgresExecutor<PoolClient> {
   readonly #inner: PgExecutor;
+  readonly verifiesCommit = true;
   statements = 0;
   /** Messages the client sent and waited on: every `client.query` of a transaction or a statement. */
   roundTrips = 0;

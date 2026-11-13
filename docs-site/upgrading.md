@@ -1,15 +1,33 @@
 ---
 title: Upgrading relaybus
-description: 'Step-by-step upgrades between relaybus releases: 0.4.1 to 0.5.0 (nothing required; optional catalog routes, wire names and transaction isolation levels), 0.4.0 to 0.4.1 (PostgreSQL payload columns become json), 0.3 to 0.4 (nothing required; optional pool, wake, Confluent client, record keys, injected producer), 0.2 to 0.3 (route ids, transaction budget, StopResult, decorator and codec renames, error codes) and 0.1 to 0.2 (completed deliveries deleted, completionHistory, schema upgrade, PgBouncer settings).'
+description: 'Step-by-step upgrades between relaybus releases: 1.0.0 to 1.1.0 (nothing required; a commit PostgreSQL rolled back now throws, Prisma isolation levels work behind PgBouncer), 0.4.1 to 0.5.0 (nothing required; optional catalog routes, wire names and transaction isolation levels), 0.4.0 to 0.4.1 (PostgreSQL payload columns become json), 0.3 to 0.4 (nothing required; optional pool, wake, Confluent client, record keys, injected producer), 0.2 to 0.3 (route ids, transaction budget, StopResult, decorator and codec renames, error codes) and 0.1 to 0.2 (completed deliveries deleted, completionHistory, schema upgrade, PgBouncer settings).'
 ---
 
 # Upgrading relaybus
 
+- [1.0.0 → 1.1.0](#upgrading-from-1-0-0-to-1-1-0)
 - [0.4.1 → 0.5.0](#upgrading-from-0-4-1-to-0-5-0)
 - [0.4.0 → 0.4.1](#upgrading-from-0-4-0-to-0-4-1)
 - [0.3 → 0.4](#upgrading-from-0-3-to-0-4)
 - [0.2 → 0.3](#upgrading-from-0-2-to-0-3)
 - [0.1 → 0.2](#upgrading-from-0-1-to-0-2)
+
+## Upgrading from 1.0.0 to 1.1.0
+
+```yaml
+applies to: '@relaybus/* 1.0.0 -> 1.1.0'
+downtime: 'none'
+rollout: 'mixed 1.0.0 and 1.1.0 instances are safe'
+database: 'none'
+rollback: 'safe; 1.1.0 stores and sends nothing 1.0.0 cannot read'
+```
+
+**Nothing is required.** 1.1.0 adds API (`onPublishCommitted`, `createLoggingObserver`, `destinations` on catalog routes) and does not change the database schema, the wire format or any export. Two fixes change behaviour:
+
+- **A commit that PostgreSQL rolled back now throws.** If the work of a `bus.transaction`, a `@RelayBusTransaction()` method or a transactional handler caught a statement error and carried on, PostgreSQL aborted the transaction and answered `COMMIT` with `ROLLBACK`. 1.0.0 reported success although nothing was committed. 1.1.0 throws `TransactionRolledBackError` (`RELAYBUS_TRANSACTION_ROLLED_BACK`). Code that lost a transaction silently now gets an error: a request can fail where it used to answer success, and a transactional handler is retried. Find these cases by searching for a `catch` around a query inside a transaction, and let the error reach relaybus. `PgExecutor` costs no extra round trip; the other executors run one `SELECT 1` at the end of each transaction relaybus opens. A transaction your application opens itself is not checked.
+- **Prisma sets the isolation level through its own option.** With `createPrismaExecutor`, `isolationLevel` now goes through `$transaction(work, { isolationLevel })`. Nothing changes except that it also works with `?pgbouncer=true` on Prisma 5 and 6, where `SET TRANSACTION ISOLATION LEVEL` failed with SQLSTATE `25001`.
+
+`onPublished` keeps its timing; `onPublishCommitted` is a new hook next to it, and an observer that does not implement it is not affected. A custom `PostgresExecutor` keeps working and can declare `verifiesCommit: true` if it already reads the result of `COMMIT`.
 
 ## Upgrading from 0.4.1 to 0.5.0
 

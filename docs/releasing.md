@@ -33,7 +33,7 @@ Dependabot uses `chore(deps)` (npm, production and development) and `chore(ci)` 
 2. Open a PR into `next` that changes that rule to `{ breaking: true, release: 'major' }` together with the 1.0 changes (deleting the rule is not enough: a matching custom rule replaces the preset's default rules, so a breaking `feat!` commit would then only match the `feat` rule and release a minor), and squash-merge it with a breaking title such as `feat!: stable 1.0 API`. Until 1.0.0 ships, the `build` job of `ci.yml` runs `node scripts/compare-build-output.mjs 0.5.0` on every branch, which fails when any built `.js`/`.cjs` file differs from 0.5.0: no runtime change can reach `next` or `main` before 1.0.0. The release is `1.0.0-next.1` on the `next` dist-tag; `latest` stays on 0.5.0.
 3. Install `1.0.0-next.1` in the applications that use relaybus and run their tests before going on. Fixes go to `next` the same way and release `1.0.0-next.2`, and so on.
 4. Merge `next` into `main` with a breaking title such as `feat!: relaybus 1.0.0`. The release is `1.0.0` on `latest`.
-5. Remove the `Compare build output with 0.5.0` step from `ci.yml`: later releases are expected to change the build output.
+5. Remove the `Compare build output with 0.5.0` step from `ci.yml`: later releases are expected to change the build output. (Done after 1.0.0; `scripts/compare-build-output.mjs <version>` stays for comparing a build with any published version.)
 
 ## Prerelease channels
 

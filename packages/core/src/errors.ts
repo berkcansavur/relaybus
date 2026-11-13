@@ -71,6 +71,11 @@ export class TransactionTimeoutError extends RelayBusError {
   override readonly code: string = 'RELAYBUS_TRANSACTION_TIMEOUT';
 }
 
+export class TransactionRolledBackError extends RelayBusError {
+  override name = 'TransactionRolledBackError';
+  override readonly code: string = 'RELAYBUS_TRANSACTION_ROLLED_BACK';
+}
+
 /**
  * A `@RelayBusTransaction({ isolationLevel })` method was called inside a transaction that was not
  * opened by relaybus at that same level. The isolation level of a running transaction cannot be

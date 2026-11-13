@@ -125,11 +125,6 @@ jobs:
       - name: Check public API reports (API Extractor)
         run: pnpm api:check
 
-      # 1.0.0 release gate (docs/releasing.md): until 1.0.0 ships, the built JavaScript must
-      # be byte-identical to 0.5.0 on every branch, so 1.0.0 changes no runtime behaviour.
-      - name: Compare build output with 0.5.0
-        run: node scripts/compare-build-output.mjs 0.5.0
-
       - name: Lint package manifests (publint)
         run: pnpm -r --filter "./packages/*" exec publint .
 

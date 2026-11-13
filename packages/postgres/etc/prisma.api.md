@@ -33,6 +33,8 @@ interface PostgresExecutor<TTransaction> {
     // Warning: (ae-unresolved-link) The @link reference could not be resolved: The package "@relaybus/postgres" does not have an export "PostgresExecutor"
     // Warning: (ae-unresolved-link) The @link reference could not be resolved: The package "@relaybus/postgres" does not have an export "PostgresExecutor"
     transactionWithIsolation?<T>(work: (transaction: TTransaction) => Promise<T>, options: PostgresIsolatedTransactionOptions): Promise<T>;
+    // (undocumented)
+    readonly verifiesCommit?: boolean;
 }
 
 // Warning: (ae-unresolved-link) The @link reference could not be resolved: The package "@relaybus/postgres" does not have an export "PostgresExecutor"
@@ -59,8 +61,13 @@ type PostgresRow = Readonly<Record<string, unknown>>;
 // @public
 export interface PrismaClientLike extends PrismaQueryable {
     // (undocumented)
-    $transaction<T>(work: (transaction: PrismaQueryable) => Promise<T>, options?: PrismaTransactionOptions): Promise<T>;
+    $transaction<T>(work: (transaction: PrismaQueryable) => Promise<T>, options?: PrismaTransactionOptions & {
+        readonly isolationLevel?: PrismaIsolationLevel;
+    }): Promise<T>;
 }
+
+// @public (undocumented)
+export type PrismaIsolationLevel = 'ReadCommitted' | 'RepeatableRead' | 'Serializable';
 
 // @public
 export interface PrismaQueryable {
@@ -78,14 +85,16 @@ export interface PrismaTransactionOptions {
 
 // Warnings were encountered during analysis:
 //
-// dist/executor-Bt90w33Q.d.ts:5:1 - (ae-undocumented) Missing documentation for "PostgresRow".
-// dist/executor-Bt90w33Q.d.ts:42:5 - (ae-undocumented) Missing documentation for "transaction".
-// dist/executor-Bt90w33Q.d.ts:65:5 - (ae-undocumented) Missing documentation for "query".
-// dist/executor-Bt90w33Q.d.ts:69:5 - (ae-undocumented) Missing documentation for "isolationLevel".
-// dist/prisma.d.ts:6:5 - (ae-undocumented) Missing documentation for "$queryRawUnsafe".
-// dist/prisma.d.ts:10:5 - (ae-undocumented) Missing documentation for "$transaction".
-// dist/prisma.d.ts:14:5 - (ae-undocumented) Missing documentation for "maxWait".
-// dist/prisma.d.ts:15:5 - (ae-undocumented) Missing documentation for "timeout".
+// dist/executor-DhrUSP7Q.d.ts:5:1 - (ae-undocumented) Missing documentation for "PostgresRow".
+// dist/executor-DhrUSP7Q.d.ts:42:5 - (ae-undocumented) Missing documentation for "verifiesCommit".
+// dist/executor-DhrUSP7Q.d.ts:43:5 - (ae-undocumented) Missing documentation for "transaction".
+// dist/executor-DhrUSP7Q.d.ts:66:5 - (ae-undocumented) Missing documentation for "query".
+// dist/executor-DhrUSP7Q.d.ts:70:5 - (ae-undocumented) Missing documentation for "isolationLevel".
+// dist/prisma.d.ts:4:1 - (ae-undocumented) Missing documentation for "PrismaIsolationLevel".
+// dist/prisma.d.ts:7:5 - (ae-undocumented) Missing documentation for "$queryRawUnsafe".
+// dist/prisma.d.ts:11:5 - (ae-undocumented) Missing documentation for "$transaction".
+// dist/prisma.d.ts:17:5 - (ae-undocumented) Missing documentation for "maxWait".
+// dist/prisma.d.ts:18:5 - (ae-undocumented) Missing documentation for "timeout".
 
 // (No @packageDocumentation comment for this package)
 
@@ -95,6 +104,7 @@ export interface PrismaTransactionOptions {
 
 ```text
 type  PrismaClientLike
+type  PrismaIsolationLevel
 type  PrismaQueryable
 type  PrismaTransactionOptions
 value createPrismaExecutor

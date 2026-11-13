@@ -1,7 +1,11 @@
 import { isCatalogDeclaration, type CatalogDeclaration } from './catalog-coverage.js';
 import { catalogLabel, describeCatalog, wireNamesOf, type Catalog } from './catalog.js';
 import { checkWireNames, type WireNames } from './catalog-wire-names.js';
-import { ConfigurationError, DuplicateRouteEventError } from './errors.js';
+import {
+  ConfigurationError,
+  DuplicateRouteEventError,
+  UnknownCatalogEventError,
+} from './errors.js';
 import type { RouteOptions } from './relay-bus-options.js';
 import {
   mergeRouteWireTypes,
@@ -24,6 +28,7 @@ export interface CatalogRouteOptions<TName extends string = string> extends Omit
    * Needs a codec that maps type names (`jsonEnvelope`) and a transport that accepts them.
    */
   readonly wireTypes?: WireNames<TName>;
+  readonly destinations?: Readonly<Partial<Record<TName, string>>>;
 }
 
 /** The routes of a catalog declaration, created by {@link route}. */
@@ -34,7 +39,7 @@ export interface CatalogRoute {
   readonly wireNames: ReadonlyMap<string, string>;
 }
 
-const catalogRoutes = new WeakSet<object>();
+const catalogRoutes = new WeakMap<object, ReadonlyMap<string, string>>();
 
 /**
  * Routes the events of a `produce(...)` declaration to one transport with shared settings. Each
@@ -66,12 +71,16 @@ export function route<TCatalog extends Catalog, TName extends keyof TCatalog>(
     events: declaration.events,
     label: `The route of ${catalogLabel(declaration.catalog)}`,
   });
+  const destinations = checkDestinations(options.destinations, {
+    events: declaration.events,
+    label: `The route of ${catalogLabel(declaration.catalog)}`,
+  });
   const created = Object.freeze({
     declaration,
     options: Object.freeze({ ...options }),
     wireNames,
   });
-  catalogRoutes.add(created);
+  catalogRoutes.set(created, destinations);
   return created;
 }
 
@@ -146,13 +155,19 @@ function plainRoute(definition: RouteOptions): ExpandedRoute {
   return { route: definition, type, fromCatalog: false, wireType: undefined };
 }
 
-function expandCatalogRoute({ declaration, options, wireNames }: CatalogRoute): ExpandedRoute[] {
+function expandCatalogRoute(catalogRoute: CatalogRoute): ExpandedRoute[] {
+  const { declaration, options, wireNames } = catalogRoute;
+  const destinations = catalogRoutes.get(catalogRoute)!;
   const catalogNames = wireNamesOf(declaration.catalog);
   const shared = Object.fromEntries(
-    Object.entries(options).filter(([name]) => name !== 'wireTypes'),
-  ) as Omit<CatalogRouteOptions, 'wireTypes'>;
+    Object.entries(options).filter(([name]) => name !== 'wireTypes' && name !== 'destinations'),
+  ) as Omit<CatalogRouteOptions, 'wireTypes' | 'destinations'>;
   return declaration.entries.map((entry) => ({
-    route: { ...shared, event: entry.eventClass },
+    route: {
+      ...shared,
+      event: entry.eventClass,
+      ...(destinations.has(entry.name) ? { destination: destinations.get(entry.name)! } : {}),
+    },
     type: entry.type,
     fromCatalog: true,
     wireType: wireNames.get(entry.name) ?? catalogNames.get(entry.name),
@@ -173,4 +188,23 @@ function assertNotRoutedTwice(expanded: readonly ExpandedRoute[]): void {
     }
     seen.set(key, item);
   }
+}
+
+function checkDestinations(
+  destinations: Readonly<Partial<Record<string, string>>> | undefined,
+  { events, label }: { readonly events: readonly string[]; readonly label: string },
+): ReadonlyMap<string, string> {
+  const checked = new Map<string, string>();
+  for (const [event, destination] of Object.entries(destinations ?? {})) {
+    if (!events.includes(event)) {
+      throw new UnknownCatalogEventError(
+        `${label} has no event named '${event}' to give a destination; its events are ${events.join(', ')}`,
+      );
+    }
+    if (typeof destination !== 'string' || destination.length === 0) {
+      throw new ConfigurationError(`${label} needs a non-empty destination for '${event}'`);
+    }
+    checked.set(event, destination);
+  }
+  return checked;
 }

@@ -2,6 +2,7 @@ import type { DeliveryTimers } from '../delivery-timers.js';
 import { AttemptsExhaustedError, DispatcherStoppedError, LeaseLostError } from '../errors.js';
 import { validatePayload, type EventEnvelope } from '../event.js';
 import type { ClaimedDelivery } from '../event-store.js';
+import { runThenAfterCommit } from '../execution-scope.js';
 import type { HandlerRegistration } from '../handler-registry.js';
 import { schedule } from '../internal/timers.js';
 import { startLeaseHeartbeat } from '../lease-heartbeat.js';
@@ -153,8 +154,7 @@ export class DeliveryExecutor {
     registration: HandlerRegistration,
     { delivery, controller }: DeliveryRun,
   ): Promise<HandlerOutcome> {
-    const { dependencies, invocation, outcomes } = this.#parts;
-    const { store, clock } = dependencies;
+    const { invocation, outcomes } = this.#parts;
     const payload = await validatePayload(
       delivery.event.type,
       registration.schema,
@@ -162,18 +162,45 @@ export class DeliveryExecutor {
     );
     const event: EventEnvelope = { ...delivery.event, payload };
     if (registration.transactional) {
-      await store.transaction(async (transaction) => {
-        await invocation.invoke({ registration, event, delivery, controller, transaction });
+      await this.#runInDeliveryTransaction(registration, { delivery, controller, event });
+      return 'completed';
+    }
+    await invocation.invoke({
+      registration,
+      event,
+      delivery,
+      controller,
+      transaction: undefined,
+      afterCommit: [],
+    });
+    return outcomes.confirmCompletion(delivery);
+  }
+
+  async #runInDeliveryTransaction(
+    registration: HandlerRegistration,
+    { delivery, controller, event }: DeliveryRun & { readonly event: EventEnvelope },
+  ): Promise<void> {
+    const { dependencies, invocation } = this.#parts;
+    const { store, clock } = dependencies;
+    const afterCommit: Array<() => void> = [];
+    await runThenAfterCommit(afterCommit, () =>
+      store.transaction(async (transaction) => {
+        afterCommit.length = 0;
+        await invocation.invoke({
+          registration,
+          event,
+          delivery,
+          controller,
+          transaction,
+          afterCommit,
+        });
         if (!(await store.complete(delivery, clock.now(), transaction))) {
           throw new LeaseLostError(`Lease on delivery ${delivery.deliveryId} was lost`, {
             storeConfirmed: true,
           });
         }
-      });
-      return 'completed';
-    }
-    await invocation.invoke({ registration, event, delivery, controller, transaction: undefined });
-    return outcomes.confirmCompletion(delivery);
+      }),
+    );
   }
 
   /**

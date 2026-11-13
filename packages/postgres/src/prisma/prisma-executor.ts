@@ -1,5 +1,15 @@
+import type { TransactionIsolationLevel } from '@relaybus/core';
 import { adapterExecutor } from '../adapter-executor.js';
 import type { PostgresExecutor, PostgresRow } from '../executor.js';
+import { isolationKeywords } from '../transaction-isolation.js';
+
+export type PrismaIsolationLevel = 'ReadCommitted' | 'RepeatableRead' | 'Serializable';
+
+const PRISMA_ISOLATION_LEVELS: Readonly<Record<TransactionIsolationLevel, PrismaIsolationLevel>> = {
+  'read committed': 'ReadCommitted',
+  'repeatable read': 'RepeatableRead',
+  serializable: 'Serializable',
+};
 
 /** What a `PrismaClient` and an interactive-transaction client have in common. */
 export interface PrismaQueryable {
@@ -10,7 +20,7 @@ export interface PrismaQueryable {
 export interface PrismaClientLike extends PrismaQueryable {
   $transaction<T>(
     work: (transaction: PrismaQueryable) => Promise<T>,
-    options?: PrismaTransactionOptions,
+    options?: PrismaTransactionOptions & { readonly isolationLevel?: PrismaIsolationLevel },
   ): Promise<T>;
 }
 
@@ -34,6 +44,13 @@ export function createPrismaExecutor(
   return adapterExecutor<PrismaQueryable>({
     root: client,
     transaction: (work) => client.$transaction(work, transactionOptions),
+    transactionAt: (isolationLevel, work) => {
+      isolationKeywords(isolationLevel);
+      return client.$transaction(work, {
+        ...transactionOptions,
+        isolationLevel: PRISMA_ISOLATION_LEVELS[isolationLevel],
+      });
+    },
     async run(queryable, { sql, parameters }) {
       return (await queryable.$queryRawUnsafe(sql, ...parameters)) as PostgresRow[];
     },
