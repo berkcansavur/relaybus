@@ -48,6 +48,8 @@ interface PostgresExecutor<TTransaction> {
     // Warning: (ae-unresolved-link) The @link reference could not be resolved: The package "@relaybus/postgres" does not have an export "PostgresExecutor"
     // Warning: (ae-unresolved-link) The @link reference could not be resolved: The package "@relaybus/postgres" does not have an export "PostgresExecutor"
     transactionWithIsolation?<T>(work: (transaction: TTransaction) => Promise<T>, options: PostgresIsolatedTransactionOptions): Promise<T>;
+    // (undocumented)
+    readonly verifiesCommit?: boolean;
 }
 
 // Warning: (ae-unresolved-link) The @link reference could not be resolved: The package "@relaybus/postgres" does not have an export "PostgresExecutor"
@@ -75,10 +77,11 @@ type PostgresRow = Readonly<Record<string, unknown>>;
 //
 // dist/drizzle.d.ts:7:5 - (ae-undocumented) Missing documentation for "execute".
 // dist/drizzle.d.ts:13:5 - (ae-undocumented) Missing documentation for "transaction".
-// dist/executor-Bt90w33Q.d.ts:5:1 - (ae-undocumented) Missing documentation for "PostgresRow".
-// dist/executor-Bt90w33Q.d.ts:42:5 - (ae-undocumented) Missing documentation for "transaction".
-// dist/executor-Bt90w33Q.d.ts:65:5 - (ae-undocumented) Missing documentation for "query".
-// dist/executor-Bt90w33Q.d.ts:69:5 - (ae-undocumented) Missing documentation for "isolationLevel".
+// dist/executor-DhrUSP7Q.d.ts:5:1 - (ae-undocumented) Missing documentation for "PostgresRow".
+// dist/executor-DhrUSP7Q.d.ts:42:5 - (ae-undocumented) Missing documentation for "verifiesCommit".
+// dist/executor-DhrUSP7Q.d.ts:43:5 - (ae-undocumented) Missing documentation for "transaction".
+// dist/executor-DhrUSP7Q.d.ts:66:5 - (ae-undocumented) Missing documentation for "query".
+// dist/executor-DhrUSP7Q.d.ts:70:5 - (ae-undocumented) Missing documentation for "isolationLevel".
 
 // (No @packageDocumentation comment for this package)
 

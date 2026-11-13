@@ -151,6 +151,35 @@ export class EventPublisher<TTransaction> {
       } else {
         this.#announce(report, wake);
       }
+      this.#reportCommit(report, { committed, transaction, scope: context.scope });
+    }
+  }
+
+  #reportCommit(
+    report: { readonly envelopes: readonly EventEnvelope[]; readonly deliveries: number },
+    {
+      committed,
+      transaction,
+      scope,
+    }: {
+      readonly committed: boolean;
+      readonly transaction: TTransaction | undefined;
+      readonly scope: ExecutionScope | undefined;
+    },
+  ): void {
+    const { notifier } = this.#parts;
+    if (!notifier.wants('onPublishCommitted')) {
+      return;
+    }
+    if (committed) {
+      notifier.notify('onPublishCommitted', report);
+      return;
+    }
+    for (let commit = scope?.commit; commit !== undefined; commit = commit.enclosing) {
+      if (commit.transaction === transaction) {
+        commit.afterCommit.push(() => notifier.notify('onPublishCommitted', report));
+        return;
+      }
     }
   }
 

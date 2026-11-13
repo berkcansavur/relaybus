@@ -42,6 +42,7 @@ export interface PostgresExecutor<TTransaction> {
    * sets it.
    */
   readonly sessionTimeouts?: boolean;
+  readonly verifiesCommit?: boolean;
   transaction<T>(work: (transaction: TTransaction) => Promise<T>): Promise<T>;
   /**
    * Optional. Opens a transaction like {@link PostgresExecutor.transaction} that the server holds to

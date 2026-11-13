@@ -119,6 +119,8 @@ export interface CatalogRoute {
 
 // @public
 export interface CatalogRouteOptions<TName extends string = string> extends Omit<RouteOptions, 'event'> {
+    // (undocumented)
+    readonly destinations?: Readonly<Partial<Record<TName, string>>>;
     // Warning: (ae-forgotten-export) The symbol "WireNames" needs to be exported by the entry point index.d.ts
     readonly wireTypes?: WireNames<TName>;
 }
@@ -197,6 +199,9 @@ export class ConfigurationError extends RelayBusError {
 export function consume<TCatalog extends Catalog, const TName extends keyof TCatalog = keyof TCatalog>(catalog: TCatalog, options?: CatalogEventSelection<TName>): CatalogDeclaration<TCatalog, TName>;
 
 // @public (undocumented)
+export function createLoggingObserver(input: LoggingObserverOptions): RelayBusObserver;
+
+// @public (undocumented)
 export function createRetryPolicy(options: RetryPolicyOptions | undefined, base?: RetryPolicy): RetryPolicy;
 
 // @public
@@ -207,6 +212,9 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy;
 
 // @public
 export const DEFAULT_ROUTE_RETRY_POLICY: RetryPolicy;
+
+// @public (undocumented)
+export const defaultLoggingFormat: Required<LoggingObserverFormat>;
 
 // @public
 export function defineCatalog<const TCatalog extends Catalog>(events: TCatalog, options?: DefineCatalogOptions<TCatalog>): Readonly<TCatalog>;
@@ -663,6 +671,41 @@ export class LifecycleError extends RelayBusError {
     name: string;
 }
 
+// @public (undocumented)
+export type LoggedEvent = 'committed' | 'succeeded' | 'retry' | 'dead';
+
+// @public (undocumented)
+export interface LoggingObserverFormat {
+    // (undocumented)
+    readonly committed?: (eventEnvelope: EventEnvelope) => string | undefined;
+    // (undocumented)
+    readonly dead?: (event: {
+        readonly delivery: ClaimedDelivery;
+        readonly error: ErrorInfo;
+    }) => string | undefined;
+    // (undocumented)
+    readonly retry?: (event: {
+        readonly delivery: ClaimedDelivery;
+        readonly error: ErrorInfo;
+        readonly availableAt: Date;
+    }) => string | undefined;
+    // (undocumented)
+    readonly succeeded?: (event: {
+        readonly delivery: ClaimedDelivery;
+        readonly durationMs: number;
+    }) => string | undefined;
+}
+
+// @public (undocumented)
+export interface LoggingObserverOptions {
+    // (undocumented)
+    readonly events?: readonly LoggedEvent[];
+    // (undocumented)
+    readonly format?: LoggingObserverFormat;
+    // (undocumented)
+    readonly logger: RelayBusLogger;
+}
+
 // @public
 export type MatchingHandlers<TCatalog extends Catalog, TName extends keyof TCatalog, THandlers> = {
     readonly [TKey in keyof THandlers]: TKey extends `on${infer TEventName extends TName & string}` ? THandlers[TKey] extends (event: infer TEvent, ...rest: never[]) => unknown ? EventOf<TCatalog[TEventName]> extends TEvent ? THandlers[TKey] : (event: EventOf<TCatalog[TEventName]>, context: HandlerContext) => unknown : (event: EventOf<TCatalog[TEventName]>, context: HandlerContext) => unknown : never;
@@ -883,6 +926,11 @@ export interface RelayBusObserver {
     // (undocumented)
     onLeaseLost?(event: {
         readonly delivery: ClaimedDelivery;
+    }): void;
+    // (undocumented)
+    onPublishCommitted?(event: {
+        readonly envelopes: readonly EventEnvelope[];
+        readonly deliveries: number;
     }): void;
     onPublished?(event: {
         readonly envelopes: readonly EventEnvelope[];
@@ -1144,6 +1192,14 @@ export class TransactionRequiredError extends RelayBusError {
     name: string;
 }
 
+// @public (undocumented)
+export class TransactionRolledBackError extends RelayBusError {
+    // (undocumented)
+    readonly code: string;
+    // (undocumented)
+    name: string;
+}
+
 // @public
 export class TransactionTimeoutError extends RelayBusError {
     // (undocumented)
@@ -1270,233 +1326,250 @@ export class WireTypesUnsupportedError extends ConfigurationError {
 // dist/index.d.ts:221:5 - (ae-undocumented) Missing documentation for "entries".
 // dist/index.d.ts:325:5 - (ae-undocumented) Missing documentation for "catalog".
 // dist/index.d.ts:326:5 - (ae-undocumented) Missing documentation for "role".
-// dist/index.d.ts:378:5 - (ae-undocumented) Missing documentation for "declaration".
-// dist/index.d.ts:379:5 - (ae-undocumented) Missing documentation for "options".
-// dist/index.d.ts:427:5 - (ae-undocumented) Missing documentation for "traceparent".
-// dist/index.d.ts:428:5 - (ae-undocumented) Missing documentation for "tracestate".
-// dist/index.d.ts:446:5 - (ae-undocumented) Missing documentation for "envelope".
-// dist/index.d.ts:447:5 - (ae-undocumented) Missing documentation for "transport".
-// dist/index.d.ts:450:5 - (ae-undocumented) Missing documentation for "destination".
-// dist/index.d.ts:454:5 - (ae-undocumented) Missing documentation for "delivery".
-// dist/index.d.ts:480:1 - (ae-undocumented) Missing documentation for "FailureStage".
-// dist/index.d.ts:489:5 - (ae-undocumented) Missing documentation for "durationMs".
-// dist/index.d.ts:490:5 - (ae-undocumented) Missing documentation for "outcome".
-// dist/index.d.ts:491:5 - (ae-undocumented) Missing documentation for "error".
-// dist/index.d.ts:499:5 - (ae-undocumented) Missing documentation for "claimed".
-// dist/index.d.ts:502:5 - (ae-undocumented) Missing documentation for "durationMs".
-// dist/index.d.ts:503:5 - (ae-undocumented) Missing documentation for "outcome".
-// dist/index.d.ts:504:5 - (ae-undocumented) Missing documentation for "error".
-// dist/index.d.ts:508:5 - (ae-undocumented) Missing documentation for "delivery".
-// dist/index.d.ts:509:5 - (ae-undocumented) Missing documentation for "kind".
-// dist/index.d.ts:518:5 - (ae-undocumented) Missing documentation for "delivery".
-// dist/index.d.ts:519:5 - (ae-undocumented) Missing documentation for "kind".
-// dist/index.d.ts:520:5 - (ae-undocumented) Missing documentation for "durationMs".
-// dist/index.d.ts:521:5 - (ae-undocumented) Missing documentation for "outcome".
-// dist/index.d.ts:522:5 - (ae-undocumented) Missing documentation for "error".
-// dist/index.d.ts:526:5 - (ae-undocumented) Missing documentation for "envelope".
-// dist/index.d.ts:531:5 - (ae-undocumented) Missing documentation for "destination".
-// dist/index.d.ts:532:5 - (ae-undocumented) Missing documentation for "durationMs".
-// dist/index.d.ts:533:5 - (ae-undocumented) Missing documentation for "outcome".
-// dist/index.d.ts:534:5 - (ae-undocumented) Missing documentation for "error".
-// dist/index.d.ts:552:5 - (ae-undocumented) Missing documentation for "source".
-// dist/index.d.ts:555:5 - (ae-undocumented) Missing documentation for "outcome".
-// dist/index.d.ts:556:5 - (ae-undocumented) Missing documentation for "durationMs".
-// dist/index.d.ts:557:5 - (ae-undocumented) Missing documentation for "error".
-// dist/index.d.ts:572:5 - (ae-undocumented) Missing documentation for "error".
-// dist/index.d.ts:580:5 - (ae-undocumented) Missing documentation for "statistics".
-// dist/index.d.ts:598:5 - (ae-undocumented) Missing documentation for "onReceived".
-// dist/index.d.ts:606:5 - (ae-undocumented) Missing documentation for "onDeliveryStarted".
-// dist/index.d.ts:609:5 - (ae-undocumented) Missing documentation for "onDeliverySucceeded".
-// dist/index.d.ts:613:5 - (ae-undocumented) Missing documentation for "onDeliveryRetryScheduled".
-// dist/index.d.ts:618:5 - (ae-undocumented) Missing documentation for "onDeliveryDead".
-// dist/index.d.ts:622:5 - (ae-undocumented) Missing documentation for "onLeaseLost".
-// dist/index.d.ts:625:5 - (ae-undocumented) Missing documentation for "onPurged".
-// dist/index.d.ts:628:5 - (ae-undocumented) Missing documentation for "onFailure".
-// dist/index.d.ts:634:5 - (ae-undocumented) Missing documentation for "onClaimFinished".
-// dist/index.d.ts:635:5 - (ae-undocumented) Missing documentation for "onHandlerStarted".
-// dist/index.d.ts:636:5 - (ae-undocumented) Missing documentation for "onHandlerFinished".
-// dist/index.d.ts:637:5 - (ae-undocumented) Missing documentation for "onTransportSent".
-// dist/index.d.ts:638:5 - (ae-undocumented) Missing documentation for "onReceiveFinished".
-// dist/index.d.ts:646:5 - (ae-undocumented) Missing documentation for "log".
-// dist/index.d.ts:647:5 - (ae-undocumented) Missing documentation for "warn".
-// dist/index.d.ts:648:5 - (ae-undocumented) Missing documentation for "error".
-// dist/index.d.ts:686:1 - (ae-undocumented) Missing documentation for "DispatcherOptions".
-// dist/index.d.ts:713:1 - (ae-undocumented) Missing documentation for "RetentionOptions".
-// dist/index.d.ts:743:1 - (ae-undocumented) Missing documentation for "InboundSubscriptionOptions".
-// dist/index.d.ts:744:5 - (ae-undocumented) Missing documentation for "transport".
-// dist/index.d.ts:745:5 - (ae-undocumented) Missing documentation for "destinations".
-// dist/index.d.ts:747:1 - (ae-undocumented) Missing documentation for "RelayBusOptions".
-// dist/index.d.ts:748:5 - (ae-undocumented) Missing documentation for "store".
-// dist/index.d.ts:774:5 - (ae-undocumented) Missing documentation for "dispatcher".
-// dist/index.d.ts:775:5 - (ae-undocumented) Missing documentation for "retention".
-// dist/index.d.ts:776:5 - (ae-undocumented) Missing documentation for "transports".
-// dist/index.d.ts:806:5 - (ae-undocumented) Missing documentation for "clock".
-// dist/index.d.ts:807:5 - (ae-undocumented) Missing documentation for "generateIdentifier".
-// dist/index.d.ts:808:5 - (ae-undocumented) Missing documentation for "random".
-// dist/index.d.ts:820:1 - (ae-undocumented) Missing documentation for "PublishOptions".
-// dist/index.d.ts:833:5 - (ae-undocumented) Missing documentation for "headers".
-// dist/index.d.ts:840:1 - (ae-undocumented) Missing documentation for "PublishOneOptions".
-// dist/index.d.ts:848:1 - (ae-undocumented) Missing documentation for "ReceiveStatus".
-// dist/index.d.ts:852:5 - (ae-undocumented) Missing documentation for "publish".
-// dist/index.d.ts:853:5 - (ae-undocumented) Missing documentation for "publishAll".
-// dist/index.d.ts:886:5 - (ae-undocumented) Missing documentation for "state".
-// dist/index.d.ts:887:5 - (ae-undocumented) Missing documentation for "enqueue".
-// dist/index.d.ts:890:5 - (ae-undocumented) Missing documentation for "commit".
-// dist/index.d.ts:891:5 - (ae-undocumented) Missing documentation for "rollback".
-// dist/index.d.ts:894:1 - (ae-undocumented) Missing documentation for "InMemoryEventStoreOptions".
-// dist/index.d.ts:897:5 - (ae-undocumented) Missing documentation for "generateIdentifier".
-// dist/index.d.ts:914:5 - (ae-undocumented) Missing documentation for "transaction".
-// dist/index.d.ts:915:5 - (ae-undocumented) Missing documentation for "append".
-// dist/index.d.ts:916:5 - (ae-undocumented) Missing documentation for "claim".
-// dist/index.d.ts:917:5 - (ae-undocumented) Missing documentation for "extendLease".
-// dist/index.d.ts:918:5 - (ae-undocumented) Missing documentation for "complete".
-// dist/index.d.ts:919:5 - (ae-undocumented) Missing documentation for "completeMany".
-// dist/index.d.ts:920:5 - (ae-undocumented) Missing documentation for "reschedule".
-// dist/index.d.ts:921:5 - (ae-undocumented) Missing documentation for "release".
-// dist/index.d.ts:922:5 - (ae-undocumented) Missing documentation for "bury".
-// dist/index.d.ts:923:5 - (ae-undocumented) Missing documentation for "listDeliveries".
-// dist/index.d.ts:924:5 - (ae-undocumented) Missing documentation for "requeue".
-// dist/index.d.ts:925:5 - (ae-undocumented) Missing documentation for "purge".
-// dist/index.d.ts:926:5 - (ae-undocumented) Missing documentation for "statistics".
-// dist/index.d.ts:929:1 - (ae-undocumented) Missing documentation for "StopOptions".
-// dist/index.d.ts:957:5 - (ae-undocumented) Missing documentation for "store".
-// dist/index.d.ts:958:5 - (ae-undocumented) Missing documentation for "isRunning".
-// dist/index.d.ts:967:5 - (ae-undocumented) Missing documentation for "subscribe".
-// dist/index.d.ts:1067:5 - (ae-undocumented) Missing documentation for "listDeliveries".
-// dist/index.d.ts:1075:5 - (ae-undocumented) Missing documentation for "statistics".
-// dist/transport-CXoZgh5u.d.ts:3:5 - (ae-undocumented) Missing documentation for "now".
-// dist/transport-CXoZgh5u.d.ts:17:15 - (ae-undocumented) Missing documentation for "systemClock".
-// dist/transport-CXoZgh5u.d.ts:24:1 - (ae-undocumented) Missing documentation for "DurationUnit".
-// dist/transport-CXoZgh5u.d.ts:25:1 - (ae-undocumented) Missing documentation for "toMilliseconds".
-// dist/transport-CXoZgh5u.d.ts:35:5 - (ae-undocumented) Missing documentation for ""~standard"".
-// dist/transport-CXoZgh5u.d.ts:37:1 - (ae-undocumented) Missing documentation for "StandardSchemaV1".
-// dist/transport-CXoZgh5u.d.ts:38:5 - (ae-undocumented) Missing documentation for "Props".
-// dist/transport-CXoZgh5u.d.ts:39:9 - (ae-undocumented) Missing documentation for "version".
-// dist/transport-CXoZgh5u.d.ts:40:9 - (ae-undocumented) Missing documentation for "vendor".
-// dist/transport-CXoZgh5u.d.ts:41:9 - (ae-undocumented) Missing documentation for "validate".
-// dist/transport-CXoZgh5u.d.ts:42:9 - (ae-undocumented) Missing documentation for "types".
-// dist/transport-CXoZgh5u.d.ts:44:5 - (ae-undocumented) Missing documentation for "Result".
-// dist/transport-CXoZgh5u.d.ts:45:5 - (ae-undocumented) Missing documentation for "SuccessResult".
-// dist/transport-CXoZgh5u.d.ts:46:9 - (ae-undocumented) Missing documentation for "value".
-// dist/transport-CXoZgh5u.d.ts:47:9 - (ae-undocumented) Missing documentation for "issues".
-// dist/transport-CXoZgh5u.d.ts:49:5 - (ae-undocumented) Missing documentation for "FailureResult".
-// dist/transport-CXoZgh5u.d.ts:50:9 - (ae-undocumented) Missing documentation for "issues".
-// dist/transport-CXoZgh5u.d.ts:52:5 - (ae-undocumented) Missing documentation for "Issue".
-// dist/transport-CXoZgh5u.d.ts:53:9 - (ae-undocumented) Missing documentation for "message".
-// dist/transport-CXoZgh5u.d.ts:54:9 - (ae-undocumented) Missing documentation for "path".
-// dist/transport-CXoZgh5u.d.ts:56:5 - (ae-undocumented) Missing documentation for "PathSegment".
-// dist/transport-CXoZgh5u.d.ts:57:9 - (ae-undocumented) Missing documentation for "key".
-// dist/transport-CXoZgh5u.d.ts:59:5 - (ae-undocumented) Missing documentation for "Types".
-// dist/transport-CXoZgh5u.d.ts:60:9 - (ae-undocumented) Missing documentation for "input".
-// dist/transport-CXoZgh5u.d.ts:61:9 - (ae-undocumented) Missing documentation for "output".
-// dist/transport-CXoZgh5u.d.ts:63:5 - (ae-undocumented) Missing documentation for "InferInput".
-// dist/transport-CXoZgh5u.d.ts:64:5 - (ae-undocumented) Missing documentation for "InferOutput".
-// dist/transport-CXoZgh5u.d.ts:82:5 - (ae-undocumented) Missing documentation for "payload".
-// dist/transport-CXoZgh5u.d.ts:83:5 - (ae-undocumented) Missing documentation for "headers".
-// dist/transport-CXoZgh5u.d.ts:88:5 - (ae-undocumented) Missing documentation for "occurredAt".
-// dist/transport-CXoZgh5u.d.ts:92:5 - (ae-undocumented) Missing documentation for "type".
-// dist/transport-CXoZgh5u.d.ts:93:5 - (ae-undocumented) Missing documentation for "payload".
-// dist/transport-CXoZgh5u.d.ts:104:5 - (ae-undocumented) Missing documentation for "__new".
-// dist/transport-CXoZgh5u.d.ts:105:5 - (ae-undocumented) Missing documentation for "type".
-// dist/transport-CXoZgh5u.d.ts:106:5 - (ae-undocumented) Missing documentation for "schema".
-// dist/transport-CXoZgh5u.d.ts:116:1 - (ae-undocumented) Missing documentation for "DefineEventOptions".
-// dist/transport-CXoZgh5u.d.ts:122:1 - (ae-undocumented) Missing documentation for "DefineEventKeyOptions".
-// dist/transport-CXoZgh5u.d.ts:131:1 - (ae-undocumented) Missing documentation for "assertEventType".
-// dist/transport-CXoZgh5u.d.ts:148:1 - (ae-undocumented) Missing documentation for "defineEvent".
-// dist/transport-CXoZgh5u.d.ts:156:5 - (ae-undocumented) Missing documentation for "name".
-// dist/transport-CXoZgh5u.d.ts:166:5 - (ae-undocumented) Missing documentation for "name".
-// dist/transport-CXoZgh5u.d.ts:167:5 - (ae-undocumented) Missing documentation for "code".
-// dist/transport-CXoZgh5u.d.ts:174:5 - (ae-undocumented) Missing documentation for "name".
-// dist/transport-CXoZgh5u.d.ts:175:5 - (ae-undocumented) Missing documentation for "code".
-// dist/transport-CXoZgh5u.d.ts:179:5 - (ae-undocumented) Missing documentation for "name".
-// dist/transport-CXoZgh5u.d.ts:180:5 - (ae-undocumented) Missing documentation for "code".
-// dist/transport-CXoZgh5u.d.ts:187:5 - (ae-undocumented) Missing documentation for "name".
-// dist/transport-CXoZgh5u.d.ts:188:5 - (ae-undocumented) Missing documentation for "code".
-// dist/transport-CXoZgh5u.d.ts:195:5 - (ae-undocumented) Missing documentation for "name".
-// dist/transport-CXoZgh5u.d.ts:196:5 - (ae-undocumented) Missing documentation for "code".
-// dist/transport-CXoZgh5u.d.ts:204:5 - (ae-undocumented) Missing documentation for "name".
-// dist/transport-CXoZgh5u.d.ts:205:5 - (ae-undocumented) Missing documentation for "code".
-// dist/transport-CXoZgh5u.d.ts:213:5 - (ae-undocumented) Missing documentation for "name".
-// dist/transport-CXoZgh5u.d.ts:214:5 - (ae-undocumented) Missing documentation for "code".
-// dist/transport-CXoZgh5u.d.ts:223:5 - (ae-undocumented) Missing documentation for "name".
-// dist/transport-CXoZgh5u.d.ts:224:5 - (ae-undocumented) Missing documentation for "code".
-// dist/transport-CXoZgh5u.d.ts:231:5 - (ae-undocumented) Missing documentation for "name".
-// dist/transport-CXoZgh5u.d.ts:232:5 - (ae-undocumented) Missing documentation for "code".
-// dist/transport-CXoZgh5u.d.ts:236:5 - (ae-undocumented) Missing documentation for "issues".
-// dist/transport-CXoZgh5u.d.ts:237:5 - (ae-undocumented) Missing documentation for "name".
-// dist/transport-CXoZgh5u.d.ts:238:5 - (ae-undocumented) Missing documentation for "code".
-// dist/transport-CXoZgh5u.d.ts:246:5 - (ae-undocumented) Missing documentation for "name".
-// dist/transport-CXoZgh5u.d.ts:247:5 - (ae-undocumented) Missing documentation for "code".
-// dist/transport-CXoZgh5u.d.ts:251:5 - (ae-undocumented) Missing documentation for "name".
-// dist/transport-CXoZgh5u.d.ts:252:5 - (ae-undocumented) Missing documentation for "code".
-// dist/transport-CXoZgh5u.d.ts:264:5 - (ae-undocumented) Missing documentation for "name".
-// dist/transport-CXoZgh5u.d.ts:265:5 - (ae-undocumented) Missing documentation for "code".
-// dist/transport-CXoZgh5u.d.ts:272:5 - (ae-undocumented) Missing documentation for "name".
-// dist/transport-CXoZgh5u.d.ts:273:5 - (ae-undocumented) Missing documentation for "code".
-// dist/transport-CXoZgh5u.d.ts:280:5 - (ae-undocumented) Missing documentation for "name".
-// dist/transport-CXoZgh5u.d.ts:281:5 - (ae-undocumented) Missing documentation for "code".
-// dist/transport-CXoZgh5u.d.ts:285:5 - (ae-undocumented) Missing documentation for "name".
-// dist/transport-CXoZgh5u.d.ts:286:5 - (ae-undocumented) Missing documentation for "code".
-// dist/transport-CXoZgh5u.d.ts:290:5 - (ae-undocumented) Missing documentation for "name".
-// dist/transport-CXoZgh5u.d.ts:291:5 - (ae-undocumented) Missing documentation for "code".
-// dist/transport-CXoZgh5u.d.ts:293:1 - (ae-undocumented) Missing documentation for "ValidationIssue".
-// dist/transport-CXoZgh5u.d.ts:294:5 - (ae-undocumented) Missing documentation for "message".
-// dist/transport-CXoZgh5u.d.ts:295:5 - (ae-undocumented) Missing documentation for "path".
-// dist/transport-CXoZgh5u.d.ts:299:5 - (ae-undocumented) Missing documentation for "name".
-// dist/transport-CXoZgh5u.d.ts:300:5 - (ae-undocumented) Missing documentation for "message".
-// dist/transport-CXoZgh5u.d.ts:301:5 - (ae-undocumented) Missing documentation for "stack".
-// dist/transport-CXoZgh5u.d.ts:305:1 - (ae-undocumented) Missing documentation for "toErrorInfo".
-// dist/transport-CXoZgh5u.d.ts:318:15 - (ae-undocumented) Missing documentation for "DELIVERY_STATUSES".
-// dist/transport-CXoZgh5u.d.ts:325:15 - (ae-undocumented) Missing documentation for "TRANSACTION_ISOLATION_LEVELS".
-// dist/transport-CXoZgh5u.d.ts:326:1 - (ae-undocumented) Missing documentation for "NewDelivery".
-// dist/transport-CXoZgh5u.d.ts:327:5 - (ae-undocumented) Missing documentation for "id".
-// dist/transport-CXoZgh5u.d.ts:330:5 - (ae-undocumented) Missing documentation for "availableAt".
-// dist/transport-CXoZgh5u.d.ts:332:1 - (ae-undocumented) Missing documentation for "AppendEntry".
-// dist/transport-CXoZgh5u.d.ts:333:5 - (ae-undocumented) Missing documentation for "event".
-// dist/transport-CXoZgh5u.d.ts:334:5 - (ae-undocumented) Missing documentation for "deliveries".
-// dist/transport-CXoZgh5u.d.ts:336:1 - (ae-undocumented) Missing documentation for "AppendResult".
-// dist/transport-CXoZgh5u.d.ts:357:5 - (ae-undocumented) Missing documentation for "limit".
-// dist/transport-CXoZgh5u.d.ts:358:5 - (ae-undocumented) Missing documentation for "leaseOwner".
-// dist/transport-CXoZgh5u.d.ts:359:5 - (ae-undocumented) Missing documentation for "leaseExpiresAt".
-// dist/transport-CXoZgh5u.d.ts:360:5 - (ae-undocumented) Missing documentation for "now".
-// dist/transport-CXoZgh5u.d.ts:368:5 - (ae-undocumented) Missing documentation for "deliveryId".
-// dist/transport-CXoZgh5u.d.ts:369:5 - (ae-undocumented) Missing documentation for "leaseToken".
-// dist/transport-CXoZgh5u.d.ts:371:1 - (ae-undocumented) Missing documentation for "ClaimedDelivery".
-// dist/transport-CXoZgh5u.d.ts:372:5 - (ae-undocumented) Missing documentation for "handler".
-// dist/transport-CXoZgh5u.d.ts:375:5 - (ae-undocumented) Missing documentation for "leaseExpiresAt".
-// dist/transport-CXoZgh5u.d.ts:376:5 - (ae-undocumented) Missing documentation for "event".
-// dist/transport-CXoZgh5u.d.ts:378:1 - (ae-undocumented) Missing documentation for "DeliveryRecord".
-// dist/transport-CXoZgh5u.d.ts:379:5 - (ae-undocumented) Missing documentation for "id".
-// dist/transport-CXoZgh5u.d.ts:380:5 - (ae-undocumented) Missing documentation for "handler".
-// dist/transport-CXoZgh5u.d.ts:381:5 - (ae-undocumented) Missing documentation for "status".
-// dist/transport-CXoZgh5u.d.ts:382:5 - (ae-undocumented) Missing documentation for "attempts".
-// dist/transport-CXoZgh5u.d.ts:383:5 - (ae-undocumented) Missing documentation for "availableAt".
-// dist/transport-CXoZgh5u.d.ts:384:5 - (ae-undocumented) Missing documentation for "leaseOwner".
-// dist/transport-CXoZgh5u.d.ts:385:5 - (ae-undocumented) Missing documentation for "leaseExpiresAt".
-// dist/transport-CXoZgh5u.d.ts:386:5 - (ae-undocumented) Missing documentation for "lastError".
-// dist/transport-CXoZgh5u.d.ts:387:5 - (ae-undocumented) Missing documentation for "createdAt".
-// dist/transport-CXoZgh5u.d.ts:388:5 - (ae-undocumented) Missing documentation for "updatedAt".
-// dist/transport-CXoZgh5u.d.ts:389:5 - (ae-undocumented) Missing documentation for "completedAt".
-// dist/transport-CXoZgh5u.d.ts:390:5 - (ae-undocumented) Missing documentation for "event".
-// dist/transport-CXoZgh5u.d.ts:392:1 - (ae-undocumented) Missing documentation for "DeliveryQuery".
-// dist/transport-CXoZgh5u.d.ts:393:5 - (ae-undocumented) Missing documentation for "status".
-// dist/transport-CXoZgh5u.d.ts:394:5 - (ae-undocumented) Missing documentation for "handler".
-// dist/transport-CXoZgh5u.d.ts:395:5 - (ae-undocumented) Missing documentation for "eventType".
-// dist/transport-CXoZgh5u.d.ts:396:5 - (ae-undocumented) Missing documentation for "eventId".
-// dist/transport-CXoZgh5u.d.ts:400:1 - (ae-undocumented) Missing documentation for "PurgeRequest".
-// dist/transport-CXoZgh5u.d.ts:406:1 - (ae-undocumented) Missing documentation for "PurgeResult".
-// dist/transport-CXoZgh5u.d.ts:407:5 - (ae-undocumented) Missing documentation for "deletedDeliveries".
-// dist/transport-CXoZgh5u.d.ts:411:1 - (ae-undocumented) Missing documentation for "EventStoreStatistics".
-// dist/transport-CXoZgh5u.d.ts:412:5 - (ae-undocumented) Missing documentation for "pending".
-// dist/transport-CXoZgh5u.d.ts:413:5 - (ae-undocumented) Missing documentation for "processing".
-// dist/transport-CXoZgh5u.d.ts:414:5 - (ae-undocumented) Missing documentation for "completed".
-// dist/transport-CXoZgh5u.d.ts:415:5 - (ae-undocumented) Missing documentation for "dead".
-// dist/transport-CXoZgh5u.d.ts:513:5 - (ae-undocumented) Missing documentation for "listDeliveries".
-// dist/transport-CXoZgh5u.d.ts:516:5 - (ae-undocumented) Missing documentation for "purge".
-// dist/transport-CXoZgh5u.d.ts:517:5 - (ae-undocumented) Missing documentation for "statistics".
-// dist/transport-CXoZgh5u.d.ts:584:5 - (ae-undocumented) Missing documentation for "connect".
-// dist/transport-CXoZgh5u.d.ts:595:5 - (ae-undocumented) Missing documentation for "publish".
-// dist/transport-CXoZgh5u.d.ts:596:5 - (ae-undocumented) Missing documentation for "subscribe".
+// dist/index.d.ts:375:5 - (ae-undocumented) Missing documentation for "destinations".
+// dist/index.d.ts:379:5 - (ae-undocumented) Missing documentation for "declaration".
+// dist/index.d.ts:380:5 - (ae-undocumented) Missing documentation for "options".
+// dist/index.d.ts:428:5 - (ae-undocumented) Missing documentation for "traceparent".
+// dist/index.d.ts:429:5 - (ae-undocumented) Missing documentation for "tracestate".
+// dist/index.d.ts:447:5 - (ae-undocumented) Missing documentation for "envelope".
+// dist/index.d.ts:448:5 - (ae-undocumented) Missing documentation for "transport".
+// dist/index.d.ts:451:5 - (ae-undocumented) Missing documentation for "destination".
+// dist/index.d.ts:455:5 - (ae-undocumented) Missing documentation for "delivery".
+// dist/index.d.ts:481:1 - (ae-undocumented) Missing documentation for "FailureStage".
+// dist/index.d.ts:490:5 - (ae-undocumented) Missing documentation for "durationMs".
+// dist/index.d.ts:491:5 - (ae-undocumented) Missing documentation for "outcome".
+// dist/index.d.ts:492:5 - (ae-undocumented) Missing documentation for "error".
+// dist/index.d.ts:500:5 - (ae-undocumented) Missing documentation for "claimed".
+// dist/index.d.ts:503:5 - (ae-undocumented) Missing documentation for "durationMs".
+// dist/index.d.ts:504:5 - (ae-undocumented) Missing documentation for "outcome".
+// dist/index.d.ts:505:5 - (ae-undocumented) Missing documentation for "error".
+// dist/index.d.ts:509:5 - (ae-undocumented) Missing documentation for "delivery".
+// dist/index.d.ts:510:5 - (ae-undocumented) Missing documentation for "kind".
+// dist/index.d.ts:519:5 - (ae-undocumented) Missing documentation for "delivery".
+// dist/index.d.ts:520:5 - (ae-undocumented) Missing documentation for "kind".
+// dist/index.d.ts:521:5 - (ae-undocumented) Missing documentation for "durationMs".
+// dist/index.d.ts:522:5 - (ae-undocumented) Missing documentation for "outcome".
+// dist/index.d.ts:523:5 - (ae-undocumented) Missing documentation for "error".
+// dist/index.d.ts:527:5 - (ae-undocumented) Missing documentation for "envelope".
+// dist/index.d.ts:532:5 - (ae-undocumented) Missing documentation for "destination".
+// dist/index.d.ts:533:5 - (ae-undocumented) Missing documentation for "durationMs".
+// dist/index.d.ts:534:5 - (ae-undocumented) Missing documentation for "outcome".
+// dist/index.d.ts:535:5 - (ae-undocumented) Missing documentation for "error".
+// dist/index.d.ts:553:5 - (ae-undocumented) Missing documentation for "source".
+// dist/index.d.ts:556:5 - (ae-undocumented) Missing documentation for "outcome".
+// dist/index.d.ts:557:5 - (ae-undocumented) Missing documentation for "durationMs".
+// dist/index.d.ts:558:5 - (ae-undocumented) Missing documentation for "error".
+// dist/index.d.ts:573:5 - (ae-undocumented) Missing documentation for "error".
+// dist/index.d.ts:581:5 - (ae-undocumented) Missing documentation for "statistics".
+// dist/index.d.ts:599:5 - (ae-undocumented) Missing documentation for "onPublishCommitted".
+// dist/index.d.ts:603:5 - (ae-undocumented) Missing documentation for "onReceived".
+// dist/index.d.ts:611:5 - (ae-undocumented) Missing documentation for "onDeliveryStarted".
+// dist/index.d.ts:614:5 - (ae-undocumented) Missing documentation for "onDeliverySucceeded".
+// dist/index.d.ts:618:5 - (ae-undocumented) Missing documentation for "onDeliveryRetryScheduled".
+// dist/index.d.ts:623:5 - (ae-undocumented) Missing documentation for "onDeliveryDead".
+// dist/index.d.ts:627:5 - (ae-undocumented) Missing documentation for "onLeaseLost".
+// dist/index.d.ts:630:5 - (ae-undocumented) Missing documentation for "onPurged".
+// dist/index.d.ts:633:5 - (ae-undocumented) Missing documentation for "onFailure".
+// dist/index.d.ts:639:5 - (ae-undocumented) Missing documentation for "onClaimFinished".
+// dist/index.d.ts:640:5 - (ae-undocumented) Missing documentation for "onHandlerStarted".
+// dist/index.d.ts:641:5 - (ae-undocumented) Missing documentation for "onHandlerFinished".
+// dist/index.d.ts:642:5 - (ae-undocumented) Missing documentation for "onTransportSent".
+// dist/index.d.ts:643:5 - (ae-undocumented) Missing documentation for "onReceiveFinished".
+// dist/index.d.ts:651:5 - (ae-undocumented) Missing documentation for "log".
+// dist/index.d.ts:652:5 - (ae-undocumented) Missing documentation for "warn".
+// dist/index.d.ts:653:5 - (ae-undocumented) Missing documentation for "error".
+// dist/index.d.ts:691:1 - (ae-undocumented) Missing documentation for "DispatcherOptions".
+// dist/index.d.ts:718:1 - (ae-undocumented) Missing documentation for "RetentionOptions".
+// dist/index.d.ts:748:1 - (ae-undocumented) Missing documentation for "InboundSubscriptionOptions".
+// dist/index.d.ts:749:5 - (ae-undocumented) Missing documentation for "transport".
+// dist/index.d.ts:750:5 - (ae-undocumented) Missing documentation for "destinations".
+// dist/index.d.ts:752:1 - (ae-undocumented) Missing documentation for "RelayBusOptions".
+// dist/index.d.ts:753:5 - (ae-undocumented) Missing documentation for "store".
+// dist/index.d.ts:779:5 - (ae-undocumented) Missing documentation for "dispatcher".
+// dist/index.d.ts:780:5 - (ae-undocumented) Missing documentation for "retention".
+// dist/index.d.ts:781:5 - (ae-undocumented) Missing documentation for "transports".
+// dist/index.d.ts:811:5 - (ae-undocumented) Missing documentation for "clock".
+// dist/index.d.ts:812:5 - (ae-undocumented) Missing documentation for "generateIdentifier".
+// dist/index.d.ts:813:5 - (ae-undocumented) Missing documentation for "random".
+// dist/index.d.ts:825:1 - (ae-undocumented) Missing documentation for "PublishOptions".
+// dist/index.d.ts:838:5 - (ae-undocumented) Missing documentation for "headers".
+// dist/index.d.ts:845:1 - (ae-undocumented) Missing documentation for "PublishOneOptions".
+// dist/index.d.ts:853:1 - (ae-undocumented) Missing documentation for "ReceiveStatus".
+// dist/index.d.ts:857:5 - (ae-undocumented) Missing documentation for "publish".
+// dist/index.d.ts:858:5 - (ae-undocumented) Missing documentation for "publishAll".
+// dist/index.d.ts:891:5 - (ae-undocumented) Missing documentation for "state".
+// dist/index.d.ts:892:5 - (ae-undocumented) Missing documentation for "enqueue".
+// dist/index.d.ts:895:5 - (ae-undocumented) Missing documentation for "commit".
+// dist/index.d.ts:896:5 - (ae-undocumented) Missing documentation for "rollback".
+// dist/index.d.ts:899:1 - (ae-undocumented) Missing documentation for "InMemoryEventStoreOptions".
+// dist/index.d.ts:902:5 - (ae-undocumented) Missing documentation for "generateIdentifier".
+// dist/index.d.ts:919:5 - (ae-undocumented) Missing documentation for "transaction".
+// dist/index.d.ts:920:5 - (ae-undocumented) Missing documentation for "append".
+// dist/index.d.ts:921:5 - (ae-undocumented) Missing documentation for "claim".
+// dist/index.d.ts:922:5 - (ae-undocumented) Missing documentation for "extendLease".
+// dist/index.d.ts:923:5 - (ae-undocumented) Missing documentation for "complete".
+// dist/index.d.ts:924:5 - (ae-undocumented) Missing documentation for "completeMany".
+// dist/index.d.ts:925:5 - (ae-undocumented) Missing documentation for "reschedule".
+// dist/index.d.ts:926:5 - (ae-undocumented) Missing documentation for "release".
+// dist/index.d.ts:927:5 - (ae-undocumented) Missing documentation for "bury".
+// dist/index.d.ts:928:5 - (ae-undocumented) Missing documentation for "listDeliveries".
+// dist/index.d.ts:929:5 - (ae-undocumented) Missing documentation for "requeue".
+// dist/index.d.ts:930:5 - (ae-undocumented) Missing documentation for "purge".
+// dist/index.d.ts:931:5 - (ae-undocumented) Missing documentation for "statistics".
+// dist/index.d.ts:934:1 - (ae-undocumented) Missing documentation for "StopOptions".
+// dist/index.d.ts:962:5 - (ae-undocumented) Missing documentation for "store".
+// dist/index.d.ts:963:5 - (ae-undocumented) Missing documentation for "isRunning".
+// dist/index.d.ts:972:5 - (ae-undocumented) Missing documentation for "subscribe".
+// dist/index.d.ts:1072:5 - (ae-undocumented) Missing documentation for "listDeliveries".
+// dist/index.d.ts:1080:5 - (ae-undocumented) Missing documentation for "statistics".
+// dist/index.d.ts:1085:1 - (ae-undocumented) Missing documentation for "LoggedEvent".
+// dist/index.d.ts:1086:1 - (ae-undocumented) Missing documentation for "LoggingObserverFormat".
+// dist/index.d.ts:1087:5 - (ae-undocumented) Missing documentation for "committed".
+// dist/index.d.ts:1088:5 - (ae-undocumented) Missing documentation for "succeeded".
+// dist/index.d.ts:1092:5 - (ae-undocumented) Missing documentation for "retry".
+// dist/index.d.ts:1097:5 - (ae-undocumented) Missing documentation for "dead".
+// dist/index.d.ts:1102:1 - (ae-undocumented) Missing documentation for "LoggingObserverOptions".
+// dist/index.d.ts:1103:5 - (ae-undocumented) Missing documentation for "logger".
+// dist/index.d.ts:1104:5 - (ae-undocumented) Missing documentation for "events".
+// dist/index.d.ts:1105:5 - (ae-undocumented) Missing documentation for "format".
+// dist/index.d.ts:1107:15 - (ae-undocumented) Missing documentation for "defaultLoggingFormat".
+// dist/index.d.ts:1108:1 - (ae-undocumented) Missing documentation for "createLoggingObserver".
+// dist/transport-BJefmqHq.d.ts:3:5 - (ae-undocumented) Missing documentation for "now".
+// dist/transport-BJefmqHq.d.ts:17:15 - (ae-undocumented) Missing documentation for "systemClock".
+// dist/transport-BJefmqHq.d.ts:24:1 - (ae-undocumented) Missing documentation for "DurationUnit".
+// dist/transport-BJefmqHq.d.ts:25:1 - (ae-undocumented) Missing documentation for "toMilliseconds".
+// dist/transport-BJefmqHq.d.ts:35:5 - (ae-undocumented) Missing documentation for ""~standard"".
+// dist/transport-BJefmqHq.d.ts:37:1 - (ae-undocumented) Missing documentation for "StandardSchemaV1".
+// dist/transport-BJefmqHq.d.ts:38:5 - (ae-undocumented) Missing documentation for "Props".
+// dist/transport-BJefmqHq.d.ts:39:9 - (ae-undocumented) Missing documentation for "version".
+// dist/transport-BJefmqHq.d.ts:40:9 - (ae-undocumented) Missing documentation for "vendor".
+// dist/transport-BJefmqHq.d.ts:41:9 - (ae-undocumented) Missing documentation for "validate".
+// dist/transport-BJefmqHq.d.ts:42:9 - (ae-undocumented) Missing documentation for "types".
+// dist/transport-BJefmqHq.d.ts:44:5 - (ae-undocumented) Missing documentation for "Result".
+// dist/transport-BJefmqHq.d.ts:45:5 - (ae-undocumented) Missing documentation for "SuccessResult".
+// dist/transport-BJefmqHq.d.ts:46:9 - (ae-undocumented) Missing documentation for "value".
+// dist/transport-BJefmqHq.d.ts:47:9 - (ae-undocumented) Missing documentation for "issues".
+// dist/transport-BJefmqHq.d.ts:49:5 - (ae-undocumented) Missing documentation for "FailureResult".
+// dist/transport-BJefmqHq.d.ts:50:9 - (ae-undocumented) Missing documentation for "issues".
+// dist/transport-BJefmqHq.d.ts:52:5 - (ae-undocumented) Missing documentation for "Issue".
+// dist/transport-BJefmqHq.d.ts:53:9 - (ae-undocumented) Missing documentation for "message".
+// dist/transport-BJefmqHq.d.ts:54:9 - (ae-undocumented) Missing documentation for "path".
+// dist/transport-BJefmqHq.d.ts:56:5 - (ae-undocumented) Missing documentation for "PathSegment".
+// dist/transport-BJefmqHq.d.ts:57:9 - (ae-undocumented) Missing documentation for "key".
+// dist/transport-BJefmqHq.d.ts:59:5 - (ae-undocumented) Missing documentation for "Types".
+// dist/transport-BJefmqHq.d.ts:60:9 - (ae-undocumented) Missing documentation for "input".
+// dist/transport-BJefmqHq.d.ts:61:9 - (ae-undocumented) Missing documentation for "output".
+// dist/transport-BJefmqHq.d.ts:63:5 - (ae-undocumented) Missing documentation for "InferInput".
+// dist/transport-BJefmqHq.d.ts:64:5 - (ae-undocumented) Missing documentation for "InferOutput".
+// dist/transport-BJefmqHq.d.ts:82:5 - (ae-undocumented) Missing documentation for "payload".
+// dist/transport-BJefmqHq.d.ts:83:5 - (ae-undocumented) Missing documentation for "headers".
+// dist/transport-BJefmqHq.d.ts:88:5 - (ae-undocumented) Missing documentation for "occurredAt".
+// dist/transport-BJefmqHq.d.ts:92:5 - (ae-undocumented) Missing documentation for "type".
+// dist/transport-BJefmqHq.d.ts:93:5 - (ae-undocumented) Missing documentation for "payload".
+// dist/transport-BJefmqHq.d.ts:104:5 - (ae-undocumented) Missing documentation for "__new".
+// dist/transport-BJefmqHq.d.ts:105:5 - (ae-undocumented) Missing documentation for "type".
+// dist/transport-BJefmqHq.d.ts:106:5 - (ae-undocumented) Missing documentation for "schema".
+// dist/transport-BJefmqHq.d.ts:116:1 - (ae-undocumented) Missing documentation for "DefineEventOptions".
+// dist/transport-BJefmqHq.d.ts:122:1 - (ae-undocumented) Missing documentation for "DefineEventKeyOptions".
+// dist/transport-BJefmqHq.d.ts:131:1 - (ae-undocumented) Missing documentation for "assertEventType".
+// dist/transport-BJefmqHq.d.ts:148:1 - (ae-undocumented) Missing documentation for "defineEvent".
+// dist/transport-BJefmqHq.d.ts:156:5 - (ae-undocumented) Missing documentation for "name".
+// dist/transport-BJefmqHq.d.ts:166:5 - (ae-undocumented) Missing documentation for "name".
+// dist/transport-BJefmqHq.d.ts:167:5 - (ae-undocumented) Missing documentation for "code".
+// dist/transport-BJefmqHq.d.ts:174:5 - (ae-undocumented) Missing documentation for "name".
+// dist/transport-BJefmqHq.d.ts:175:5 - (ae-undocumented) Missing documentation for "code".
+// dist/transport-BJefmqHq.d.ts:179:5 - (ae-undocumented) Missing documentation for "name".
+// dist/transport-BJefmqHq.d.ts:180:5 - (ae-undocumented) Missing documentation for "code".
+// dist/transport-BJefmqHq.d.ts:187:5 - (ae-undocumented) Missing documentation for "name".
+// dist/transport-BJefmqHq.d.ts:188:5 - (ae-undocumented) Missing documentation for "code".
+// dist/transport-BJefmqHq.d.ts:195:5 - (ae-undocumented) Missing documentation for "name".
+// dist/transport-BJefmqHq.d.ts:196:5 - (ae-undocumented) Missing documentation for "code".
+// dist/transport-BJefmqHq.d.ts:204:5 - (ae-undocumented) Missing documentation for "name".
+// dist/transport-BJefmqHq.d.ts:205:5 - (ae-undocumented) Missing documentation for "code".
+// dist/transport-BJefmqHq.d.ts:213:5 - (ae-undocumented) Missing documentation for "name".
+// dist/transport-BJefmqHq.d.ts:214:5 - (ae-undocumented) Missing documentation for "code".
+// dist/transport-BJefmqHq.d.ts:216:1 - (ae-undocumented) Missing documentation for "TransactionRolledBackError".
+// dist/transport-BJefmqHq.d.ts:217:5 - (ae-undocumented) Missing documentation for "name".
+// dist/transport-BJefmqHq.d.ts:218:5 - (ae-undocumented) Missing documentation for "code".
+// dist/transport-BJefmqHq.d.ts:227:5 - (ae-undocumented) Missing documentation for "name".
+// dist/transport-BJefmqHq.d.ts:228:5 - (ae-undocumented) Missing documentation for "code".
+// dist/transport-BJefmqHq.d.ts:235:5 - (ae-undocumented) Missing documentation for "name".
+// dist/transport-BJefmqHq.d.ts:236:5 - (ae-undocumented) Missing documentation for "code".
+// dist/transport-BJefmqHq.d.ts:240:5 - (ae-undocumented) Missing documentation for "issues".
+// dist/transport-BJefmqHq.d.ts:241:5 - (ae-undocumented) Missing documentation for "name".
+// dist/transport-BJefmqHq.d.ts:242:5 - (ae-undocumented) Missing documentation for "code".
+// dist/transport-BJefmqHq.d.ts:250:5 - (ae-undocumented) Missing documentation for "name".
+// dist/transport-BJefmqHq.d.ts:251:5 - (ae-undocumented) Missing documentation for "code".
+// dist/transport-BJefmqHq.d.ts:255:5 - (ae-undocumented) Missing documentation for "name".
+// dist/transport-BJefmqHq.d.ts:256:5 - (ae-undocumented) Missing documentation for "code".
+// dist/transport-BJefmqHq.d.ts:268:5 - (ae-undocumented) Missing documentation for "name".
+// dist/transport-BJefmqHq.d.ts:269:5 - (ae-undocumented) Missing documentation for "code".
+// dist/transport-BJefmqHq.d.ts:276:5 - (ae-undocumented) Missing documentation for "name".
+// dist/transport-BJefmqHq.d.ts:277:5 - (ae-undocumented) Missing documentation for "code".
+// dist/transport-BJefmqHq.d.ts:284:5 - (ae-undocumented) Missing documentation for "name".
+// dist/transport-BJefmqHq.d.ts:285:5 - (ae-undocumented) Missing documentation for "code".
+// dist/transport-BJefmqHq.d.ts:289:5 - (ae-undocumented) Missing documentation for "name".
+// dist/transport-BJefmqHq.d.ts:290:5 - (ae-undocumented) Missing documentation for "code".
+// dist/transport-BJefmqHq.d.ts:294:5 - (ae-undocumented) Missing documentation for "name".
+// dist/transport-BJefmqHq.d.ts:295:5 - (ae-undocumented) Missing documentation for "code".
+// dist/transport-BJefmqHq.d.ts:297:1 - (ae-undocumented) Missing documentation for "ValidationIssue".
+// dist/transport-BJefmqHq.d.ts:298:5 - (ae-undocumented) Missing documentation for "message".
+// dist/transport-BJefmqHq.d.ts:299:5 - (ae-undocumented) Missing documentation for "path".
+// dist/transport-BJefmqHq.d.ts:303:5 - (ae-undocumented) Missing documentation for "name".
+// dist/transport-BJefmqHq.d.ts:304:5 - (ae-undocumented) Missing documentation for "message".
+// dist/transport-BJefmqHq.d.ts:305:5 - (ae-undocumented) Missing documentation for "stack".
+// dist/transport-BJefmqHq.d.ts:309:1 - (ae-undocumented) Missing documentation for "toErrorInfo".
+// dist/transport-BJefmqHq.d.ts:322:15 - (ae-undocumented) Missing documentation for "DELIVERY_STATUSES".
+// dist/transport-BJefmqHq.d.ts:329:15 - (ae-undocumented) Missing documentation for "TRANSACTION_ISOLATION_LEVELS".
+// dist/transport-BJefmqHq.d.ts:330:1 - (ae-undocumented) Missing documentation for "NewDelivery".
+// dist/transport-BJefmqHq.d.ts:331:5 - (ae-undocumented) Missing documentation for "id".
+// dist/transport-BJefmqHq.d.ts:334:5 - (ae-undocumented) Missing documentation for "availableAt".
+// dist/transport-BJefmqHq.d.ts:336:1 - (ae-undocumented) Missing documentation for "AppendEntry".
+// dist/transport-BJefmqHq.d.ts:337:5 - (ae-undocumented) Missing documentation for "event".
+// dist/transport-BJefmqHq.d.ts:338:5 - (ae-undocumented) Missing documentation for "deliveries".
+// dist/transport-BJefmqHq.d.ts:340:1 - (ae-undocumented) Missing documentation for "AppendResult".
+// dist/transport-BJefmqHq.d.ts:361:5 - (ae-undocumented) Missing documentation for "limit".
+// dist/transport-BJefmqHq.d.ts:362:5 - (ae-undocumented) Missing documentation for "leaseOwner".
+// dist/transport-BJefmqHq.d.ts:363:5 - (ae-undocumented) Missing documentation for "leaseExpiresAt".
+// dist/transport-BJefmqHq.d.ts:364:5 - (ae-undocumented) Missing documentation for "now".
+// dist/transport-BJefmqHq.d.ts:372:5 - (ae-undocumented) Missing documentation for "deliveryId".
+// dist/transport-BJefmqHq.d.ts:373:5 - (ae-undocumented) Missing documentation for "leaseToken".
+// dist/transport-BJefmqHq.d.ts:375:1 - (ae-undocumented) Missing documentation for "ClaimedDelivery".
+// dist/transport-BJefmqHq.d.ts:376:5 - (ae-undocumented) Missing documentation for "handler".
+// dist/transport-BJefmqHq.d.ts:379:5 - (ae-undocumented) Missing documentation for "leaseExpiresAt".
+// dist/transport-BJefmqHq.d.ts:380:5 - (ae-undocumented) Missing documentation for "event".
+// dist/transport-BJefmqHq.d.ts:382:1 - (ae-undocumented) Missing documentation for "DeliveryRecord".
+// dist/transport-BJefmqHq.d.ts:383:5 - (ae-undocumented) Missing documentation for "id".
+// dist/transport-BJefmqHq.d.ts:384:5 - (ae-undocumented) Missing documentation for "handler".
+// dist/transport-BJefmqHq.d.ts:385:5 - (ae-undocumented) Missing documentation for "status".
+// dist/transport-BJefmqHq.d.ts:386:5 - (ae-undocumented) Missing documentation for "attempts".
+// dist/transport-BJefmqHq.d.ts:387:5 - (ae-undocumented) Missing documentation for "availableAt".
+// dist/transport-BJefmqHq.d.ts:388:5 - (ae-undocumented) Missing documentation for "leaseOwner".
+// dist/transport-BJefmqHq.d.ts:389:5 - (ae-undocumented) Missing documentation for "leaseExpiresAt".
+// dist/transport-BJefmqHq.d.ts:390:5 - (ae-undocumented) Missing documentation for "lastError".
+// dist/transport-BJefmqHq.d.ts:391:5 - (ae-undocumented) Missing documentation for "createdAt".
+// dist/transport-BJefmqHq.d.ts:392:5 - (ae-undocumented) Missing documentation for "updatedAt".
+// dist/transport-BJefmqHq.d.ts:393:5 - (ae-undocumented) Missing documentation for "completedAt".
+// dist/transport-BJefmqHq.d.ts:394:5 - (ae-undocumented) Missing documentation for "event".
+// dist/transport-BJefmqHq.d.ts:396:1 - (ae-undocumented) Missing documentation for "DeliveryQuery".
+// dist/transport-BJefmqHq.d.ts:397:5 - (ae-undocumented) Missing documentation for "status".
+// dist/transport-BJefmqHq.d.ts:398:5 - (ae-undocumented) Missing documentation for "handler".
+// dist/transport-BJefmqHq.d.ts:399:5 - (ae-undocumented) Missing documentation for "eventType".
+// dist/transport-BJefmqHq.d.ts:400:5 - (ae-undocumented) Missing documentation for "eventId".
+// dist/transport-BJefmqHq.d.ts:404:1 - (ae-undocumented) Missing documentation for "PurgeRequest".
+// dist/transport-BJefmqHq.d.ts:410:1 - (ae-undocumented) Missing documentation for "PurgeResult".
+// dist/transport-BJefmqHq.d.ts:411:5 - (ae-undocumented) Missing documentation for "deletedDeliveries".
+// dist/transport-BJefmqHq.d.ts:415:1 - (ae-undocumented) Missing documentation for "EventStoreStatistics".
+// dist/transport-BJefmqHq.d.ts:416:5 - (ae-undocumented) Missing documentation for "pending".
+// dist/transport-BJefmqHq.d.ts:417:5 - (ae-undocumented) Missing documentation for "processing".
+// dist/transport-BJefmqHq.d.ts:418:5 - (ae-undocumented) Missing documentation for "completed".
+// dist/transport-BJefmqHq.d.ts:419:5 - (ae-undocumented) Missing documentation for "dead".
+// dist/transport-BJefmqHq.d.ts:517:5 - (ae-undocumented) Missing documentation for "listDeliveries".
+// dist/transport-BJefmqHq.d.ts:520:5 - (ae-undocumented) Missing documentation for "purge".
+// dist/transport-BJefmqHq.d.ts:521:5 - (ae-undocumented) Missing documentation for "statistics".
+// dist/transport-BJefmqHq.d.ts:588:5 - (ae-undocumented) Missing documentation for "connect".
+// dist/transport-BJefmqHq.d.ts:599:5 - (ae-undocumented) Missing documentation for "publish".
+// dist/transport-BJefmqHq.d.ts:600:5 - (ae-undocumented) Missing documentation for "subscribe".
 
 // (No @packageDocumentation comment for this package)
 
@@ -1559,6 +1632,9 @@ type  InvalidMessageEvent
 type  InvalidTransportMessage
 type  JitterStrategy
 type  LeaseReference
+type  LoggedEvent
+type  LoggingObserverFormat
+type  LoggingObserverOptions
 type  MatchingHandlers
 type  NewDelivery
 type  NoExtraHandlers
@@ -1627,6 +1703,7 @@ value TRACESTATE_HEADER
 value TRANSACTION_ISOLATION_LEVELS
 value TransactionIsolationConflictError
 value TransactionRequiredError
+value TransactionRolledBackError
 value TransactionTimeoutError
 value UnknownCatalogEventError
 value WireTypeCollisionError
@@ -1635,8 +1712,10 @@ value assertEventType
 value catalogWireTypes
 value computeRetryDelay
 value consume
+value createLoggingObserver
 value createRetryPolicy
 value createUuidV7
+value defaultLoggingFormat
 value defineCatalog
 value defineEvent
 value defineHandlers

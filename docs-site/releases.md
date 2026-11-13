@@ -1,10 +1,12 @@
 ---
 title: relaybus releases and versioning
-description: What is new in relaybus 0.5.0 (catalog routes and wire names declared on catalogs and routes, transactions at an isolation level with automatic rerun of serialization failures), 0.4.1 (payloads kept byte for byte on PostgreSQL, Prisma 5, framework-agnostic codec contract), 0.4.0 (Prisma 7, wake-up at commit, Confluent client, codec contract) and 0.3.0 (code-quality overhaul, per-key order across event types, codecs, NestJS transaction decorator, bounded shutdown, ESLint plugin, OpenTelemetry), its breaking changes, deprecations and known issues, and how relaybus is versioned and released.
+description: What is new in relaybus 1.1.0 (a hook for the commit of a publish, a logging observer, a destination per catalog event, an error when PostgreSQL rolled back a commit, Prisma isolation levels behind PgBouncer), 1.0.0 (stable API under semantic versioning, nothing changed from 0.5.0), 0.5.0 (catalog routes and wire names declared on catalogs and routes, transactions at an isolation level with automatic rerun of serialization failures), 0.4.1 (payloads kept byte for byte on PostgreSQL, Prisma 5, framework-agnostic codec contract), 0.4.0 (Prisma 7, wake-up at commit, Confluent client, codec contract) and 0.3.0 (code-quality overhaul, per-key order across event types, codecs, NestJS transaction decorator, bounded shutdown, ESLint plugin, OpenTelemetry), its breaking changes, deprecations and known issues, and how relaybus is versioned and released.
 ---
 
 # Releases
 
+- [1.1.0](#_1-1-0-unreleased): `onPublishCommitted` observer hook, `createLoggingObserver`, a destination per catalog event, `TransactionRolledBackError` when PostgreSQL rolled back a commit, Prisma isolation levels behind PgBouncer
+- [1.0.0](#_1-0-0-2026-11-13): stable API under semantic versioning, nothing changed from 0.5.0
 - [0.5.0](#_0-5-0-2026-10-27): `route(produce(Catalog, { events }), settings)` routes several catalog events with shared settings; wire names declared on catalogs and routes reach the codec; transactions at an isolation level with automatic rerun of serialization failures
 - [0.4.1](#_0-4-1-2026-10-26): PostgreSQL hands out payloads exactly as published, Prisma 5 support, jsonEnvelope fixes, a codec contract for any test framework
 - [0.4.0](#_0-4-0-2026-10-25): Prisma 7 on a real database, wake-up at the caller's commit, the Confluent Kafka client, codec contract helpers, record keys, legacy flat envelopes, an application-owned producer
@@ -13,6 +15,26 @@ description: What is new in relaybus 0.5.0 (catalog routes and wire names declar
 - [0.2.0](#_0-2-0-2026-10-24): high-throughput delivery, event catalogs, decoding of foreign messages
 - [0.1.x](#_0-1-x): first public release
 - [How versioning works](#how-versioning-works)
+
+## 1.1.0 (unreleased)
+
+A minor release with new API. Nothing is required when upgrading from 1.0.0, and the database schema and the wire format do not change. Two behaviour fixes make code that silently lost work fail with an error or work where it failed; see the Behaviour changes bullet below. See [Upgrading from 1.0.0 to 1.1.0](/upgrading#upgrading-from-1-0-0-to-1-1-0).
+
+- **`onPublishCommitted`.** A new optional observer hook with the same event as `onPublished` (`{ envelopes, deliveries }`). It is called once the transaction that holds the publish has committed, and never for one that rolled back. It covers the transactions relaybus opens: `bus.transaction(...)` (at an isolation level, only the attempt that committed is reported), `@RelayBusTransaction()`, the delivery transaction of a transactional handler, and a publish without a transaction that the bus commits on its own (`transactionMode: 'optional'`), which is reported at once. A publish into a transaction your application opened and passed as `{ transaction }`, or that `transactionResolver` found, is not reported, because relaybus cannot see that commit. `onPublished` keeps its timing. See [Observability](/concepts/observability#onpublished-and-onpublishcommitted).
+- **`createLoggingObserver`.** `createLoggingObserver({ logger, events, format })` returns an observer that writes `committed`, `succeeded`, `retry` and `dead` events to a `RelayBusLogger`, so a service gets log lines for retries and dead letters without writing hooks. `events` defaults to `['retry', 'dead']`; `format` replaces the line of an event, and a format that returns `undefined` skips the line. `defaultLoggingFormat` is exported. It implements only the hooks of the events you select. See [Observability](/concepts/observability#logging-with-createloggingobserver).
+- **A destination per catalog event.** `route(produce(Catalog, { events }), { ..., destinations: { OrderCancelled: 'order-cancellations' } })` sends the named events to their own destination. An event without an entry uses `destination`, else its event type. A name the catalog does not have throws `UnknownCatalogEventError`, and an empty destination throws `ConfigurationError`. Each destination is its own handler, so per-key order holds per destination. See [Routing a catalog production](/concepts/event-catalogs#routing-a-catalog-production).
+- **Behaviour changes.**
+  - **A commit that PostgreSQL rolled back now throws.** When the work of a transaction caught a statement error, PostgreSQL has aborted the transaction and answers `COMMIT` with `ROLLBACK`. relaybus used to report success although nothing was committed. It now throws `TransactionRolledBackError` (`RELAYBUS_TRANSACTION_ROLLED_BACK`). `PgExecutor` reads the result of `COMMIT`, which costs no round trip. The other executors (Prisma, Kysely, Knex, TypeORM, Drizzle and a custom one) run one `SELECT 1` at the end of each transaction relaybus opens (`bus.transaction` and transactional handlers); an executor that declares `verifiesCommit: true` skips it. A transaction your application opens itself is not checked.
+  - **Prisma sets the isolation level through its own option.** `createPrismaExecutor` now calls `$transaction(work, { isolationLevel })` (`'ReadCommitted'`, `'RepeatableRead'` or `'Serializable'`) instead of sending `SET TRANSACTION ISOLATION LEVEL`. Prisma 5 and 6 with `?pgbouncer=true` send `DEALLOCATE ALL` right after `BEGIN`, so the `SET TRANSACTION` statement failed with SQLSTATE `25001` (Prisma error `P2010`); with Prisma's option the level is set before that. Proven on Prisma 5.22, 6.19 and 7.10, with and without `?pgbouncer=true`, behind PgBouncer 1.26 in transaction mode. The statement timeout budget is unchanged. Kysely, Knex, Drizzle and `pg` send nothing after `BEGIN`, and TypeORM already used its own isolation API, so none of them were affected.
+- Additive API: core `createLoggingObserver`, `defaultLoggingFormat`, `LoggingObserverOptions`, `LoggingObserverFormat`, `LoggedEvent`, `TransactionRolledBackError`, `RelayBusObserver.onPublishCommitted`, `CatalogRouteOptions.destinations`; postgres `PrismaIsolationLevel` and the optional `PostgresExecutor.verifiesCommit`.
+- CI: a new adapter runs the whole adapter suite through the Prisma query engine with `?pgbouncer=true` behind a real PgBouncer (Prisma 5 and 6 jobs).
+
+## 1.0.0 (2026-11-13)
+
+The first stable release. From 1.0.0 the public API follows [semantic versioning](#how-versioning-works). Nothing changes from 0.5.0: the built JavaScript is byte-identical, the database schema and the schema marker are the same, and no export was removed or renamed. Nothing is required when upgrading from 0.5.0.
+
+- **Stable API.** Breaking changes now wait for a major version; see [Stability](/stability).
+- **New CI gates.** API Extractor reports pin the public API of every package, and schema locks pin the database schema, so a change of either is always deliberate.
 
 ## 0.5.0 (2026-10-27)
 

@@ -123,6 +123,7 @@ A pooler in transaction mode hands every transaction a different server session.
   `preparedStatements: false`. If you forget, the first statement that lands on another session fails once,
   the store stops preparing and logs `[PgExecutor](query) The server does not keep prepared statements per
 connection`.
+- Prisma with `?pgbouncer=true`: Prisma 5 and 6 send `DEALLOCATE ALL` right after `BEGIN`, so a `SET TRANSACTION ISOLATION LEVEL` statement fails (SQLSTATE `25001`). Since 1.1.0 `createPrismaExecutor` sets the level through Prisma's own `$transaction` option, so isolation levels work; before 1.1.0, do not pass `isolationLevel` with that connection string.
 
 ```ts
 const pool = new Pool({ connectionString: process.env.PGBOUNCER_URL, max: 20 });

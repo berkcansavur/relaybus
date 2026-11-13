@@ -14,6 +14,7 @@ export function withRootPool<TTransaction>(
     ...(executor.sessionTimeouts === undefined
       ? {}
       : { sessionTimeouts: executor.sessionTimeouts }),
+    ...(executor.verifiesCommit === undefined ? {} : { verifiesCommit: executor.verifiesCommit }),
     transaction: (work) => executor.transaction(work),
     ...(executor.transactionWithBudget === undefined
       ? {}

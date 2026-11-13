@@ -622,3 +622,72 @@ describe('wire names are applied only when the bus is built', () => {
     expect(Object.keys(transport.declaredWireTypes)).toHaveLength(2);
   });
 });
+
+describe('destinations of catalog routes', () => {
+  it('sends each event to its own destination with the shared settings, the rest to destination', async () => {
+    const transport = new InMemoryTransport('broker');
+    const { bus } = busWith(
+      [
+        route(produce(OrderEvents), {
+          transport: 'broker',
+          destination: 'orders',
+          destinations: { OrderPlaced: 'orders.placed', OrderShipped: 'orders.shipped' },
+          timeout: '5s',
+        }),
+      ],
+      transport,
+    );
+
+    expect(bus.handlers().map(({ id, eventType }) => `${id} ${eventType}`)).toEqual([
+      'relaybus.transport:broker:orders.placed order.placed.v1',
+      'relaybus.transport:broker:orders order.cancelled.v1',
+      'relaybus.transport:broker:orders.shipped order.shipped.v1',
+    ]);
+    expect(bus.handlers().every(({ timeoutMs }) => timeoutMs === 5000)).toBe(true);
+    await bus.publish(new OrderPlaced({ orderId: '1' }));
+    await bus.publish(new OrderShipped({ orderId: '1' }));
+    await bus.drain();
+    expect(transport.published.map(({ destination }) => destination).sort()).toEqual([
+      'orders.placed',
+      'orders.shipped',
+    ]);
+  });
+
+  it('falls back to the event type for an event without a destination', () => {
+    const { bus } = busWith([
+      route(produce(OrderEvents, { events: ['OrderPlaced', 'OrderCancelled'] }), {
+        transport: 'broker',
+        destinations: { OrderPlaced: 'orders.placed' },
+      }),
+    ]);
+
+    expect(bus.handlers().map(({ id }) => id)).toEqual([
+      'relaybus.transport:broker:orders.placed',
+      'relaybus.transport:broker:order.cancelled.v1',
+    ]);
+  });
+
+  it('refuses a destination for an event it does not route, and an empty one', () => {
+    const unknown = errorOf(() =>
+      route(produce(OrderEvents, { events: ['OrderPlaced'] }), {
+        transport: 'broker',
+        destinations: { OrderShipped: 'orders.shipped' } as never,
+      }),
+    );
+    const empty = errorOf(() =>
+      route(produce(OrderEvents, { events: ['OrderPlaced'] }), {
+        transport: 'broker',
+        destinations: { OrderPlaced: '' },
+      }),
+    );
+
+    expect(unknown).toBeInstanceOf(UnknownCatalogEventError);
+    expect((unknown as Error).message).toBe(
+      "The route of catalog 'OrderEvents' has no event named 'OrderShipped' to give a destination; its events are OrderPlaced",
+    );
+    expect(empty).toBeInstanceOf(ConfigurationError);
+    expect((empty as Error).message).toBe(
+      "The route of catalog 'OrderEvents' needs a non-empty destination for 'OrderPlaced'",
+    );
+  });
+});

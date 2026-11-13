@@ -26,9 +26,13 @@ import type {
   TransactionIsolationLevel,
 } from './event-store.js';
 import type { DomainEvent, EventClass, EventEnvelope } from './event.js';
-import { getCurrentIsolationLevel, getCurrentScope, runInScope } from './execution-scope.js';
+import { getCurrentIsolationLevel, getCurrentScope } from './execution-scope.js';
 import type { EventHandler, HandlerDescriptor, SubscribeOptions } from './handler-registry.js';
-import { runIsolatedTransaction, type IsolatedOptions } from './isolated-transaction.js';
+import {
+  runBusTransaction,
+  runIsolatedTransaction,
+  type IsolatedOptions,
+} from './isolated-transaction.js';
 import { PublishWakeUps } from './bus/publish-wake-ups.js';
 import type {
   PublishOneOptions,
@@ -38,7 +42,6 @@ import type {
   TransactionOptions,
 } from './relay-bus-options.js';
 import { type ShutdownDeadline, type StopOptions, type StopResult } from './shutdown-deadline.js';
-import { runBudgetedTransaction } from './transaction-budget.js';
 import { Milliseconds } from './values/milliseconds.js';
 
 /** Batches `drain` runs at most before it gives up. */
@@ -224,11 +227,7 @@ export class RelayBus<TTransaction = unknown> {
     if (options?.isolationLevel !== undefined) {
       return runIsolatedTransaction(this.#parts, { options: options as IsolatedOptions, work });
     }
-    return runBudgetedTransaction(this.#parts.store, {
-      clock: this.#parts.clock,
-      timeoutMs: this.#parts.transactionTimeoutMs,
-      work: (transaction) => runInScope({ transaction }, () => work(transaction)),
-    });
+    return runBusTransaction(this.#parts, work);
   }
 
   /**

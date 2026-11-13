@@ -145,6 +145,10 @@ export interface RelayBusObserver {
     readonly envelopes: readonly EventEnvelope[];
     readonly deliveries: number;
   }): void;
+  onPublishCommitted?(event: {
+    readonly envelopes: readonly EventEnvelope[];
+    readonly deliveries: number;
+  }): void;
   onReceived?(event: {
     readonly envelope: EventEnvelope;
     readonly status: 'accepted' | 'duplicate' | 'ignored';

@@ -1,7 +1,12 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { PoolClient } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { RelayBus, TransactionTimeoutError, defineEvent } from '@relaybus/core';
+import {
+  RelayBus,
+  TransactionRolledBackError,
+  TransactionTimeoutError,
+  defineEvent,
+} from '@relaybus/core';
 import { PgExecutor, PostgresEventStore, type PostgresExecutor } from '../src/index.js';
 import {
   POSTGRES_IMAGES,
@@ -236,9 +241,11 @@ describe.each(POSTGRES_IMAGES)('transaction time budget on %s', (image) => {
       const { bus, store } = await createOwnedBus();
       try {
         // The work swallows a failed statement: the transaction is aborted and COMMIT rolls it back.
-        await bus.transaction(async (client) => {
-          await client.query('SELECT 1 / 0').catch(() => undefined);
-        });
+        await expect(
+          bus.transaction(async (client) => {
+            await client.query('SELECT 1 / 0').catch(() => undefined);
+          }),
+        ).rejects.toBeInstanceOf(TransactionRolledBackError);
         expect(await settingsInside(bus)).toMatchObject({ statement: '400ms', idle: '400ms' });
       } finally {
         await store.close();

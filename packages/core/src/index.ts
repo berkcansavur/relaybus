@@ -44,6 +44,7 @@ export {
   RelayBusError,
   TransactionIsolationConflictError,
   TransactionRequiredError,
+  TransactionRolledBackError,
   TransactionTimeoutError,
   UnknownCatalogEventError,
   WireTypeCollisionError,
@@ -154,3 +155,10 @@ export type {
   TransportMessageHandler,
   TransportSubscriptionHooks,
 } from './transport.js';
+export {
+  createLoggingObserver,
+  defaultLoggingFormat,
+  type LoggedEvent,
+  type LoggingObserverFormat,
+  type LoggingObserverOptions,
+} from './logging-observer.js';

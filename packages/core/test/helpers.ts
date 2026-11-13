@@ -30,6 +30,7 @@ export function createLogger(): RelayBusLogger & {
 export function createObserver(): Required<RelayBusObserver> {
   return {
     onPublished: vi.fn(),
+    onPublishCommitted: vi.fn(),
     onReceived: vi.fn(),
     onDeliveryStarted: vi.fn(),
     onDeliverySucceeded: vi.fn(),

@@ -128,7 +128,16 @@ new RelayBus({
 });
 ```
 
+```ts
+route(produce(OrderEvents), {
+  transport: 'kafka',
+  destination: 'orders',
+  destinations: { OrderCancelled: 'order-cancellations' }, // the other events go to 'orders'
+});
+```
+
 - **Same as one route per event.** The result is exactly the routes you would have written by hand: one handler `relaybus.transport:<transport>:<destination>` per destination, so events of one key reach the broker in commit order whatever their types, and `bus.handlers()` lists it once per event type. Without `events`, every event of the catalog is routed.
+- **`destinations` per event.** `destinations: { EventName: 'topic' }` gives single events their own destination, by catalog event name (checked by the compiler). An event without an entry uses `destination`, else its event type. Each destination is its own handler, so the per-key order holds per destination, not across them. A name the catalog does not have throws `UnknownCatalogEventError`, and an empty destination throws `ConfigurationError`.
 - **`destination` is optional.** Without it every event goes to its own event type, as a plain route does. With it, all selected events share it.
 - **It covers `produce`.** A route made this way is a route like any other, so `catalogs: [produce(OrderEvents, ...)]` and `RelayBusModule.forFeature({ produces })` see the events as routed. Routing fewer events than a `produce` declaration lists still fails the boot check, naming the events left out.
 - **Mix freely.** Catalog routes and plain routes can share a destination when they resolve to the same `retry` and `timeout`, as plain routes always had to.

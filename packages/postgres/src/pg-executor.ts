@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { RelayBusLogger } from '@relaybus/core';
+import { TransactionRolledBackError, type RelayBusLogger } from '@relaybus/core';
 import type { Pool, PoolClient } from 'pg';
 import type {
   PostgresExecutor,
@@ -58,6 +58,9 @@ const STATEMENT_NAME_DIGITS = 24;
  * runs the statement again unprepared unless it belonged to a transaction,
  * which has failed by then and is the caller's to retry.
  */
+export const ROLLED_BACK_MESSAGE =
+  'PostgreSQL rolled the transaction back at COMMIT: a statement in it failed and its error was caught. Nothing the transaction wrote was committed';
+
 export class PgExecutor implements PostgresExecutor<PoolClient> {
   readonly #pool: Pool;
   readonly #logger: RelayBusLogger;
@@ -75,6 +78,7 @@ export class PgExecutor implements PostgresExecutor<PoolClient> {
 
   /** The connection listens for `error` during the transaction, so a server-ended session fails the transaction instead of the process. */
   readonly sessionTimeouts = true;
+  readonly verifiesCommit = true;
 
   transaction<T>(work: (transaction: PoolClient) => Promise<T>): Promise<T> {
     // Once a pooler was noticed, which session a connection reaches is unknown: every transaction resets.
@@ -169,20 +173,40 @@ export class PgExecutor implements PostgresExecutor<PoolClient> {
     };
     client.on('error', onSessionEnded);
     const { begin, sessionValue } = start(client);
+    let result: T;
+    let command: string;
     try {
       await client.query(begin);
-      const result = await work(client);
-      const { command } = await client.query('COMMIT');
-      // Settings changed in a transaction that rolls back (a failed one answers COMMIT with ROLLBACK)
-      // return to what the session had before.
-      if (command === 'COMMIT') {
-        this.#recordSession(client, sessionValue);
-      }
-      release(false);
-      return result;
+      result = await work(client);
+      ({ command } = await client.query('COMMIT'));
     } catch (error) {
       await this.#rollbackAndRelease(client, release);
       throw error;
+    }
+    this.#settle(client, { command, sessionValue, release });
+    return result;
+  }
+
+  #settle(
+    client: PoolClient,
+    {
+      command,
+      sessionValue,
+      release,
+    }: {
+      readonly command: string;
+      readonly sessionValue: string | null | undefined;
+      readonly release: (destroy: boolean) => void;
+    },
+  ): void {
+    // Settings changed in a transaction that rolls back (a failed one answers COMMIT with ROLLBACK)
+    // return to what the session had before.
+    if (command === 'COMMIT') {
+      this.#recordSession(client, sessionValue);
+    }
+    release(false);
+    if (command === 'ROLLBACK') {
+      throw new TransactionRolledBackError(ROLLED_BACK_MESSAGE);
     }
   }
 

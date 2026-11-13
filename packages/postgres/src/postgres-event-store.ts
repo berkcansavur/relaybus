@@ -16,15 +16,16 @@ import {
   type RelayBusLogger,
   type TransactionIsolationLevel,
   TRANSACTION_ISOLATION_LEVELS,
+  TransactionRolledBackError,
 } from '@relaybus/core';
 import { HandedOutLedger } from '@relaybus/core/internal';
 import { Client, Pool, type PoolClient } from 'pg';
 import type { PostgresExecutor } from './executor.js';
 import { resolvePostgresNames } from './names.js';
 import { NotificationListener } from './notification-listener.js';
-import { PgExecutor } from './pg-executor.js';
+import { PgExecutor, ROLLED_BACK_MESSAGE } from './pg-executor.js';
 import { withRootPool } from './root-pool-executor.js';
-import { isPostgresSerializationFailure } from './serialization-failure.js';
+import { isInFailedTransaction, isPostgresSerializationFailure } from './serialization-failure.js';
 import { PostgresAppend } from './postgres-append.js';
 import { PostgresClaims } from './postgres-claim.js';
 import { PostgresCompletion } from './postgres-completion.js';
@@ -180,7 +181,9 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     const tracked = async (transaction: TTransaction): Promise<T> => {
       this.#state.ownTransactions.set(transaction, own);
       try {
-        return await work(transaction);
+        const result = await work(transaction);
+        await this.#assertNotFailed(transaction);
+        return result;
       } finally {
         this.#state.ownTransactions.delete(transaction);
       }
@@ -190,6 +193,20 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
       this.#appender.wakeAfterCommit();
     }
     return result;
+  }
+
+  async #assertNotFailed(transaction: TTransaction): Promise<void> {
+    if (this.#state.executor.verifiesCommit === true) {
+      return;
+    }
+    try {
+      await this.#state.executor.query('SELECT 1', [], transaction);
+    } catch (error) {
+      if (isInFailedTransaction(error)) {
+        throw new TransactionRolledBackError(ROLLED_BACK_MESSAGE, { cause: error });
+      }
+      throw error;
+    }
   }
 
   /** Opens the transaction `work` runs in: plain, held to the budget, or at an isolation level too. */

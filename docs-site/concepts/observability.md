@@ -112,6 +112,44 @@ The metrics come from observer hooks you can also implement yourself: `onPublish
 `onDeliveryDead`, `onLeaseLost`, `onFailure`, ...). A hook that no observer implements costs
 nothing, not even a clock read.
 
+## onPublished and onPublishCommitted
+
+Two hooks report a publish. `onPublished` is called when `publish` has stored the events, before the transaction that holds them commits, so a transaction that later rolls back was still reported. `onPublishCommitted` is called once that transaction has committed and never for one that rolled back. Both get `{ envelopes, deliveries }`.
+
+`onPublishCommitted` covers the transactions relaybus opens:
+
+- `bus.transaction(...)` and `@RelayBusTransaction()`. With an `isolationLevel`, only the attempt that committed is reported.
+- The delivery transaction of a transactional handler.
+- A publish without a transaction that the bus commits in a transaction of its own (`transactionMode: 'optional'`). It is reported at once.
+
+A publish into a transaction your application opened and passed as `{ transaction }`, or that `transactionResolver` found, is not reported by `onPublishCommitted`: relaybus cannot see that commit. Use `onPublished` there, or report from your own code after the commit.
+
+## Logging with createLoggingObserver
+
+`createLoggingObserver` in `@relaybus/core` returns an observer that writes through a `RelayBusLogger`, so you get log lines for retries and dead letters without writing the hooks.
+
+```ts
+import { createLoggingObserver } from '@relaybus/core';
+
+const bus = new RelayBus({
+  store,
+  observers: [
+    createLoggingObserver({
+      logger,
+      events: ['committed', 'retry', 'dead'],
+      format: {
+        committed: ({ id, type }) => `[Orders](publish) Event committed | id=${id} | type=${type}`,
+      },
+    }),
+  ],
+});
+```
+
+- `events` picks from `'committed'`, `'succeeded'`, `'retry'` and `'dead'`; the default is `['retry', 'dead']`. `committed` and `succeeded` log at `log`, `retry` at `warn` and `dead` at `error`.
+- `committed` writes one line per committed event and is built on `onPublishCommitted`, so it has the limit above.
+- `format` replaces the line of an event. A format that returns `undefined` skips the line. `defaultLoggingFormat` is exported so a format can reuse the default of the other events.
+- The observer implements only the hooks of the events you select. It can be used next to other observers, such as the one from `@relaybus/otel`: pass all of them in `observers`.
+
 ## Prometheus and Grafana through the OpenTelemetry Collector
 
 Export OTLP from the service and let the collector expose Prometheus metrics and forward traces:
