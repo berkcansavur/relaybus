@@ -26,7 +26,7 @@ const alias = Object.fromEntries([
 ]);
 
 /** Integration files whose timing or server-wide effects must not overlap with other files. */
-const serialIntegrationTests = [
+export const serialIntegrationTests = [
   'packages/postgres/test/lane-leases*.integration.test.ts',
   'packages/postgres/test/claim-concurrency.integration.test.ts',
   // Bounded shutdown: asserts how long stop takes on the wall clock.

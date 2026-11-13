@@ -12,7 +12,7 @@ All automation lives in `.github/`. Every third-party action is pinned to a full
 | `codeql.yml`            | push, PR, weekly                          | CodeQL static analysis (`javascript-typescript`, `security-extended`)                                |
 | `dependency-review.yml` | pull requests                             | Fails PRs that add dependencies with known vulnerabilities (moderate and above)                      |
 | `scorecard.yml`         | weekly, push to `main`, branch rule edits | OpenSSF Scorecard, published results and SARIF upload to code scanning                               |
-| `mutation.yml`          | weekly, manual                            | Stryker mutation testing, uploads the HTML/JSON report, fails below `thresholds.break`               |
+| `mutation.yml`          | twice a week, manual                      | Stryker mutation testing in shards, uploads the HTML/JSON reports, fails below `thresholds.break`    |
 
 `.github/actions/setup` is a local composite action shared by the jobs: it installs pnpm (version from `packageManager`), Node.js with the pnpm store cached, and runs `pnpm install --frozen-lockfile`.
 
