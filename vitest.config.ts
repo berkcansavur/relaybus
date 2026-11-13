@@ -51,6 +51,7 @@ const serialIntegrationTests = [
   'packages/otel/test/rabbitmq-trace.integration.test.ts',
   // Transaction budgets of a few hundred milliseconds against wall-clock sleeps.
   'packages/postgres/test/transaction-timeout.integration.test.ts',
+  'packages/postgres/test/drizzle-executor.integration.test.ts',
   'packages/mongodb/test/transaction-timeout.integration.test.ts',
 ];
 

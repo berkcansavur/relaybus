@@ -82,8 +82,8 @@ For another client, implement `PostgresExecutor` (`transaction` and `query`; abo
 
 **Transaction time budget.** `bus.transaction` passes the bus `transactionTimeout` (default `'5s'`) to the store,
 which sets it with `set_config(..., true)` (the `SET LOCAL` scope, gone after the transaction) as
-`statement_timeout`. Executors that declare `sessionTimeouts: true` (`PgExecutor` does; it listens for `error` on the
-connection while the transaction runs) also get `idle_in_transaction_session_timeout` and, on PostgreSQL 17+,
+`statement_timeout`. Executors that declare `sessionTimeouts: true` (`PgExecutor` does, and the Drizzle executor on a
+`pg` pool; they listen for `error` on the connection while the transaction runs) also get `idle_in_transaction_session_timeout` and, on PostgreSQL 17+,
 `transaction_timeout`, so a transaction left idle by a slow external call is ended by the server and its locks are
 released. The other adapters keep only `statement_timeout`, because a server-ended session would emit an unhandled
 `error` on their checked-out `pg` connection; the bus still rolls back an overrun before the commit. The caller gets a
