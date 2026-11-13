@@ -1,5 +1,9 @@
 import { EventEmitter } from 'node:events';
-import { ConfigurationError, TRANSACTION_ISOLATION_LEVELS } from '@relaybus/core';
+import {
+  ConfigurationError,
+  TRANSACTION_ISOLATION_LEVELS,
+  TransactionRolledBackError,
+} from '@relaybus/core';
 import type { Pool } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -181,6 +185,7 @@ describe('a transaction at an isolation level on an executor without transaction
     expect(statements.map(({ sql }) => sql.split(',')[0])).toEqual([
       'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE',
       "SELECT set_config('statement_timeout'",
+      'SELECT 1',
     ]);
     expect(statements[0]!.parameters).toEqual([]);
     expect(statements[1]!.parameters).toEqual(['400ms']);
@@ -220,7 +225,7 @@ describe('a transaction at an isolation level on an executor without transaction
     await store.transaction(async () => 'done', { timeoutMs: 400 });
 
     expect(transactionWithBudget).toHaveBeenCalledWith(expect.any(Function), 400);
-    expect(statements).toEqual([]);
+    expect(statements).toEqual([{ sql: 'SELECT 1', parameters: [] }]);
   });
 
   it('hands the level and the budget to transactionWithIsolation when the executor has it', async () => {
@@ -240,11 +245,58 @@ describe('a transaction at an isolation level on an executor without transaction
       timeoutMs: 400,
     });
     expect(transaction).not.toHaveBeenCalled();
-    expect(statements).toEqual([]);
+    expect(statements).toEqual([{ sql: 'SELECT 1', parameters: [] }]);
+  });
+});
+
+describe('the check at the end of a store transaction', () => {
+  const quiet = { log: () => undefined, warn: () => undefined, error: () => undefined };
+
+  it('rethrows an error of the check that is not a failed transaction', async () => {
+    const lost = Object.assign(new Error('Connection terminated'), { code: '57P01' });
+    const store = new PostgresEventStore<string>({
+      executor: {
+        transaction: (work) => work('tx'),
+        query: async () => {
+          throw lost;
+        },
+      },
+      logger: quiet,
+    });
+
+    await expect(store.transaction(async () => 'done')).rejects.toBe(lost);
+  });
+
+  it('turns a failed transaction into TransactionRolledBackError, with the error as cause', async () => {
+    const failed = Object.assign(new Error('current transaction is aborted'), { code: '25P02' });
+    const store = new PostgresEventStore<string>({
+      executor: {
+        transaction: (work) => work('tx'),
+        query: async () => {
+          throw failed;
+        },
+      },
+      logger: quiet,
+    });
+
+    const error = await store.transaction(async () => 'done').catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(TransactionRolledBackError);
+    expect((error as Error).cause).toBe(failed);
   });
 });
 
 describe('withRootPool', () => {
+  it('keeps verifiesCommit of the executor', () => {
+    const orm: PostgresExecutor<string> = {
+      verifiesCommit: true,
+      transaction: (work) => work('plain'),
+      query: async () => [],
+    };
+
+    expect(withRootPool(orm, orm as never).verifiesCommit).toBe(true);
+  });
+
   it('keeps transactionWithIsolation and isSerializationFailure of the executor', async () => {
     const orm: PostgresExecutor<string> = {
       transaction: (work) => work('plain'),

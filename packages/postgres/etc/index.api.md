@@ -31,9 +31,7 @@ export function createPostgresSchemaSql(options?: PostgresSchemaOptions): string
 // @public
 export function createPostgresSchemaStatements(options?: PostgresSchemaOptions): string[];
 
-// Warning: (ae-unresolved-link) The @link reference could not be resolved: The package "@relaybus/postgres" does not have an export "Pool"
-//
-// @public
+// @public (undocumented)
 export class PgExecutor implements PostgresExecutor<PoolClient> {
     constructor(pool: Pool, options?: PgExecutorOptions);
     // (undocumented)
@@ -43,6 +41,8 @@ export class PgExecutor implements PostgresExecutor<PoolClient> {
     transaction<T>(work: (transaction: PoolClient) => Promise<T>): Promise<T>;
     transactionWithBudget<T>(work: (transaction: PoolClient) => Promise<T>, timeoutMs: number): Promise<T>;
     transactionWithIsolation<T>(work: (transaction: PoolClient) => Promise<T>, input: PostgresIsolatedTransactionOptions): Promise<T>;
+    // (undocumented)
+    readonly verifiesCommit = true;
 }
 
 // @public (undocumented)
@@ -119,6 +119,8 @@ export interface PostgresExecutor<TTransaction> {
     // Warning: (ae-unresolved-link) The @link reference could not be resolved: The package "@relaybus/postgres" does not have an export "sessionTimeouts"
     transactionWithBudget?<T>(work: (transaction: TTransaction) => Promise<T>, timeoutMs: number): Promise<T>;
     transactionWithIsolation?<T>(work: (transaction: TTransaction) => Promise<T>, options: PostgresIsolatedTransactionOptions): Promise<T>;
+    // (undocumented)
+    readonly verifiesCommit?: boolean;
 }
 
 // @public
@@ -221,40 +223,43 @@ export function resolvePostgresNames(options?: PostgresSchemaOptions): PostgresN
 
 // Warnings were encountered during analysis:
 //
-// dist/executor-Bt90w33Q.d.ts:5:1 - (ae-undocumented) Missing documentation for "PostgresRow".
-// dist/executor-Bt90w33Q.d.ts:42:5 - (ae-undocumented) Missing documentation for "transaction".
-// dist/executor-Bt90w33Q.d.ts:65:5 - (ae-undocumented) Missing documentation for "query".
-// dist/executor-Bt90w33Q.d.ts:69:5 - (ae-undocumented) Missing documentation for "isolationLevel".
+// dist/executor-DhrUSP7Q.d.ts:5:1 - (ae-undocumented) Missing documentation for "PostgresRow".
+// dist/executor-DhrUSP7Q.d.ts:42:5 - (ae-undocumented) Missing documentation for "verifiesCommit".
+// dist/executor-DhrUSP7Q.d.ts:43:5 - (ae-undocumented) Missing documentation for "transaction".
+// dist/executor-DhrUSP7Q.d.ts:66:5 - (ae-undocumented) Missing documentation for "query".
+// dist/executor-DhrUSP7Q.d.ts:70:5 - (ae-undocumented) Missing documentation for "isolationLevel".
 // dist/index.d.ts:5:1 - (ae-undocumented) Missing documentation for "PgExecutorOptions".
-// dist/index.d.ts:39:5 - (ae-undocumented) Missing documentation for "transaction".
-// dist/index.d.ts:51:5 - (ae-undocumented) Missing documentation for "query".
-// dist/index.d.ts:75:5 - (ae-undocumented) Missing documentation for "schema".
-// dist/index.d.ts:76:5 - (ae-undocumented) Missing documentation for "quotedSchema".
-// dist/index.d.ts:77:5 - (ae-undocumented) Missing documentation for "events".
-// dist/index.d.ts:80:5 - (ae-undocumented) Missing documentation for "deliveries".
-// dist/index.d.ts:81:5 - (ae-undocumented) Missing documentation for "keySequences".
-// dist/index.d.ts:90:5 - (ae-undocumented) Missing documentation for "completionHistory".
-// dist/index.d.ts:184:5 - (ae-undocumented) Missing documentation for "pool".
-// dist/index.d.ts:185:5 - (ae-undocumented) Missing documentation for "connectionString".
-// dist/index.d.ts:186:5 - (ae-undocumented) Missing documentation for "poolConfig".
-// dist/index.d.ts:187:5 - (ae-undocumented) Missing documentation for "executor".
-// dist/index.d.ts:191:5 - (ae-undocumented) Missing documentation for "connectionString".
-// dist/index.d.ts:194:5 - (ae-undocumented) Missing documentation for "pool".
-// dist/index.d.ts:195:5 - (ae-undocumented) Missing documentation for "executor".
-// dist/index.d.ts:199:5 - (ae-undocumented) Missing documentation for "executor".
-// dist/index.d.ts:212:5 - (ae-undocumented) Missing documentation for "connectionString".
-// dist/index.d.ts:213:5 - (ae-undocumented) Missing documentation for "poolConfig".
-// dist/index.d.ts:215:1 - (ae-undocumented) Missing documentation for "PostgresEventStoreOptions".
-// dist/index.d.ts:312:5 - (ae-undocumented) Missing documentation for "extendLease".
-// dist/index.d.ts:313:5 - (ae-undocumented) Missing documentation for "complete".
-// dist/index.d.ts:314:5 - (ae-undocumented) Missing documentation for "completeMany".
-// dist/index.d.ts:315:5 - (ae-undocumented) Missing documentation for "reschedule".
-// dist/index.d.ts:316:5 - (ae-undocumented) Missing documentation for "bury".
-// dist/index.d.ts:331:5 - (ae-undocumented) Missing documentation for "listDeliveries".
-// dist/index.d.ts:332:5 - (ae-undocumented) Missing documentation for "requeue".
-// dist/index.d.ts:343:5 - (ae-undocumented) Missing documentation for "statistics".
-// dist/index.d.ts:358:5 - (ae-undocumented) Missing documentation for "name".
-// dist/index.d.ts:359:5 - (ae-undocumented) Missing documentation for "code".
+// dist/index.d.ts:19:1 - (ae-undocumented) Missing documentation for "PgExecutor".
+// dist/index.d.ts:24:5 - (ae-undocumented) Missing documentation for "verifiesCommit".
+// dist/index.d.ts:25:5 - (ae-undocumented) Missing documentation for "transaction".
+// dist/index.d.ts:37:5 - (ae-undocumented) Missing documentation for "query".
+// dist/index.d.ts:61:5 - (ae-undocumented) Missing documentation for "schema".
+// dist/index.d.ts:62:5 - (ae-undocumented) Missing documentation for "quotedSchema".
+// dist/index.d.ts:63:5 - (ae-undocumented) Missing documentation for "events".
+// dist/index.d.ts:66:5 - (ae-undocumented) Missing documentation for "deliveries".
+// dist/index.d.ts:67:5 - (ae-undocumented) Missing documentation for "keySequences".
+// dist/index.d.ts:76:5 - (ae-undocumented) Missing documentation for "completionHistory".
+// dist/index.d.ts:170:5 - (ae-undocumented) Missing documentation for "pool".
+// dist/index.d.ts:171:5 - (ae-undocumented) Missing documentation for "connectionString".
+// dist/index.d.ts:172:5 - (ae-undocumented) Missing documentation for "poolConfig".
+// dist/index.d.ts:173:5 - (ae-undocumented) Missing documentation for "executor".
+// dist/index.d.ts:177:5 - (ae-undocumented) Missing documentation for "connectionString".
+// dist/index.d.ts:180:5 - (ae-undocumented) Missing documentation for "pool".
+// dist/index.d.ts:181:5 - (ae-undocumented) Missing documentation for "executor".
+// dist/index.d.ts:185:5 - (ae-undocumented) Missing documentation for "executor".
+// dist/index.d.ts:198:5 - (ae-undocumented) Missing documentation for "connectionString".
+// dist/index.d.ts:199:5 - (ae-undocumented) Missing documentation for "poolConfig".
+// dist/index.d.ts:201:1 - (ae-undocumented) Missing documentation for "PostgresEventStoreOptions".
+// dist/index.d.ts:298:5 - (ae-undocumented) Missing documentation for "extendLease".
+// dist/index.d.ts:299:5 - (ae-undocumented) Missing documentation for "complete".
+// dist/index.d.ts:300:5 - (ae-undocumented) Missing documentation for "completeMany".
+// dist/index.d.ts:301:5 - (ae-undocumented) Missing documentation for "reschedule".
+// dist/index.d.ts:302:5 - (ae-undocumented) Missing documentation for "bury".
+// dist/index.d.ts:317:5 - (ae-undocumented) Missing documentation for "listDeliveries".
+// dist/index.d.ts:318:5 - (ae-undocumented) Missing documentation for "requeue".
+// dist/index.d.ts:329:5 - (ae-undocumented) Missing documentation for "statistics".
+// dist/index.d.ts:344:5 - (ae-undocumented) Missing documentation for "name".
+// dist/index.d.ts:345:5 - (ae-undocumented) Missing documentation for "code".
 
 // (No @packageDocumentation comment for this package)
 

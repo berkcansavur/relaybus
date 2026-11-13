@@ -5,7 +5,12 @@ import {
   type EventStore,
   type TransactionIsolationLevel,
 } from './event-store.js';
-import { runInScope } from './execution-scope.js';
+import {
+  getCurrentScope,
+  runInScope,
+  runThenAfterCommit,
+  type ExecutionScope,
+} from './execution-scope.js';
 import type { TransactionOptions } from './relay-bus-options.js';
 import { runBudgetedTransaction } from './transaction-budget.js';
 
@@ -59,11 +64,12 @@ export async function runIsolatedTransaction<TTransaction, T>(
           clock,
           timeoutMs: transactionTimeoutMs,
           isolationLevel,
-          work: (transaction) =>
-            runInScope(
-              { transaction, isolation: { transaction, level: isolationLevel, afterCommit } },
-              () => work(transaction),
-            ),
+          work: (transaction) => {
+            afterCommit.length = 0;
+            return runInScope(attemptScope(transaction, { isolationLevel, afterCommit }), () =>
+              work(transaction),
+            );
+          },
         }),
       };
     } catch (error) {
@@ -83,6 +89,45 @@ export async function runIsolatedTransaction<TTransaction, T>(
     }
     return committed.value;
   }
+}
+
+function attemptScope(
+  transaction: unknown,
+  {
+    isolationLevel,
+    afterCommit,
+  }: {
+    readonly isolationLevel: TransactionIsolationLevel;
+    readonly afterCommit: Array<() => void>;
+  },
+): ExecutionScope {
+  return {
+    transaction,
+    isolation: { transaction, level: isolationLevel, afterCommit },
+    commit: { transaction, afterCommit, enclosing: getCurrentScope()?.commit },
+  };
+}
+
+/**
+ * Runs `work` in a store transaction held to `transactionTimeoutMs`, with `publish` calls inside it
+ * joining the transaction; what they report to `onPublishCommitted` is reported once it committed.
+ */
+export function runBusTransaction<TTransaction, T>(
+  { store, clock, transactionTimeoutMs }: IsolatedTransactionParts<TTransaction>,
+  work: (transaction: TTransaction) => Promise<T>,
+): Promise<T> {
+  const afterCommit: Array<() => void> = [];
+  return runThenAfterCommit(afterCommit, () =>
+    runBudgetedTransaction(store, {
+      clock,
+      timeoutMs: transactionTimeoutMs,
+      work: (transaction) => {
+        afterCommit.length = 0;
+        const commit = { transaction, afterCommit, enclosing: getCurrentScope()?.commit };
+        return runInScope({ transaction, commit }, () => work(transaction));
+      },
+    }),
+  );
 }
 
 /** How many times `work` may run: once at `read committed`, whose conflicts a rerun does not cure. */

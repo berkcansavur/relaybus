@@ -4,11 +4,14 @@ import { sql as drizzleSql } from 'drizzle-orm';
 import knexFactory, { type Knex } from 'knex';
 import type { Pool } from 'pg';
 import { DataSource, type EntityManager } from 'typeorm';
+import { createRequire } from 'node:module';
+import { GenericContainer, Wait, type StartedTestContainer } from 'testcontainers';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from './prisma/generated/client.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   RelayBus,
+  TransactionRolledBackError,
   defineEvent,
   type EventStore,
   type TransactionIsolationLevel,
@@ -190,6 +193,61 @@ const prismaAdapter = (withPool: boolean): Adapter<PrismaTransaction> => ({
   },
 });
 
+const PGBOUNCER_IMAGE = 'edoburu/pgbouncer:v1.26.1-p0';
+
+const prismaMajor = Number(
+  (
+    createRequire(import.meta.url)('@prisma/client/package.json') as { version: string }
+  ).version.split('.')[0],
+);
+
+let pgBouncer: StartedTestContainer | undefined;
+
+async function pgBouncerUrl(connectionString: string): Promise<string> {
+  const server = new URL(connectionString);
+  pgBouncer ??= await new GenericContainer(PGBOUNCER_IMAGE)
+    .withEnvironment({
+      DB_HOST: 'host.docker.internal',
+      DB_PORT: server.port,
+      DB_USER: decodeURIComponent(server.username),
+      DB_PASSWORD: decodeURIComponent(server.password),
+      POOL_MODE: 'transaction',
+      AUTH_TYPE: 'plain',
+      MAX_CLIENT_CONN: '200',
+      DEFAULT_POOL_SIZE: '10',
+    })
+    .withExtraHosts([{ host: 'host.docker.internal', ipAddress: 'host-gateway' }])
+    .withExposedPorts(5432)
+    .withWaitStrategy(Wait.forListeningPorts())
+    .start();
+  const url = new URL(connectionString);
+  url.hostname = pgBouncer.getHost();
+  url.port = String(pgBouncer.getMappedPort(5432));
+  url.searchParams.set('pgbouncer', 'true');
+  return url.toString();
+}
+
+const prismaQueryEngineBehindPgBouncer: Adapter<PrismaTransaction> = {
+  name: 'Prisma query engine with ?pgbouncer=true behind PgBouncer',
+  async create(connectionString, schema) {
+    const prisma = new PrismaClient({
+      datasourceUrl: await pgBouncerUrl(connectionString),
+    } as never);
+    return {
+      executor: createPrismaExecutor(prisma, {
+        timeout: 20_000,
+      }) as unknown as PostgresExecutor<PrismaTransaction>,
+      begin: (work) => prisma.$transaction(work),
+      async insertOrder(transaction, orderId) {
+        await transaction.$executeRawUnsafe(orderInsertSql(schema), orderId);
+      },
+      async destroy() {
+        await prisma.$disconnect();
+      },
+    };
+  },
+};
+
 let database: TestDatabase;
 
 beforeAll(async () => {
@@ -197,6 +255,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await pgBouncer?.stop();
   await database.stop();
 });
 
@@ -326,6 +385,34 @@ function defineAdapterTests<TTransaction>(adapter: Adapter<TTransaction>): void 
       });
     });
 
+    describe('with a statement error the work caught', () => {
+      it.each([undefined, 'serializable'] as const)(
+        'rejects bus.transaction (isolation level %s) and commits nothing',
+        async (isolationLevel) => {
+          const { store, schema, harness } = await createStore();
+          const bus = new RelayBus<TTransaction>({
+            store,
+            setupStore: false,
+            dispatcher: { enabled: false },
+          });
+          bus.subscribe(OrderPlaced, () => undefined, { id: 'listener' });
+          await expect(
+            bus.transaction(
+              async (transaction) => {
+                await harness.insertOrder(transaction, 'order-1');
+                await bus.publish(new OrderPlaced({ orderId: 'order-1' }));
+                await harness.executor.query('SELECT 1/0', [], transaction).catch(() => undefined);
+              },
+              isolationLevel === undefined ? undefined : { isolationLevel },
+            ),
+          ).rejects.toBeInstanceOf(TransactionRolledBackError);
+          expect(await countOrders(schema)).toBe(0);
+          expect(await store.listDeliveries({})).toEqual([]);
+          await destroy(store);
+        },
+      );
+    });
+
     describe('with the application transaction', () => {
       it('publishes into the ORM transaction and commits with the business write', async () => {
         const { store, schema, harness } = await createStore();
@@ -412,6 +499,10 @@ defineAdapterTests(typeOrmAdapter);
 defineAdapterTests(drizzleAdapter);
 defineAdapterTests(prismaAdapter(false));
 defineAdapterTests(prismaAdapter(true));
+// The query engine of Prisma 5 and 6 sends DEALLOCATE ALL after BEGIN with ?pgbouncer=true; Prisma 7 has none.
+if (prismaMajor < 7) {
+  defineAdapterTests(prismaQueryEngineBehindPgBouncer);
+}
 
 describe('Prisma adapter with a generated client', () => {
   it('publishes next to typed model writes in concurrent interactive transactions', async () => {
