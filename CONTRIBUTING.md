@@ -118,16 +118,16 @@ Common types: `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci`, 
 
 There are no changesets. The version is computed from Conventional Commits on `main`, and PRs are squash-merged, so **the PR title is the commit that counts**. A workflow checks it, and a husky `commit-msg` hook runs commitlint on local commits (`pnpm install` enables the hook through the `prepare` script).
 
-| Commit                                                      | Release (while below 1.0.0) |
-| ----------------------------------------------------------- | --------------------------- |
-| `feat`                                                      | minor                       |
-| `fix`, `perf`, `revert`                                     | patch                       |
-| `!` or a `BREAKING CHANGE:` footer                          | minor (major from 1.0.0)    |
-| `docs`, `chore`, `test`, `ci`, `build`, `refactor`, `style` | no release                  |
+| Commit                                          | Release    |
+| ----------------------------------------------- | ---------- |
+| `feat`                                          | minor      |
+| `fix`, `perf`, `refactor`, `revert`             | patch      |
+| `!` or a `BREAKING CHANGE:` footer              | major      |
+| `docs`, `chore`, `test`, `ci`, `build`, `style` | no release |
 
 ### Database schema changes
 
-`packages/postgres/etc/schema.sql` and `packages/mongodb/etc/schema*.json` are a contract: applications often create the tables from a migration that holds this SQL instead of calling `setup()`. The schema-lock tests fail on any change until the files are updated with `-u`. A change to them is a breaking change, so the release is a major (a minor while below 1.0.0):
+`packages/postgres/etc/schema.sql` and `packages/mongodb/etc/schema*.json` are a contract: applications often create the tables from a migration that holds this SQL instead of calling `setup()`. The schema-lock tests fail on any change until the files are updated with `-u`. A change to them is a breaking change, so the release is a major:
 
 - The PR title carries `!` and a `BREAKING CHANGE:` footer that states what existing databases must run before the upgrade. The footer becomes the release note.
 - The schema statements include a guarded upgrade block that brings tables of the previous version up to date, as `setup()` must work on them.
