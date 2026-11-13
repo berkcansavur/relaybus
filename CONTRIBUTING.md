@@ -64,7 +64,7 @@ Coverage is 100% for statements, branches, functions and lines, enforced in `vit
 
 ## Mutation testing
 
-Stryker checks that tests fail when the code changes (`pnpm mutation`, config in `stryker.config.json` and `vitest.stryker.config.ts`). It runs weekly in CI and on demand, against the Docker-free unit tests only. Surviving mutants in code you touched are worth killing with a sharper assertion. The HTML report is written to `reports/mutation/mutation.html`.
+Stryker checks that tests fail when the code changes (`pnpm mutation`, config in `stryker.config.json`, `stryker.config.mjs` and `vitest.stryker.config.ts`). It runs twice a week in CI and on demand, one job per shard (`RELAYBUS_MUTATION_SHARD`, the shards are listed in `stryker.config.mjs`), against the Docker-free unit tests; the Postgres shards also run the Postgres integration tests (`RELAYBUS_MUTATION_TESTS=postgres`, needs Docker). Surviving mutants in code you touched are worth killing with a sharper assertion. The HTML report is written to `reports/mutation/mutation.html`.
 
 Stryker runs **in place** (`inPlace: true`): it rewrites the source files of the checkout it runs in and restores them afterwards. This is required so that tests importing `@relaybus/*` see the mutants. It also means you must **not run it in a dirty or busy working copy**: an interrupted run can leave mutated files behind, and file modes (such as the executable bit on scripts) are not preserved on restore. Run it in a clean checkout or a throwaway worktree:
 
@@ -74,6 +74,7 @@ cd ../relaybus-mutation
 pnpm install --frozen-lockfile
 pnpm mutation                                   # whole repo
 pnpm mutation --mutate "packages/core/src/duration.ts"   # one file
+RELAYBUS_MUTATION_SHARD=core-dispatch pnpm mutation      # one CI shard
 cd - && git worktree remove --force ../relaybus-mutation
 ```
 
