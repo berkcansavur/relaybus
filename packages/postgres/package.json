@@ -135,7 +135,7 @@
     "@types/pg": "8.23.1",
     "drizzle-orm": "0.45.4",
     "knex": "3.3.0",
-    "kysely": "0.29.7",
+    "kysely": "0.29.8",
     "pg": "8.23.1",
     "prisma": "7.10.1",
     "relaybus-postgres-0.4.0": "npm:@relaybus/postgres@0.4.0",
