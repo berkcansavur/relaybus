@@ -20,21 +20,23 @@ pnpm test
 
 ## Scripts
 
-| Script                  | What it does                                                       |
-| ----------------------- | ------------------------------------------------------------------ |
-| `pnpm build`            | Builds every package in `packages/*` with tsup (ESM + CJS + types) |
-| `pnpm typecheck`        | Type checks sources, tests and examples with the root `tsconfig`   |
-| `pnpm lint`             | ESLint with type-aware rules                                       |
-| `pnpm format`           | Prettier, write mode                                               |
-| `pnpm format:check`     | Prettier, check mode (used by CI)                                  |
-| `pnpm test`             | All tests (unit + integration)                                     |
-| `pnpm test:unit`        | Unit project only, no Docker needed                                |
-| `pnpm test:integration` | Integration projects only, needs Docker                            |
-| `pnpm test:affected`    | Only tests that import files changed since `HEAD` (`--changed`)    |
-| `pnpm test:pull-images` | Pre-pulls the Docker images the integration tests use              |
-| `pnpm coverage`         | All tests with V8 coverage; fails below the thresholds             |
-| `pnpm mutation`         | Stryker mutation testing                                           |
-| `pnpm release:dry-run`  | semantic-release dry run (needs a GitHub token, see docs)          |
+| Script                  | What it does                                                            |
+| ----------------------- | ----------------------------------------------------------------------- |
+| `pnpm build`            | Builds every package in `packages/*` with tsup (ESM + CJS + types)      |
+| `pnpm typecheck`        | Type checks sources, tests and examples with the root `tsconfig`        |
+| `pnpm lint`             | ESLint with type-aware rules                                            |
+| `pnpm api:report`       | Rewrites the public API reports `packages/*/etc/*.api.md` (build first) |
+| `pnpm api:check`        | Fails when an API report is out of date (used by CI)                    |
+| `pnpm format`           | Prettier, write mode                                                    |
+| `pnpm format:check`     | Prettier, check mode (used by CI)                                       |
+| `pnpm test`             | All tests (unit + integration)                                          |
+| `pnpm test:unit`        | Unit project only, no Docker needed                                     |
+| `pnpm test:integration` | Integration projects only, needs Docker                                 |
+| `pnpm test:affected`    | Only tests that import files changed since `HEAD` (`--changed`)         |
+| `pnpm test:pull-images` | Pre-pulls the Docker images the integration tests use                   |
+| `pnpm coverage`         | All tests with V8 coverage; fails below the thresholds                  |
+| `pnpm mutation`         | Stryker mutation testing                                                |
+| `pnpm release:dry-run`  | semantic-release dry run (needs a GitHub token, see docs)               |
 
 ## Test strategy
 
@@ -122,6 +124,14 @@ There are no changesets. The version is computed from Conventional Commits on `m
 | `fix`, `perf`, `revert`                                     | patch                       |
 | `!` or a `BREAKING CHANGE:` footer                          | minor (major from 1.0.0)    |
 | `docs`, `chore`, `test`, `ci`, `build`, `refactor`, `style` | no release                  |
+
+### Database schema changes
+
+`packages/postgres/etc/schema.sql` and `packages/mongodb/etc/schema*.json` are a contract: applications often create the tables from a migration that holds this SQL instead of calling `setup()`. The schema-lock tests fail on any change until the files are updated with `-u`. A change to them is a breaking change, so the release is a major (a minor while below 1.0.0):
+
+- The PR title carries `!` and a `BREAKING CHANGE:` footer that states what existing databases must run before the upgrade. The footer becomes the release note.
+- The schema statements include a guarded upgrade block that brings tables of the previous version up to date, as `setup()` must work on them.
+- The schema marker (the comment on the lanes table) changes with the statements. It is their hash, so it follows automatically; the lock files show the new value.
 
 Allowed scopes: `core`, `nestjs`, `postgres`, `mongodb`, `kafka`, `rabbitmq`, `testing`, `eslint-plugin`, `otel`, `repo`, `ci`, `deps`, `release`. A scope is optional.
 

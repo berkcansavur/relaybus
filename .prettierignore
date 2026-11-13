@@ -14,3 +14,5 @@ docs-site/packages/*.md
 !docs-site/packages/index.md
 llms.txt
 packages/postgres/test/prisma/generated
+# API reports and schema locks: compared byte for byte in CI
+packages/*/etc/
