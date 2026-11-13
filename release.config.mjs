@@ -6,8 +6,9 @@
  *
  * The first matching rule wins. Breaking changes map to a MINOR bump while the
  * packages are below 1.0.0. To graduate to 1.0.0 change the `breaking` rule to
- * `release: 'major'` (deleting it is not enough: the `feat` rule would then match a
- * breaking `feat!` commit first) and cut the release with a breaking commit.
+ * `release: 'major'` (deleting it is not enough: a matching custom rule replaces the
+ * preset's default rules, so a breaking `feat!` commit would only match the `feat`
+ * rule) and cut the release with a breaking commit.
  */
 export const releaseRules = [
   { breaking: true, release: 'minor' },
