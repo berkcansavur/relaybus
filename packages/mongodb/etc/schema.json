@@ -1,0 +1,134 @@
+{
+  "collections": [
+    "relaybus_events",
+    "relaybus_deliveries",
+    "relaybus_key_sequences",
+    "relaybus_lanes"
+  ],
+  "indexes": {
+    "relaybus_deliveries": [
+      [
+        {
+          "key": {
+            "eventId": 1,
+            "handler": 1
+          },
+          "name": "event_handler",
+          "unique": true
+        },
+        {
+          "key": {
+            "laneId": 1,
+            "dueAt": 1,
+            "_id": 1,
+            "handler": 1
+          },
+          "name": "claim",
+          "partialFilterExpression": {
+            "lane": "ready"
+          }
+        },
+        {
+          "key": {
+            "handler": 1,
+            "key": 1,
+            "sequence": 1
+          },
+          "name": "ordering",
+          "partialFilterExpression": {
+            "dueAt": {
+              "$exists": true
+            },
+            "sequence": {
+              "$exists": true
+            }
+          }
+        },
+        {
+          "key": {
+            "handler": 1,
+            "key": 1,
+            "sequence": 1
+          },
+          "name": "parked",
+          "partialFilterExpression": {
+            "lane": "parked"
+          }
+        },
+        {
+          "key": {
+            "dueAt": 1
+          },
+          "name": "due",
+          "partialFilterExpression": {
+            "dueAt": {
+              "$exists": true
+            }
+          }
+        },
+        {
+          "key": {
+            "completedAt": 1
+          },
+          "name": "completed",
+          "partialFilterExpression": {
+            "completedAt": {
+              "$exists": true
+            }
+          }
+        },
+        {
+          "key": {
+            "status": 1,
+            "createdAt": 1
+          },
+          "name": "status_created"
+        },
+        {
+          "key": {
+            "status": 1,
+            "updatedAt": 1
+          },
+          "name": "status_updated"
+        },
+        {
+          "key": {
+            "handler": 1,
+            "createdAt": 1
+          },
+          "name": "handler_created"
+        },
+        {
+          "key": {
+            "eventType": 1,
+            "createdAt": 1
+          },
+          "name": "type_created"
+        }
+      ]
+    ],
+    "relaybus_events": [
+      [
+        {
+          "key": {
+            "createdAt": 1,
+            "_id": 1
+          },
+          "name": "created"
+        },
+        {
+          "key": {
+            "completedAt": 1,
+            "_id": 1
+          },
+          "name": "completed",
+          "partialFilterExpression": {
+            "completedAt": {
+              "$exists": true
+            }
+          }
+        }
+      ]
+    ]
+  }
+}

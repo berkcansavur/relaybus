@@ -27,10 +27,13 @@ Dependabot uses `chore(deps)` (npm, production and development) and `chore(ci)` 
 
 ### Graduating to 1.0.0
 
-While `release.config.mjs` contains `{ breaking: true, release: 'minor' }`, breaking changes cannot produce 1.0.0. To graduate:
+1.0.0 ships the 0.5.0 runtime unchanged: the same built JavaScript, the same database schema and no removed export. It only adds type exports and the stability guarantees. While `release.config.mjs` contains `{ breaking: true, release: 'minor' }`, breaking changes cannot produce 1.0.0. To graduate:
 
-1. Open a PR that deletes that rule from `releaseRules` (the preset then maps breaking changes to `major`). Title it `ci(release): enable major releases`.
-2. Merge it, then merge a change whose squash commit carries a breaking marker, for example `feat(core)!: stable 1.0 API` with a `BREAKING CHANGE:` footer. The next release is `1.0.0`.
+1. Create the `next` branch from `main`.
+2. Open a PR into `next` that changes that rule to `{ breaking: true, release: 'major' }` together with the 1.0 changes (deleting the rule is not enough: the `feat` rule would then match a breaking `feat!` commit first and release a minor), and squash-merge it with a breaking title such as `feat!: stable 1.0 API`. Until 1.0.0 ships, the `build` job of `ci.yml` runs `node scripts/compare-build-output.mjs 0.5.0` on every branch, which fails when any built `.js`/`.cjs` file differs from 0.5.0: no runtime change can reach `next` or `main` before 1.0.0. The release is `1.0.0-next.1` on the `next` dist-tag; `latest` stays on 0.5.0.
+3. Install `1.0.0-next.1` in the applications that use relaybus and run their tests before going on. Fixes go to `next` the same way and release `1.0.0-next.2`, and so on.
+4. Merge `next` into `main` with a breaking title such as `feat!: relaybus 1.0.0`. The release is `1.0.0` on `latest`.
+5. Remove the `Compare build output with 0.5.0` step from `ci.yml`: later releases are expected to change the build output.
 
 ## Prerelease channels
 

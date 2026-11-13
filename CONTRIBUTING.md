@@ -125,6 +125,14 @@ There are no changesets. The version is computed from Conventional Commits on `m
 | `!` or a `BREAKING CHANGE:` footer                          | minor (major from 1.0.0)    |
 | `docs`, `chore`, `test`, `ci`, `build`, `refactor`, `style` | no release                  |
 
+### Database schema changes
+
+`packages/postgres/etc/schema.sql` and `packages/mongodb/etc/schema*.json` are a contract: applications often create the tables from a migration that holds this SQL instead of calling `setup()`. The schema-lock tests fail on any change until the files are updated with `-u`. A change to them is a breaking change, so the release is a major (a minor while below 1.0.0):
+
+- The PR title carries `!` and a `BREAKING CHANGE:` footer that states what existing databases must run before the upgrade. The footer becomes the release note.
+- The schema statements include a guarded upgrade block that brings tables of the previous version up to date, as `setup()` must work on them.
+- The schema marker (the comment on the lanes table) changes with the statements. It is their hash, so it follows automatically; the lock files show the new value.
+
 Allowed scopes: `core`, `nestjs`, `postgres`, `mongodb`, `kafka`, `rabbitmq`, `testing`, `eslint-plugin`, `otel`, `repo`, `ci`, `deps`, `release`. A scope is optional.
 
 All packages always share one version. Contributors never publish and never edit version fields. Dependabot PRs use `chore(deps)` and therefore do not release; a maintainer retitles one to `fix(deps): ...` when a dependency change must ship. See [docs/releasing.md](docs/releasing.md) for how releases work, prerelease channels and troubleshooting.

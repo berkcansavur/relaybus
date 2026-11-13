@@ -5,9 +5,9 @@
  * Commit analyzer rules for the 0.x phase.
  *
  * The first matching rule wins. Breaking changes map to a MINOR bump while the
- * packages are below 1.0.0. To graduate to 1.0.0 remove the `breaking` rule
- * (the preset default is then `major`) and cut the release with a
- * `BREAKING CHANGE:` commit.
+ * packages are below 1.0.0. To graduate to 1.0.0 change the `breaking` rule to
+ * `release: 'major'` (deleting it is not enough: the `feat` rule would then match a
+ * breaking `feat!` commit first) and cut the release with a breaking commit.
  */
 export const releaseRules = [
   { breaking: true, release: 'minor' },
