@@ -242,6 +242,44 @@ jobs:
           packages/postgres/test/wake-after-commit.integration.test.ts
           packages/postgres/test/prisma-executor.test.ts
 
+      # The wall-clock latency budgets on this Prisma major, like the timing job: shown, never blocking.
+      - name: Wall-clock latency budgets on Prisma ${{ matrix.prisma }} (not required)
+        continue-on-error: true
+        env:
+          RELAYBUS_TIMING_TESTS: '1'
+        run: pnpm exec vitest run packages/postgres/test/wake-after-commit.integration.test.ts
+
+  # Wall-clock latency budgets (milliseconds) depend on the runner's load, so they run here, outside the
+  # required CI pass and the release gate: a failure shows on the PR but blocks nothing. Count budgets
+  # (statements, tuples, commands) stay in the test job.
+  timing:
+    name: timing (not required)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup workspace
+        uses: ./.github/actions/setup
+        with:
+          node-version: 24.x
+
+      - name: Verify Docker (Testcontainers)
+        run: docker version --format '{{.Server.Version}}'
+
+      - name: Wall-clock latency budgets
+        env:
+          RELAYBUS_TIMING_TESTS: '1'
+        run: >
+          pnpm exec vitest run
+          packages/postgres/test/wake-after-commit.integration.test.ts
+          packages/postgres/test/perf-design-locks-latency.integration.test.ts
+          packages/mongodb/test/perf-design.integration.test.ts
+
   # Single required check for branch protection / rulesets.
   ci-pass:
     name: CI pass

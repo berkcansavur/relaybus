@@ -2,7 +2,7 @@ import type { ClientSession, CommandStartedEvent, MongoClient } from 'mongodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { RelayBus, defineEvent, type ClaimedDelivery, type EventEnvelope } from '@relaybus/core';
 import { at, createDelivery, createEnvelope } from '@relaybus/testing';
-import { expectWithinBudget } from '../../../test-support/perf-budget.js';
+import { expectWithinBudget, timingTestsEnabled } from '../../../test-support/perf-budget.js';
 import { MongoEventStore } from '../src/index.js';
 import { startReplicaSet, uniqueDatabaseName, type MongoReplicaSet } from './support.js';
 
@@ -341,55 +341,58 @@ class OrderPlaced extends defineEvent<{ orderId: string }>('order.placed.v1') {}
 describe('publish-to-handler latency at default settings', () => {
   const quietLogger = { log: () => undefined, warn: () => undefined, error: () => undefined };
 
-  it('runs a handler soon after another process committed its event', async () => {
-    const database = uniqueDatabaseName();
-    const consumerClient = await replicaSet.connect();
-    const publisher = new RelayBus<ClientSession>({
-      store: new MongoEventStore({ client, database }),
-      dispatcher: { enabled: false },
-      logger: quietLogger,
-    });
-    const consumer = new RelayBus<ClientSession>({
-      store: new MongoEventStore({ client: consumerClient, database }),
-      logger: quietLogger,
-    });
-    const committedAt = new Map<string, number>();
-    const startedAt = new Map<string, number>();
-    const handler = (event: EventEnvelope<{ orderId: string }>) => {
-      startedAt.set(event.payload.orderId, Date.now());
-    };
-    publisher.subscribe(OrderPlaced, handler, { id: 'h' });
-    consumer.subscribe(OrderPlaced, handler, { id: 'h' });
-    await publisher.start();
-    await consumer.start();
-    // Let the consumer fall asleep between two polls.
-    await new Promise((resolve) => setTimeout(resolve, 1_200));
-    const total = 30;
-    try {
-      for (let index = 0; index < total; index += 1) {
-        const orderId = String(index);
-        await publisher.transaction(async (session) => {
-          await publisher.publish(new OrderPlaced({ orderId }), { transaction: session });
-        });
-        committedAt.set(orderId, Date.now());
-        const deadline = Date.now() + 5_000;
-        while (!startedAt.has(orderId) && Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, 1));
+  it.runIf(timingTestsEnabled)(
+    'runs a handler soon after another process committed its event',
+    async () => {
+      const database = uniqueDatabaseName();
+      const consumerClient = await replicaSet.connect();
+      const publisher = new RelayBus<ClientSession>({
+        store: new MongoEventStore({ client, database }),
+        dispatcher: { enabled: false },
+        logger: quietLogger,
+      });
+      const consumer = new RelayBus<ClientSession>({
+        store: new MongoEventStore({ client: consumerClient, database }),
+        logger: quietLogger,
+      });
+      const committedAt = new Map<string, number>();
+      const startedAt = new Map<string, number>();
+      const handler = (event: EventEnvelope<{ orderId: string }>) => {
+        startedAt.set(event.payload.orderId, Date.now());
+      };
+      publisher.subscribe(OrderPlaced, handler, { id: 'h' });
+      consumer.subscribe(OrderPlaced, handler, { id: 'h' });
+      await publisher.start();
+      await consumer.start();
+      // Let the consumer fall asleep between two polls.
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      const total = 30;
+      try {
+        for (let index = 0; index < total; index += 1) {
+          const orderId = String(index);
+          await publisher.transaction(async (session) => {
+            await publisher.publish(new OrderPlaced({ orderId }), { transaction: session });
+          });
+          committedAt.set(orderId, Date.now());
+          const deadline = Date.now() + 5_000;
+          while (!startedAt.has(orderId) && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 1));
+          }
+          // Space the events out, so each one finds the consumer idle again.
+          await new Promise((resolve) => setTimeout(resolve, 100 + ((index * 37) % 200)));
         }
-        // Space the events out, so each one finds the consumer idle again.
-        await new Promise((resolve) => setTimeout(resolve, 100 + ((index * 37) % 200)));
+      } finally {
+        await publisher.stop();
+        await consumer.stop();
+        await consumerClient.close();
       }
-    } finally {
-      await publisher.stop();
-      await consumer.stop();
-      await consumerClient.close();
-    }
-    expect(startedAt.size).toBe(total);
-    // A handler can start a moment before the publisher saw its commit acknowledged: that is 0 ms.
-    const sorted = [...committedAt]
-      .map(([orderId, committed]) => Math.max(0, startedAt.get(orderId)! - committed))
-      .sort((left, right) => left - right);
-    expectWithinBudget('mongodb.latency.defaults.p95Ms', sorted[Math.ceil(total * 0.95) - 1]!);
-    expectWithinBudget('mongodb.latency.defaults.maxMs', sorted[total - 1]!);
-  });
+      expect(startedAt.size).toBe(total);
+      // A handler can start a moment before the publisher saw its commit acknowledged: that is 0 ms.
+      const sorted = [...committedAt]
+        .map(([orderId, committed]) => Math.max(0, startedAt.get(orderId)! - committed))
+        .sort((left, right) => left - right);
+      expectWithinBudget('mongodb.latency.defaults.p95Ms', sorted[Math.ceil(total * 0.95) - 1]!);
+      expectWithinBudget('mongodb.latency.defaults.maxMs', sorted[total - 1]!);
+    },
+  );
 });

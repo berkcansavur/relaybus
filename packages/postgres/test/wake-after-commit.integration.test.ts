@@ -7,6 +7,7 @@ import { RelayBus, defineEvent } from '@relaybus/core';
 import { PostgresEventStore } from '../src/index.js';
 import { createPrismaExecutor, type PrismaQueryable } from '../src/prisma/index.js';
 import { PrismaClient } from './prisma/generated/client.js';
+import { timingTestsEnabled } from '../../../test-support/perf-budget.js';
 import {
   createTestPool,
   dropSchema,
@@ -156,7 +157,7 @@ async function startOf(setup: Setup, orderId: string, timeoutMs = 2_000): Promis
   return setup.started.get(orderId)!;
 }
 
-describe('wake-up after a commit of the application transaction', () => {
+describe.runIf(timingTestsEnabled)('wake-up after a commit of the application transaction', () => {
   it(`starts the handler a median ${AFTER_COMMIT_BUDGET_MS} ms after a commit held back ${COMMIT_DELAY_MS} ms once the claim plan is cached (Prisma with pool)`, async () => {
     const setup = await setUp(true);
     await warmUp(setup);
