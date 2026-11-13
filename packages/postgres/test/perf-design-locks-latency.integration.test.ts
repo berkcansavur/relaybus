@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { RelayBus, defineEvent, type ClaimedDelivery, type EventEnvelope } from '@relaybus/core';
 import { at, createDelivery, createEnvelope } from '@relaybus/testing';
-import { expectWithinBudget } from '../../../test-support/perf-budget.js';
+import { expectWithinBudget, timingTestsEnabled } from '../../../test-support/perf-budget.js';
 import { PgExecutor, PostgresEventStore, type PostgresExecutor } from '../src/index.js';
 import {
   skipIdentifiers,
@@ -211,62 +211,65 @@ class OrderPlaced extends defineEvent<{ orderId: string }>('order.placed.v1') {}
 describe('publish-to-handler latency at default settings', () => {
   const quietLogger = { log: () => undefined, warn: () => undefined, error: () => undefined };
 
-  it('runs a handler soon after another process committed its event', async () => {
-    const schema = uniqueSchema();
-    const publisherPool = createTestPool(database.connectionString, 4);
-    const consumerPool = createTestPool(database.connectionString, 10);
-    pools.push(publisherPool, consumerPool);
-    const publisher = new RelayBus<PoolClient>({
-      store: new PostgresEventStore({ pool: publisherPool, schema }),
-      dispatcher: { enabled: false },
-      logger: quietLogger,
-    });
-    const consumer = new RelayBus<PoolClient>({
-      store: new PostgresEventStore({ pool: consumerPool, schema }),
-      logger: quietLogger,
-    });
-    const committedAt = new Map<string, number>();
-    const startedAt = new Map<string, number>();
-    const handler = (event: EventEnvelope<{ orderId: string }>) => {
-      startedAt.set(event.payload.orderId, Date.now());
-    };
-    publisher.subscribe(OrderPlaced, handler, { id: 'h' });
-    consumer.subscribe(OrderPlaced, handler, { id: 'h' });
-    await consumer.start();
-    await publisher.start();
-    // Let the consumer fall asleep between two polls.
-    await new Promise((resolve) => setTimeout(resolve, 1_200));
-    const total = 30;
-    try {
-      for (let index = 0; index < total; index += 1) {
-        if (index === total / 2) {
-          // A lost listening connection must not cost more than one poll interval.
-          await database.pool.query(
-            `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE query ILIKE 'LISTEN %'`,
-          );
+  it.runIf(timingTestsEnabled)(
+    'runs a handler soon after another process committed its event',
+    async () => {
+      const schema = uniqueSchema();
+      const publisherPool = createTestPool(database.connectionString, 4);
+      const consumerPool = createTestPool(database.connectionString, 10);
+      pools.push(publisherPool, consumerPool);
+      const publisher = new RelayBus<PoolClient>({
+        store: new PostgresEventStore({ pool: publisherPool, schema }),
+        dispatcher: { enabled: false },
+        logger: quietLogger,
+      });
+      const consumer = new RelayBus<PoolClient>({
+        store: new PostgresEventStore({ pool: consumerPool, schema }),
+        logger: quietLogger,
+      });
+      const committedAt = new Map<string, number>();
+      const startedAt = new Map<string, number>();
+      const handler = (event: EventEnvelope<{ orderId: string }>) => {
+        startedAt.set(event.payload.orderId, Date.now());
+      };
+      publisher.subscribe(OrderPlaced, handler, { id: 'h' });
+      consumer.subscribe(OrderPlaced, handler, { id: 'h' });
+      await consumer.start();
+      await publisher.start();
+      // Let the consumer fall asleep between two polls.
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      const total = 30;
+      try {
+        for (let index = 0; index < total; index += 1) {
+          if (index === total / 2) {
+            // A lost listening connection must not cost more than one poll interval.
+            await database.pool.query(
+              `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE query ILIKE 'LISTEN %'`,
+            );
+          }
+          const orderId = String(index);
+          await publisher.transaction(async (transaction) => {
+            await publisher.publish(new OrderPlaced({ orderId }), { transaction });
+          });
+          committedAt.set(orderId, Date.now());
+          const deadline = Date.now() + 5_000;
+          while (!startedAt.has(orderId) && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 1));
+          }
+          // Space the events out, so each one finds the consumer idle again.
+          await new Promise((resolve) => setTimeout(resolve, 100 + ((index * 37) % 200)));
         }
-        const orderId = String(index);
-        await publisher.transaction(async (transaction) => {
-          await publisher.publish(new OrderPlaced({ orderId }), { transaction });
-        });
-        committedAt.set(orderId, Date.now());
-        const deadline = Date.now() + 5_000;
-        while (!startedAt.has(orderId) && Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, 1));
-        }
-        // Space the events out, so each one finds the consumer idle again.
-        await new Promise((resolve) => setTimeout(resolve, 100 + ((index * 37) % 200)));
+      } finally {
+        await publisher.stop();
+        await consumer.stop();
       }
-    } finally {
-      await publisher.stop();
-      await consumer.stop();
-    }
-    expect(startedAt.size).toBe(total);
-    // A handler can start a moment before the publisher saw its commit acknowledged: that is 0 ms.
-    const sorted = [...committedAt]
-      .map(([orderId, committed]) => Math.max(0, startedAt.get(orderId)! - committed))
-      .sort((left, right) => left - right);
-    expectWithinBudget('postgres.latency.defaults.p95Ms', sorted[Math.ceil(total * 0.95) - 1]!);
-    expectWithinBudget('postgres.latency.defaults.maxMs', sorted[total - 1]!);
-  });
+      expect(startedAt.size).toBe(total);
+      // A handler can start a moment before the publisher saw its commit acknowledged: that is 0 ms.
+      const sorted = [...committedAt]
+        .map(([orderId, committed]) => Math.max(0, startedAt.get(orderId)! - committed))
+        .sort((left, right) => left - right);
+      expectWithinBudget('postgres.latency.defaults.p95Ms', sorted[Math.ceil(total * 0.95) - 1]!);
+      expectWithinBudget('postgres.latency.defaults.maxMs', sorted[total - 1]!);
+    },
+  );
 });
