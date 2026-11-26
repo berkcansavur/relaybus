@@ -1,6 +1,6 @@
 import { resolvePostgresNames, type PostgresSchemaOptions } from './names.js';
 import { type PostgresStoreState } from './postgres-store-state.js';
-import { upgradePayloadToJson } from './schema.js';
+import { upgradeLaneScopes, upgradePayloadToJson } from './schema.js';
 
 /** What the catalog says about the schema (see {@link SetupStatements.schemaCurrent}). */
 type SchemaState = {
@@ -8,22 +8,28 @@ type SchemaState = {
   readonly marked: boolean;
   /** The payload and headers columns are `json`. */
   readonly payloadJson: boolean;
+  /** The lane table has its `scope` column. */
+  readonly laneScopes: boolean;
 };
 
 /**
  * Brings the schema to the current statements under the setup lock (see
- * {@link PostgresEventStore.setup}): first the payload conversion in a transaction of its own, then
- * the other statements, unless the schema carries the marker, which 0.4.0 writes too and which then
- * needs only the conversion.
+ * {@link PostgresEventStore.setup}): first the payload conversion and then the lane scope upgrade, each
+ * in a transaction of its own, then the other statements, unless the schema carries the marker, which
+ * 0.4.0 writes too and which then needs only those two upgrades.
  */
 export class PostgresSetup<TTransaction> {
   readonly #state: PostgresStoreState<TTransaction>;
   /** The conversion of `jsonb` payload columns. */
   readonly #payloadUpgrade: string;
+  /** The lane scope upgrade. */
+  readonly #laneScopesUpgrade: string;
 
   constructor(state: PostgresStoreState<TTransaction>, options: PostgresSchemaOptions) {
     this.#state = state;
-    this.#payloadUpgrade = upgradePayloadToJson(resolvePostgresNames(options));
+    const names = resolvePostgresNames(options);
+    this.#payloadUpgrade = upgradePayloadToJson(names);
+    this.#laneScopesUpgrade = upgradeLaneScopes(names);
   }
 
   /** Implements {@link PostgresEventStore.setup}. */
@@ -35,10 +41,14 @@ export class PostgresSetup<TTransaction> {
     await this.#underSetupLock(async (transaction) => {
       await this.#run(this.#payloadUpgrade, transaction);
     });
+    await this.#underSetupLock(async (transaction) => {
+      await this.#run(this.#laneScopesUpgrade, transaction);
+    });
     await this.#underSetupLock(async (transaction, schema) => {
-      // A 0.4.0 setup may have created the schema since the first step released the lock.
+      // A setup of an earlier version may have created the schema since the first steps released the lock.
       if (schema.marked) {
         await this.#run(this.#payloadUpgrade, transaction);
+        await this.#run(this.#laneScopesUpgrade, transaction);
         return;
       }
       for (const statement of this.#state.schemaStatements) {
@@ -50,7 +60,8 @@ export class PostgresSetup<TTransaction> {
   /**
    * Runs `work` in a transaction under the setup lock, unless the schema became current. The
    * payload conversion goes first in a transaction of its own, so it holds no other table lock
-   * while it waits for the event table (a completion locks deliveries before the event rows).
+   * while it waits for the event table (a completion locks deliveries before the event rows), and the
+   * lane scope upgrade likewise holds no lock but the lane table's while it waits for running claims.
    */
   async #underSetupLock(
     work: (transaction: TTransaction, schema: SchemaState) => Promise<void>,
@@ -78,11 +89,15 @@ export class PostgresSetup<TTransaction> {
       [this.#state.schemaMarker],
       transaction,
     );
-    return { marked: rows[0]!['marked'] === true, payloadJson: rows[0]!['payload_json'] === true };
+    return {
+      marked: rows[0]!['marked'] === true,
+      payloadJson: rows[0]!['payload_json'] === true,
+      laneScopes: rows[0]!['lane_scopes'] === true,
+    };
   }
 }
 
-/** Current: the marker is there and the payload columns are converted. */
+/** Current: the marker is there, the payload columns are converted and the lane table has scopes. */
 function isCurrent(schema: SchemaState): boolean {
-  return schema.marked && schema.payloadJson;
+  return schema.marked && schema.payloadJson && schema.laneScopes;
 }

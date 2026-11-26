@@ -120,4 +120,27 @@ CREATE INDEX IF NOT EXISTS "relaybus_event_completions_completed_idx" ON "public
 
 INSERT INTO "public"."relaybus_lanes" (lane) SELECT generate_series(0, 255)::smallint ON CONFLICT (lane) DO NOTHING;
 
+DO $relaybus_lane_scopes$
+DECLARE
+  lane_check text;
+BEGIN
+  IF to_regclass('"public"."relaybus_lanes"') IS NULL THEN
+    RETURN;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid = to_regclass('"public"."relaybus_lanes"') AND attname = 'scope' AND NOT attisdropped
+  ) THEN
+    ALTER TABLE "public"."relaybus_lanes" ADD COLUMN scope text NOT NULL DEFAULT 'default';
+  END IF;
+  FOR lane_check IN
+    SELECT conname FROM pg_constraint
+    WHERE conrelid = to_regclass('"public"."relaybus_lanes"') AND contype = 'c'
+      AND pg_get_constraintdef(oid) LIKE '%< 256%'
+  LOOP
+    EXECUTE format('ALTER TABLE "public"."relaybus_lanes" DROP CONSTRAINT %I', lane_check);
+  END LOOP;
+END
+$relaybus_lane_scopes$;
+
 COMMENT ON TABLE "public"."relaybus_lanes" IS 'relaybus schema ae44fe2cd55d06183921bc5e2bb0db92';

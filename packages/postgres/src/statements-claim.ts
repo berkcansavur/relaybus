@@ -1,4 +1,5 @@
 import type { PostgresNames } from './names.js';
+import { blockedInOtherLane } from './sql-fragments.js';
 import {
   CLAIM_SCAN_WINDOW,
   HANDLER_PREDICATE,
@@ -96,7 +97,7 @@ heads AS MATERIALIZED (
   FROM heads
   JOIN scope ON scope.lane = heads.lane
   WHERE heads.available_at <= $1::timestamptz AND heads.id <> ALL (scope.in_flight)
-    AND NOT EXISTS (SELECT 1 FROM running WHERE running.handler = heads.handler AND running.key = heads.key)
+    AND NOT EXISTS (SELECT 1 FROM running WHERE running.handler = heads.handler AND running.key = heads.key)${this.#headNotBlockedInOtherLane()}
   ORDER BY heads.available_at, heads.id
   LIMIT $3::int
 ), unkeyed AS MATERIALIZED (
@@ -146,7 +147,20 @@ ${this.#pickedRows('false')}`;
         WHERE earlier.lane = ${alias}.lane AND earlier.handler = ${alias}.handler AND earlier.key = ${alias}.key
           AND earlier.status = 'pending' AND earlier.key IS NOT NULL
           AND earlier.sequence < ${alias}.sequence
-      ) OR ${this.#runningElsewhere(alias)}`;
+      ) OR ${this.#runningElsewhere(alias)}${this.#orBlockedInOtherLane(alias)}`;
+  }
+
+  /** ` OR` {@link blockedInOtherLane} for a store of a lane scope, else nothing. */
+  #orBlockedInOtherLane(alias: string): string {
+    const blocked = blockedInOtherLane(this.#names, { alias, sequence: `${alias}.sequence` });
+    return blocked === null ? '' : ` OR ${blocked}`;
+  }
+
+  /** ` AND NOT` {@link blockedInOtherLane} of the slow claim's `heads` for a store of a lane scope, else nothing. */
+  #headNotBlockedInOtherLane(): string {
+    const sequence = `(SELECT own.sequence FROM ${this.#names.deliveries} AS own WHERE own.id = heads.id)`;
+    const blocked = blockedInOtherLane(this.#names, { alias: 'heads', sequence });
+    return blocked === null ? '' : ` AND NOT ${blocked}`;
   }
 
   /** True when a delivery of the candidate's handler and key is in flight. The candidate itself never is. */

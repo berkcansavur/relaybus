@@ -95,16 +95,17 @@ The projection write and the delivery's completion commit together or not at all
 
 ## Options
 
-| Option               | Default                                         | Meaning                                                                                                           |
-| -------------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `client`             | required                                        | A connected `MongoClient`. The store never closes it.                                                             |
-| `database`           | the client's default database                   | Database for the collections. 1-63 characters of letters, digits, `_`, `-`.                                       |
-| `collectionPrefix`   | `'relaybus_'`                                   | Collections are `<prefix>events`, `<prefix>deliveries`, `<prefix>key_sequences`, `<prefix>lanes`.                 |
-| `completionHistory`  | `false`                                         | Keep an append-only record of completed deliveries (`<prefix>completed_deliveries`). Same value in every process. |
-| `transactionOptions` | snapshot read concern, `w: 'majority'`, primary | Passed to `withTransaction`.                                                                                      |
-| `purgeBatchSize`     | `500`                                           | Documents deleted per purge step.                                                                                 |
-| `logger`             | `console`                                       | Receives warnings about best-effort steps that failed (parking).                                                  |
-| `generateIdentifier` | -                                               | Deprecated and ignored: a lease token is `<laneId>:<epoch>:<claims>`.                                             |
+| Option               | Default                                         | Meaning                                                                                                                                      |
+| -------------------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `client`             | required                                        | A connected `MongoClient`. The store never closes it.                                                                                        |
+| `database`           | the client's default database                   | Database for the collections. 1-63 characters of letters, digits, `_`, `-`.                                                                  |
+| `collectionPrefix`   | `'relaybus_'`                                   | Collections are `<prefix>events`, `<prefix>deliveries`, `<prefix>key_sequences`, `<prefix>lanes`.                                            |
+| `completionHistory`  | `false`                                         | Keep an append-only record of completed deliveries (`<prefix>completed_deliveries`). Same value in every process.                            |
+| `transactionOptions` | snapshot read concern, `w: 'majority'`, primary | Passed to `withTransaction`.                                                                                                                 |
+| `purgeBatchSize`     | `500`                                           | Documents deleted per purge step.                                                                                                            |
+| `logger`             | `console`                                       | Receives warnings about best-effort steps that failed (parking).                                                                             |
+| `laneScope`          | `'default'`                                     | Lanes of the service when several services share the collections; see [Lane scopes](#lane-scopes). Same value in every process of a service. |
+| `generateIdentifier` | -                                               | Deprecated and ignored: a lease token is `<laneId>:<epoch>:<claims>`.                                                                        |
 
 Non-transactional writes (claims, renewals) use write concern `majority` and primary reads, whatever the client
 default is, so a lease survives a failover and the ordering check never reads a stale secondary.
@@ -328,6 +329,31 @@ schema yourself, run `setup()` once from a deployment script instead.
 Partial indexes contain only unfinished (or legacy completed) deliveries, so they stay small. If you
 never use `listDeliveries` filters, the three listing indexes can be dropped at the cost of slower
 operator queries.
+
+## Lane scopes
+
+Services that share one set of collections (one `collectionPrefix`) also share its 256 lanes: a worker that leases a
+lane holds every delivery of it, so a busy service can hold lanes that another service's deliveries hash to.
+`laneScope` gives a service lanes of its own. The default scope `'default'` keeps lanes 0-255, exactly as before. Any
+other scope (1-63 characters of `a-z`, `0-9`, `_ . : -`, starting with a letter or digit) gets a block of 256 lane
+documents, allocated once on first use after the highest lane. The block's first document carries `scopeHead`, and a
+unique partial index `scope_head` keeps one block per scope, so concurrent processes agree on one block. Up to 127
+scopes fit next to the default one. Deliveries a scoped store writes go to its block, and its workers lease lanes of
+its block only.
+
+- Every process of a service uses the same `laneScope`.
+- A scoped store also claims from the default lanes, but only deliveries of its own handlers, so deliveries the service
+  wrote before it moved to its scope still run. The ordering check does not depend on lanes, and a keyed delivery also
+  waits while a delivery of its handler and key runs in the matching lane of the other side, so per-key order holds
+  across the move. A worker of the default scope does not look at the block for running deliveries, so requeue dead
+  deliveries of the service once every worker has the scope. Moving back to `'default'` does not drain the block: drain it first, then switch.
+- Statistics, `listDeliveries`, `requeue` and `purge` stay collection-wide.
+- Roll out in two steps: first run 1.2.0 or newer in every process with the default scope (1.1.0 and older reject
+  lease tokens of lanes above 255), then set `laneScope`. No migration is needed: the store creates the `scope_head`
+  index and its block itself, so its user needs `createIndex` and `insert` on the lane collection.
+- A store finds or allocates its block outside your transaction, once per store, before its first publish or claim. On a
+  client limited to one connection (`maxPoolSize: 1` with `loadBalanced`), call `setup()` before publishing inside a
+  transaction.
 
 ## Upgrading from 0.1.0
 

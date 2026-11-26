@@ -1,4 +1,5 @@
 import type { PostgresNames } from './names.js';
+import { laneInScope } from './sql-fragments.js';
 import { CandidateStatements } from './statements-candidates.js';
 import {
   CLAIM_SCAN_WINDOW,
@@ -127,7 +128,11 @@ export class LaneStatements {
 `;
   }
 
-  /** The oldest due delivery of each free lane, at most the number still wanted plus a surplus. */
+  /**
+   * The oldest due delivery of each free lane of the store's scope, at most the number still wanted plus a
+   * surplus. Lanes of other scopes are never looked at, so stores of different scopes sharing the tables
+   * never take each other's lanes.
+   */
   #freeLaneChoice(): string {
     const deliveries = this.#names.deliveries;
     const lanes = this.#names.lanes;
@@ -145,7 +150,7 @@ export class LaneStatements {
     ORDER BY delivery.available_at, delivery.id
     LIMIT 1
   ) AS oldest
-  WHERE (SELECT count FROM wanted) > 0 AND ${freeLane('lane')}
+  WHERE (SELECT count FROM wanted) > 0 AND ${freeLane('lane')} AND ${laneInScope(this.#names, 'lane')}
   ORDER BY oldest.available_at, oldest.id
   LIMIT (SELECT count FROM wanted) + ${FREE_LANE_SURPLUS}
 `;
@@ -202,7 +207,7 @@ export class LaneStatements {
       SELECT chosen.lane FROM free_depth AS chosen
       WHERE chosen.rank <= ${INITIAL_FREE_LANES} OR chosen.due_before < (SELECT count FROM wanted)
     )
-    AND ${freeLane('lane')}
+    AND ${freeLane('lane')} AND ${laneInScope(this.#names, 'lane')}
   ORDER BY lane.lane
   FOR UPDATE SKIP LOCKED
 ), free_scope AS MATERIALIZED (
@@ -308,7 +313,7 @@ ORDER BY picked.due_at, picked.delivery_id`;
   }
 
   /**
-   * Takes up to `$3` free lanes (no lease, or an expired one) that have a due
+   * Takes up to `$3` free lanes of the store's scope (no lease, or an expired one) that have a due
    * delivery of the requested handlers, the ones with the oldest due delivery
    * first. Parameters: `[now, handlersJson, laneCount, leaseOwner, leaseExpiresAt, generation]`.
    * The lane gets the owner's `generation` as its `claim_floor`. A lane the owner itself holds under a live
@@ -339,8 +344,9 @@ ORDER BY picked.due_at, picked.delivery_id`;
     ORDER BY delivery.available_at, delivery.id
     LIMIT 1
   ) AS oldest
-  WHERE free.lease_expires_at IS NULL OR free.lease_expires_at <= $1::timestamptz
-    OR (free.lease_owner = $4::text AND free.claim_floor < $6::bigint)
+  WHERE (free.lease_expires_at IS NULL OR free.lease_expires_at <= $1::timestamptz
+      OR (free.lease_owner = $4::text AND free.claim_floor < $6::bigint))
+    AND ${laneInScope(this.#names, 'free')}
   ORDER BY oldest.available_at, oldest.id
   LIMIT $3::int
   FOR UPDATE OF free SKIP LOCKED

@@ -20,3 +20,12 @@ export function assertDatabaseName(name: string): void {
     );
   }
 }
+
+const LANE_SCOPE_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,62}$/;
+
+/** Rejects lane scopes that are not short, lower-case names. */
+export function assertLaneScope(scope: string): void {
+  if (!LANE_SCOPE_PATTERN.test(scope)) {
+    throw new ConfigurationError(`laneScope '${scope}' must match ${String(LANE_SCOPE_PATTERN)}`);
+  }
+}

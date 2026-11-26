@@ -108,7 +108,14 @@ export class MongoAppend {
         }
         handlers.add(delivery.handler);
         addedHandlers.set(event.id, [...(addedHandlers.get(event.id) ?? []), delivery.handler]);
-        newDeliveries.push(toDeliveryDocument(delivery, { event, ordering, now }));
+        newDeliveries.push(
+          toDeliveryDocument(delivery, {
+            event,
+            ordering,
+            now,
+            firstLane: this.#state.laneScope.firstLane,
+          }),
+        );
       }
     }
     return { appendedEventIds, duplicateEventIds, newEvents, newDeliveries, addedHandlers };

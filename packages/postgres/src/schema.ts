@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
+  DEFAULT_LANE_SCOPE,
   LANE_COUNT,
   resolvePostgresNames,
   type PostgresNames,
@@ -133,7 +134,42 @@ function laneAndCompletionStatements(names: PostgresNames): string[] {
 )`,
     `CREATE INDEX IF NOT EXISTS ${names.indexes.eventCompletionsCompleted} ON ${names.eventCompletions} (completed_at, event_id)`,
     `INSERT INTO ${names.lanes} (lane) SELECT generate_series(0, ${LANE_COUNT - 1})::smallint ON CONFLICT (lane) DO NOTHING`,
+    upgradeLaneScopes(names),
   ];
+}
+
+/**
+ * Lets the lane table hold the lanes of several scopes (see {@link PostgresSchemaOptions.laneScope}): adds
+ * the `scope` column, whose default puts every existing lane in the default scope, drops the check that
+ * kept lanes below ${LANE_COUNT}. Nothing about the existing lanes or deliveries
+ * changes, and a store of an earlier version keeps working next to it. The column has a constant default,
+ * so adding it rewrites nothing; the lane table is locked only for that instant, and not at all once the
+ * column exists. The column is not indexed, so lane updates stay heap-only. A no-op
+ * when the lane table does not exist, and once it ran.
+ */
+export function upgradeLaneScopes(names: PostgresNames): string {
+  return `DO $relaybus_lane_scopes$
+DECLARE
+  lane_check text;
+BEGIN
+  IF to_regclass('${names.lanes}') IS NULL THEN
+    RETURN;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid = to_regclass('${names.lanes}') AND attname = 'scope' AND NOT attisdropped
+  ) THEN
+    ALTER TABLE ${names.lanes} ADD COLUMN scope text NOT NULL DEFAULT '${DEFAULT_LANE_SCOPE}';
+  END IF;
+  FOR lane_check IN
+    SELECT conname FROM pg_constraint
+    WHERE conrelid = to_regclass('${names.lanes}') AND contype = 'c'
+      AND pg_get_constraintdef(oid) LIKE '%< ${LANE_COUNT}%'
+  LOOP
+    EXECUTE format('ALTER TABLE ${names.lanes} DROP CONSTRAINT %I', lane_check);
+  END LOOP;
+END
+$relaybus_lane_scopes$`;
 }
 
 /** The completion history table, kept with `completionHistory: true`. */
@@ -223,11 +259,11 @@ $relaybus_payload_json$`;
 }
 
 /**
- * The schema marker 0.4.0 writes, which 0.4.1 keeps writing: the hash of the schema statements without
- * the payload conversion and with the `jsonb` columns of 0.4.0. A 0.4.0 instance started next to 0.4.1,
+ * The schema marker 0.4.0 writes, which 0.4.1 and later keep writing: the hash of the schema statements
+ * without the payload conversion and the lane scope upgrade, and with the `jsonb` columns of 0.4.0. A 0.4.0 instance started next to 0.4.1,
  * or after a rollback, then still finds its marker and runs no schema statement, whose table locks could
  * deadlock with running claims. Whether the payload columns are converted is read from the column types
- * instead (see {@link SetupStatements.schemaCurrent}).
+ * instead, and whether the lane scopes upgrade ran from the `scope` column (see {@link SetupStatements.schemaCurrent}).
  */
 export function version040SchemaMarker(options: PostgresSchemaOptions = {}): string {
   const names = resolvePostgresNames(options);
@@ -237,9 +273,10 @@ export function version040SchemaMarker(options: PostgresSchemaOptions = {}): str
 /** {@link version040SchemaMarker} of the body statements of {@link schemaBodyStatements}. */
 function version040Marker(names: PostgresNames, statements: readonly string[]): string {
   const conversion = upgradePayloadToJson(names);
+  const laneScopes = upgradeLaneScopes(names);
   return postgresSchemaMarker(
     statements
-      .filter((statement) => statement !== conversion)
+      .filter((statement) => statement !== conversion && statement !== laneScopes)
       .map((statement) => statement.replace(PAYLOAD_COLUMNS, JSONB_PAYLOAD_COLUMNS)),
   );
 }

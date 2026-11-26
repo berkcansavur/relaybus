@@ -40,6 +40,9 @@ describe('lease tokens', () => {
     expect(formatLeaseToken(7, { epoch: 12, claims: 3 })).toBe('7:12:3');
     expect(parseLeaseToken('7:12:3')).toEqual({ laneId: 7, epoch: 12, claims: 3 });
     expect(parseLeaseToken('255:0:0')).toEqual({ laneId: 255, epoch: 0, claims: 0 });
+    // Lanes of the other lane scopes.
+    expect(parseLeaseToken('256:1:0')).toEqual({ laneId: 256, epoch: 1, claims: 0 });
+    expect(parseLeaseToken('32767:1:0')).toEqual({ laneId: 32_767, epoch: 1, claims: 0 });
     expect(
       parseLeaseToken(
         formatLeaseToken(0, { epoch: 999_999_999_999_999, claims: 999_999_999_999_999 }),
@@ -68,8 +71,8 @@ describe('lease tokens', () => {
     '018f2b6e-7a5c-7c3e-9a1b-1234567890ab',
     // Two-part tokens of the previous format name no claim generation.
     '3:1',
-    '256:1:0',
-    '999:1:0',
+    '32768:1:0',
+    '999999:1:0',
     '3:x:0',
     '3:1:x',
     '3:1:',

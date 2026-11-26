@@ -1,5 +1,5 @@
 import type { PostgresNames } from './names.js';
-import { laneExpression } from './sql-fragments.js';
+import { scopedLaneExpression } from './sql-fragments.js';
 
 /** Statements that publish: events, deliveries and the wake-up notification. */
 export class AppendStatements {
@@ -75,7 +75,7 @@ WHERE (SELECT count(*) FROM woken) >= 0`;
     return `inserted_deliveries AS (
   INSERT INTO ${this.#names.deliveries}
     (id, event_id, handler, lane, status, attempts, available_at, key, sequence, created_at, updated_at)
-  SELECT delivery.id, delivery.event_id, delivery.handler, ${laneExpression('event.key', 'event.id')}, 'pending', 0,
+  SELECT delivery.id, delivery.event_id, delivery.handler, ${scopedLaneExpression(this.#names, { key: 'event.key', eventId: 'event.id' })}, 'pending', 0,
     delivery.available_at, event.key, event.sequence, $2::timestamptz, $2::timestamptz
   FROM jsonb_to_recordset($3::jsonb) AS delivery (id text, event_id text, handler text, available_at timestamptz)
   JOIN inserted_events AS event ON event.id = delivery.event_id
@@ -160,7 +160,7 @@ FOR NO KEY UPDATE`;
   SELECT incoming.id, incoming.event_id, incoming.handler, incoming.available_at
   FROM jsonb_to_recordset($1::jsonb) AS incoming (id text, event_id text, handler text, available_at timestamptz)
 ), fresh AS (
-  SELECT incoming.*, event.key, event.sequence, ${laneExpression('event.key', 'event.id')} AS lane
+  SELECT incoming.*, event.key, event.sequence, ${scopedLaneExpression(this.#names, { key: 'event.key', eventId: 'event.id' })} AS lane
   FROM incoming
   JOIN ${events} AS event ON event.id = incoming.event_id
   WHERE event.id = ANY (${insertedEvents}) OR NOT incoming.handler = ANY (event.handlers)

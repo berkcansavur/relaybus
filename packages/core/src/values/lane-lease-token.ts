@@ -14,9 +14,6 @@ export interface LaneLeaseTokenLimits {
   readonly claimsDigits: number;
 }
 
-/** Largest number of digits of a lane number. */
-const LANE_DIGITS = 3;
-
 /**
  * The fencing token of a claim in a lane-leased store: `<lane>:<epoch>:<claims>`. Every state
  * change checks the lane epoch and the delivery's claim generation it names. A store creates one
@@ -28,8 +25,9 @@ export class LaneLeaseTokenFormat {
 
   constructor(limits: LaneLeaseTokenLimits) {
     this.#laneCount = limits.laneCount;
+    const laneDigits = String(limits.laneCount - 1).length;
     this.#pattern = new RegExp(
-      `^(\\d{1,${LANE_DIGITS}}):(\\d{1,${limits.epochDigits}}):(\\d{1,${limits.claimsDigits}})$`,
+      `^(\\d{1,${laneDigits}}):(\\d{1,${limits.epochDigits}}):(\\d{1,${limits.claimsDigits}})$`,
     );
   }
 

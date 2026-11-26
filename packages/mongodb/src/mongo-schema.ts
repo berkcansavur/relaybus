@@ -52,7 +52,7 @@ export class MongoSchema {
     for (const name of collectionNames) {
       await this.#createCollectionIfMissing(name);
     }
-    if ((await this.#state.lanes.countDocuments()) < LANE_COUNT) {
+    if ((await this.#state.lanes.countDocuments({ _id: { $lt: LANE_COUNT } })) < LANE_COUNT) {
       await this.#upgradeFromVersion010();
       await this.#seedLanes();
     }

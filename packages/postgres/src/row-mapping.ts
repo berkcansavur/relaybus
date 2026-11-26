@@ -8,7 +8,7 @@ import type {
 } from '@relaybus/core';
 import { LaneLeaseTokenFormat, type LaneLeaseTokenParts } from '@relaybus/core/internal';
 import type { PostgresRow } from './executor.js';
-import { LANE_COUNT } from './names.js';
+import { MAXIMUM_LANE } from './names.js';
 
 // Rows come from statements written in this package, so their shape is known.
 // Casting here is the single place where driver output is trusted.
@@ -45,9 +45,9 @@ export function mapEventEnvelope(row: PostgresRow): EventEnvelope {
   };
 }
 
-/** Lease tokens of this store: epochs are bigint text of up to 18 digits. */
+/** Lease tokens of this store: lanes of every scope, and epochs of bigint text of up to 18 digits. */
 const LEASE_TOKENS = new LaneLeaseTokenFormat({
-  laneCount: LANE_COUNT,
+  laneCount: MAXIMUM_LANE + 1,
   epochDigits: 18,
   claimsDigits: 9,
 });

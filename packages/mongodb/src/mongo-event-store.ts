@@ -39,6 +39,15 @@ export interface MongoEventStoreOptions {
   /** Prefix of the collection names. Default `relaybus_`. */
   readonly collectionPrefix?: string;
   /**
+   * The lanes this store leases, when several services share one set of collections. Each scope
+   * gets 256 lanes of its own, so a worker of one scope never holds a lane another scope needs; the
+   * deliveries a store appends go to the lanes of its scope. Lower-case letters, digits and
+   * `_ . : -`, at most 63 characters. Default `'default'`: lanes 0 to 255, the ones every store used
+   * before scopes existed. Any other scope gets its lanes on first use (it creates the
+   * `scope_head` index of the lanes collection); every process of a service must use the same scope.
+   */
+  readonly laneScope?: string;
+  /**
    * Options of the transactions the store opens. Default: snapshot read
    * concern, majority write concern, primary reads.
    */
@@ -163,7 +172,7 @@ export class MongoEventStore implements EventStore<ClientSession> {
    * @throws ConfigurationError when the server is a standalone mongod.
    */
   setup(): Promise<void> {
-    return this.#schema.setup();
+    return this.#schema.setup().then(() => this.#state.laneScope.ensure());
   }
 
   /**
@@ -202,7 +211,9 @@ export class MongoEventStore implements EventStore<ClientSession> {
     entries: readonly AppendEntry[],
     now: Date,
   ): Promise<AppendResult> {
-    return this.#appender.append(session, { entries, now });
+    return this.#state.laneScope
+      .ensure()
+      .then(() => this.#appender.append(session, { entries, now }));
   }
 
   /**
@@ -226,7 +237,7 @@ export class MongoEventStore implements EventStore<ClientSession> {
    * Nothing a failed claim did leaves a delivery listed as running.
    */
   claim(request: ClaimRequest): Promise<ClaimedDelivery[]> {
-    return this.#claims.claim(request);
+    return this.#state.laneScope.ensure().then(() => this.#claims.claim(request));
   }
 
   /**

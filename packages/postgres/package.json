@@ -139,6 +139,7 @@
     "pg": "8.23.1",
     "prisma": "7.10.1",
     "relaybus-postgres-0.4.0": "npm:@relaybus/postgres@0.4.0",
+    "relaybus-postgres-1.1.0": "npm:@relaybus/postgres@1.1.0",
     "testcontainers": "12.2.1",
     "typeorm": "1.1.2"
   },

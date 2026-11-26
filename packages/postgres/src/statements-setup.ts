@@ -21,7 +21,8 @@ export class SetupStatements {
    * The state of the schema, taking no table lock. Parameters: `[marker]`. Columns: `marked`, whether
    * the lane table carries `marker` as its comment (the schema statements that produce it already
    * ran), and `payload_json`, whether the payload and headers columns of the event table are both
-   * `json` (the conversion of the `jsonb` columns of schemas before 0.4.1 ran).
+   * `json` (the conversion of the `jsonb` columns of schemas before 0.4.1 ran), and `lane_scopes`, whether
+   * the lane table has its `scope` column (the lane scope upgrade of 1.2.0 ran).
    */
   get schemaCurrent(): string {
     // Reads the catalogs with the statement's snapshot. `to_regclass` and `obj_description` would go
@@ -40,7 +41,13 @@ export class SetupStatements {
   WHERE n.nspname = '${this.#names.schema}' AND c.relname = '${this.#names.eventsTableName}'
     AND a.attname IN ('payload', 'headers') AND a.atttypid = 'pg_catalog.json'::pg_catalog.regtype
     AND NOT a.attisdropped
-) = 2 AS payload_json`;
+) = 2 AS payload_json, EXISTS (
+  SELECT 1 FROM pg_catalog.pg_attribute AS a
+  JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid
+  JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+  WHERE n.nspname = '${this.#names.schema}' AND c.relname = '${this.#names.lanesTableName}'
+    AND a.attname = 'scope' AND NOT a.attisdropped
+) AS lane_scopes`;
   }
 
   /**

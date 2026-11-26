@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { DeliveryQuery } from '@relaybus/core';
 import { resolvePostgresNames, type PostgresSchemaOptions } from '../src/names.js';
+import { laneBlockStart, setLaneBlockStart } from '../src/sql-fragments.js';
 import { createPostgresSchemaStatements, version040SchemaMarker } from '../src/schema.js';
 import { PostgresStatements } from '../src/statements.js';
 
@@ -11,6 +12,7 @@ const configurations: Record<string, PostgresSchemaOptions> = {
     tablePrefix: 'x_',
     completionHistory: true,
   },
+  'a lane scope': { laneScope: 'orders' },
 };
 
 const listQueries: readonly DeliveryQuery[] = [
@@ -44,7 +46,11 @@ function render(group: object): Record<string, unknown> {
 // change of a statement updates the snapshot (`vitest -u`) and says so in the commit.
 describe('statement SQL', () => {
   it.each(Object.entries(configurations))('is unchanged with %s', (_label, options) => {
-    const statements = new PostgresStatements(resolvePostgresNames(options));
+    const names = resolvePostgresNames(options);
+    if (names.laneScope !== undefined) {
+      setLaneBlockStart(names, 256);
+    }
+    const statements = new PostgresStatements(names);
     const groups = Object.fromEntries(
       Object.entries(statements).map(([groupName, group]) => [groupName, render(group as object)]),
     );
@@ -53,6 +59,14 @@ describe('statement SQL', () => {
 
   it.each(Object.entries(configurations))('creates the same schema with %s', (_label, options) => {
     expect(createPostgresSchemaStatements(options)).toMatchSnapshot();
+  });
+});
+
+describe('the first lane of a scope', () => {
+  it('is unknown to statements before the block is looked up', () => {
+    expect(() => laneBlockStart(resolvePostgresNames({ laneScope: 'orders' }))).toThrow(
+      "lane scope 'orders' has no block yet",
+    );
   });
 });
 
