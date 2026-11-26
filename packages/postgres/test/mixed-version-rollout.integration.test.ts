@@ -6,6 +6,8 @@ import type { ClaimedDelivery, EventEnvelope } from '@relaybus/core';
 import { PostgresEventStore as Version040Store } from 'relaybus-postgres-0.4.0';
 import { PostgresEventStore, resolvePostgresNames } from '../src/index.js';
 import { version040SchemaMarker } from '../src/schema.js';
+import { LANE_COUNT } from '../src/names.js';
+import { laneExpression } from '../src/sql-fragments.js';
 import { startDatabase, uniqueSchema, type TestDatabase } from './support/postgres-container.js';
 
 let database: TestDatabase;
@@ -19,7 +21,7 @@ afterAll(async () => {
 });
 
 /** The store API both versions share and the test uses. */
-type Store = Pick<PostgresEventStore, 'setup' | 'transaction' | 'append' | 'claim'>;
+type Store = Pick<PostgresEventStore, 'setup' | 'transaction' | 'append' | 'claim' | 'complete'>;
 
 function current(schema: string): Store {
   return new PostgresEventStore({ pool: database.pool, schema });
@@ -106,12 +108,46 @@ async function setupWaitsForWriters(schema: string, setup: () => Promise<void>):
   }
 }
 
-/** Publishes with `from` and claims with `to`: the payload and headers arrive intact. */
-async function handOver(from: Store, to: Store, handler: string): Promise<void> {
-  const event = createEnvelope({ payload: { zulu: 1, a: { yy: 2, b: 3 } }, headers: { z: 'z' } });
+/**
+ * Publishes with `from` and claims with `to`: the payload and headers arrive intact. A keyless event takes
+ * the lane its id hashes to, and the lane stays leased to the claimer until its next claim frees it; the
+ * hand-over completes the delivery and claims once more to give the lane back, so a later hand-over whose
+ * event hashes to the same lane is not held back by a lease nobody renews.
+ */
+async function handOver(
+  from: Store,
+  to: Store,
+  handler: string,
+  event: EventEnvelope = createEnvelope({
+    payload: { zulu: 1, a: { yy: 2, b: 3 } },
+    headers: { z: 'z' },
+  }),
+): Promise<void> {
   await publish(from, event, handler);
-  const [delivery] = await claim(to, handler);
-  expect(delivery!.event).toEqual(event);
+  const claimed = await claim(to, handler);
+  expect(claimed.map((delivery) => delivery.event)).toEqual([event]);
+  expect(await to.complete(claimed[0]!, new Date())).toBe(true);
+  expect(await claim(to, handler)).toEqual([]);
+}
+
+/** Two keyless events whose ids hash to the same lane: more candidates than lanes always hold such a pair. */
+async function eventsSharingALane(): Promise<[EventEnvelope, EventEnvelope]> {
+  const candidates = Array.from({ length: LANE_COUNT + 1 }, () => createEnvelope());
+  const { rows } = await database.pool.query<{ id: string; lane: number }>(
+    `SELECT id, ${laneExpression('NULL::text', 'id')} AS lane FROM unnest($1::text[]) AS id`,
+    [candidates.map((event) => event.id)],
+  );
+  const firstOfLane = new Map<number, string>();
+  for (const { id, lane } of rows) {
+    const first = firstOfLane.get(lane);
+    if (first !== undefined) {
+      const byId = (wanted: string): EventEnvelope =>
+        candidates.find((event) => event.id === wanted)!;
+      return [byId(first), byId(id)];
+    }
+    firstOfLane.set(lane, id);
+  }
+  throw new Error(`${candidates.length} event ids over ${LANE_COUNT} lanes without a shared lane`);
 }
 
 describe('0.4.0 and 0.4.1 instances on one database', () => {
@@ -153,5 +189,14 @@ describe('0.4.0 and 0.4.1 instances on one database', () => {
     expect(await setupWaitsForWriters(schema, () => current(schema).setup())).toBe(false);
     await handOver(version040(schema), current(schema), 'old-to-new');
     await handOver(current(schema), version040(schema), 'new-to-old');
+  });
+
+  it('hands over one event after another whose id hashes to the same lane', async () => {
+    const schema = uniqueSchema();
+    await version040(schema).setup();
+    const [first, second] = await eventsSharingALane();
+    await handOver(version040(schema), current(schema), 'first-in-lane', first);
+    await current(schema).setup();
+    await handOver(current(schema), version040(schema), 'second-in-lane', second);
   });
 });

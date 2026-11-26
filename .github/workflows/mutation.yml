@@ -1,8 +1,11 @@
 name: Mutation testing
 
 on:
+  # Twice a week: GitHub evicts a cache nobody restored for 7 days, and a weekly run started
+  # late (scheduled runs start up to hours after their slot) found last week's incremental state
+  # already gone, so every run mutated from scratch.
   schedule:
-    - cron: '17 2 * * 0'
+    - cron: '17 2 * * 0,3'
   workflow_dispatch:
 
 concurrency:
@@ -14,9 +17,37 @@ permissions:
 
 jobs:
   stryker:
-    name: stryker
+    name: stryker (${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # One job for all packages outgrew the 2 hour limit (10140 mutants, 1 November). The files of
+        # each shard are in stryker.config.mjs; each shard keeps its own incremental state.
+        # The Postgres shards run the Postgres integration tests too (vitest.stryker.config.ts): most
+        # of the store is SQL that only a real server checks. About 15 s per mutant, so four of them.
+        include:
+          - shard: core-dispatch
+          - shard: core-internal
+          - shard: core-bus
+          - shard: postgres-claim
+            tests: postgres
+          - shard: postgres-write
+            tests: postgres
+          - shard: postgres-executors
+            tests: postgres
+          - shard: postgres-store
+            tests: postgres
+          - shard: kafka
+          - shard: rabbitmq
+          - shard: testing
+          - shard: packages
+    env:
+      RELAYBUS_MUTATION_SHARD: ${{ matrix.shard }}
+      RELAYBUS_MUTATION_TESTS: ${{ matrix.tests }}
+      # The global test setup starts only the Postgres server; the other shards start none.
+      RELAYBUS_TEST_BACKENDS: postgres
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -27,6 +58,15 @@ jobs:
         uses: ./.github/actions/setup
         with:
           node-version: 24.x
+          install: 'false'
+
+      # Without install scripts: the unit tests never load @confluentinc/kafka-javascript, whose
+      # native build fell back to a source compile and failed when the prebuilt download returned 504
+      # (8 November). The generated Prisma client is all the Postgres tests need from them.
+      - name: Install dependencies
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          node scripts/generate-test-prisma-client.mjs
 
       # Incremental mode: only mutants affected by changes since the last run are
       # re-tested. The cache is keyed per run and restored from the latest one.
@@ -34,9 +74,9 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: reports/stryker-incremental.json
-          key: stryker-incremental-${{ github.run_id }}
+          key: stryker-incremental-${{ matrix.shard }}-${{ github.run_id }}
           restore-keys: |
-            stryker-incremental-
+            stryker-incremental-${{ matrix.shard }}-
 
       # Stryker runs in place (`inPlace: true` in stryker.config.json): it mutates the
       # files of this fresh checkout and restores them afterwards. That keeps the
@@ -51,13 +91,13 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: reports/stryker-incremental.json
-          key: stryker-incremental-${{ github.run_id }}
+          key: stryker-incremental-${{ matrix.shard }}-${{ github.run_id }}
 
       - name: Upload mutation report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: mutation-report
+          name: mutation-report-${{ matrix.shard }}
           path: reports/mutation/
           if-no-files-found: warn
           retention-days: 30

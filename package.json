@@ -22,7 +22,7 @@
     "coverage": "vitest run --coverage",
     "bench:quick": "node benchmarks/cli.ts quick",
     "bench:full": "node benchmarks/cli.ts full",
-    "mutation": "stryker run",
+    "mutation": "stryker run stryker.config.mjs",
     "release": "semantic-release",
     "release:dry-run": "semantic-release --dry-run --no-ci",
     "prepare": "husky && node scripts/generate-test-prisma-client.mjs"

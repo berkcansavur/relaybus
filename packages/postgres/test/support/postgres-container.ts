@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { PostgreSqlContainer } from '@testcontainers/postgresql';
 import { inject } from 'vitest';
 import { Pool } from 'pg';
@@ -13,6 +14,11 @@ export interface TestDatabase {
 }
 
 let databaseCounter = 0;
+/**
+ * Tells the loads of this module apart: Stryker runs the test files in worker threads of one
+ * process and loads them again for every mutant, so the pid and the counter alone repeat.
+ */
+const loadTag = randomBytes(3).toString('hex');
 
 /**
  * Gives the calling test file its own database on the Postgres server that the global
@@ -36,7 +42,7 @@ export async function startDatabase(
     );
   }
   databaseCounter += 1;
-  const name = `t${process.pid}_${databaseCounter}`;
+  const name = `t${process.pid}_${loadTag}_${databaseCounter}`;
   const admin = createTestPool(serverUri, 1);
   try {
     await admin.query(`CREATE DATABASE "${name}"`);
@@ -52,6 +58,13 @@ export async function startDatabase(
     pool,
     async stop() {
       await pool.end();
+      // A mutation run starts thousands of test files: their databases must not pile up on the server.
+      const admin = createTestPool(serverUri, 1);
+      try {
+        await admin.query(`DROP DATABASE "${name}" WITH (FORCE)`);
+      } finally {
+        await admin.end();
+      }
     },
   };
 }
