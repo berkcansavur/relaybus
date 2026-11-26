@@ -84,8 +84,8 @@
     "@relaybus/core": "workspace:*",
     "@relaybus/testing": "workspace:*",
     "kafkajs": "2.2.4",
-    "@testcontainers/kafka": "12.2.1",
-    "testcontainers": "12.2.1",
+    "@testcontainers/kafka": "12.2.2",
+    "testcontainers": "12.2.2",
     "@confluentinc/kafka-javascript": "1.11.0"
   }
 }
