@@ -74,8 +74,8 @@
   "devDependencies": {
     "@relaybus/core": "workspace:*",
     "@relaybus/testing": "workspace:*",
-    "mongodb": "7.7.0",
-    "@testcontainers/mongodb": "12.2.1",
-    "testcontainers": "12.2.1"
+    "mongodb": "7.9.1",
+    "@testcontainers/mongodb": "12.2.2",
+    "testcontainers": "12.2.2"
   }
 }
