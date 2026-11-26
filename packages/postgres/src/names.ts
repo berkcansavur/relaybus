@@ -20,6 +20,16 @@ export interface PostgresSchemaOptions {
    * index churn of updating it. Use the same value in every process.
    */
   readonly completionHistory?: boolean;
+  /**
+   * The lanes this store leases, when several services share one set of tables. Each scope gets
+   * 256 lanes of its own, so a worker of one scope never holds a lane another scope
+   * needs; the deliveries a store writes go to the lanes of its scope. Lower-case letters, digits and
+   * `_ . : -`, at most 63 characters. Default `'default'`: lanes 0 to 255, the ones
+   * every store used before scopes existed, which needs no schema upgrade. Any other scope needs the
+   * `scope` column of the lane table (`setup()`, or the upgrade script under "Lane scopes" in the README) and
+   * gets its lanes on first use; every process of a service must use the same scope.
+   */
+  readonly laneScope?: string;
 }
 
 /** Validated, quoted names used to build SQL. */
@@ -40,6 +50,8 @@ export interface PostgresNames {
   /** Completion history, present only with `completionHistory`. */
   readonly completions: string;
   readonly completionHistory: boolean;
+  /** The {@link PostgresSchemaOptions.laneScope} of a store that does not use the default scope. */
+  readonly laneScope?: string;
   /**
    * Channel of the notifications that wake dispatchers when deliveries were published:
    * `<schema>.<prefix>deliveries`, or a hash of it when that is longer than a channel name may be.
@@ -67,6 +79,14 @@ export interface PostgresNames {
  * agree on it.
  */
 export const LANE_COUNT = 256;
+
+/** The scope of the first {@link LANE_COUNT} lanes, which every store used before scopes existed. */
+export const DEFAULT_LANE_SCOPE = 'default';
+
+/** Highest lane number: lanes are `smallint`, so a lane table holds at most 127 scopes. */
+export const MAXIMUM_LANE = 32_767;
+
+const LANE_SCOPE_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,62}$/;
 
 const DEFAULT_SCHEMA = 'public';
 const MAXIMUM_CHANNEL_LENGTH = 63;
@@ -115,6 +135,12 @@ export function resolvePostgresNames(options: PostgresSchemaOptions = {}): Postg
     assertIdentifier(`tablePrefix '${tablePrefix}' produces the name`, identifier);
     return identifier;
   };
+  const laneScope = options.laneScope ?? DEFAULT_LANE_SCOPE;
+  if (!LANE_SCOPE_PATTERN.test(laneScope)) {
+    throw new ConfigurationError(
+      `laneScope '${laneScope}' must match ${String(LANE_SCOPE_PATTERN)}`,
+    );
+  }
   const quotedSchema = quoteIdentifier(schema);
   const table = (suffix: string): string => `${quotedSchema}.${quoteIdentifier(name(suffix))}`;
   const index = (suffix: string): string => quoteIdentifier(name(suffix));
@@ -130,6 +156,7 @@ export function resolvePostgresNames(options: PostgresSchemaOptions = {}): Postg
     eventCompletions: table('event_completions'),
     completions: table('completed_deliveries'),
     completionHistory: options.completionHistory ?? false,
+    ...(laneScope === DEFAULT_LANE_SCOPE ? {} : { laneScope }),
     notificationChannel: channelName(`${schema}.${tablePrefix}deliveries`),
     indexes: indexNames(index),
   };

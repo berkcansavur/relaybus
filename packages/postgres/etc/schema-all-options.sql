@@ -122,6 +122,29 @@ CREATE INDEX IF NOT EXISTS "bus_event_completions_completed_idx" ON "events"."bu
 
 INSERT INTO "events"."bus_lanes" (lane) SELECT generate_series(0, 255)::smallint ON CONFLICT (lane) DO NOTHING;
 
+DO $relaybus_lane_scopes$
+DECLARE
+  lane_check text;
+BEGIN
+  IF to_regclass('"events"."bus_lanes"') IS NULL THEN
+    RETURN;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid = to_regclass('"events"."bus_lanes"') AND attname = 'scope' AND NOT attisdropped
+  ) THEN
+    ALTER TABLE "events"."bus_lanes" ADD COLUMN scope text NOT NULL DEFAULT 'default';
+  END IF;
+  FOR lane_check IN
+    SELECT conname FROM pg_constraint
+    WHERE conrelid = to_regclass('"events"."bus_lanes"') AND contype = 'c'
+      AND pg_get_constraintdef(oid) LIKE '%< 256%'
+  LOOP
+    EXECUTE format('ALTER TABLE "events"."bus_lanes" DROP CONSTRAINT %I', lane_check);
+  END LOOP;
+END
+$relaybus_lane_scopes$;
+
 CREATE TABLE IF NOT EXISTS "events"."bus_completed_deliveries" (
   id text COLLATE "C" PRIMARY KEY,
   event_id text NOT NULL REFERENCES "events"."bus_events" (id) ON DELETE CASCADE,

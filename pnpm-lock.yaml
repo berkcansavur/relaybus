@@ -236,6 +236,9 @@ importers:
       relaybus-postgres-0.4.0:
         specifier: npm:@relaybus/postgres@0.4.0
         version: '@relaybus/postgres@0.4.0(@prisma/client@7.10.1(prisma@7.10.1(@types/node@22.20.5)(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3))(typescript@6.0.3))(drizzle-orm@0.45.4(@electric-sql/pglite@0.4.3)(@opentelemetry/api@1.10.0)(@prisma/client@7.10.1(prisma@7.10.1(@types/node@22.20.5)(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3))(typescript@6.0.3))(@types/pg@8.23.1)(knex@3.3.0(mysql2@3.24.4(@types/node@22.20.5))(pg@8.23.1))(kysely@0.29.7)(mysql2@3.24.4(@types/node@22.20.5))(pg@8.23.1)(postgres@3.4.7)(prisma@7.10.1(@types/node@22.20.5)(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3)))(knex@3.3.0(mysql2@3.24.4(@types/node@22.20.5))(pg@8.23.1))(kysely@0.29.7)(pg@8.23.1)(typeorm@1.1.2(mongodb@7.7.0)(mysql2@3.24.4(@types/node@22.20.5))(pg@8.23.1))'
+      relaybus-postgres-1.1.0:
+        specifier: npm:@relaybus/postgres@1.1.0
+        version: '@relaybus/postgres@1.1.0(@prisma/client@7.10.1(prisma@7.10.1(@types/node@22.20.5)(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3))(typescript@6.0.3))(@relaybus/core@packages+core)(drizzle-orm@0.45.4(@electric-sql/pglite@0.4.3)(@opentelemetry/api@1.10.0)(@prisma/client@7.10.1(prisma@7.10.1(@types/node@22.20.5)(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3))(typescript@6.0.3))(@types/pg@8.23.1)(knex@3.3.0(mysql2@3.24.4(@types/node@22.20.5))(pg@8.23.1))(kysely@0.29.7)(mysql2@3.24.4(@types/node@22.20.5))(pg@8.23.1)(postgres@3.4.7)(prisma@7.10.1(@types/node@22.20.5)(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3)))(knex@3.3.0(mysql2@3.24.4(@types/node@22.20.5))(pg@8.23.1))(kysely@0.29.7)(pg@8.23.1)(typeorm@1.1.2(mongodb@7.7.0)(mysql2@3.24.4(@types/node@22.20.5))(pg@8.23.1))'
       testcontainers:
         specifier: 12.2.1
         version: 12.2.1
@@ -1643,6 +1646,29 @@ packages:
     engines: {node: '>=22.12.0'}
     peerDependencies:
       '@prisma/client': ^6.0.0 || ^7.0.0
+      drizzle-orm: '>=0.36.0'
+      knex: '>=3.0.0'
+      kysely: '>=0.27.0'
+      pg: ^8.11.0
+      typeorm: '>=0.3.0'
+    peerDependenciesMeta:
+      '@prisma/client':
+        optional: true
+      drizzle-orm:
+        optional: true
+      knex:
+        optional: true
+      kysely:
+        optional: true
+      typeorm:
+        optional: true
+
+  '@relaybus/postgres@1.1.0':
+    resolution: {integrity: sha512-FfdmBRErt5d69tdeDNoOconpr8C+3Ei5AsSuAf0Hrj2A7I7LTzniLZ6XvG5rxFHMr+5mIJMqSoBXgqG6kIfO7Q==}
+    engines: {node: '>=22.12.0'}
+    peerDependencies:
+      '@prisma/client': ^5.0.0 || ^6.0.0 || ^7.0.0
+      '@relaybus/core': ^1.1.0
       drizzle-orm: '>=0.36.0'
       knex: '>=3.0.0'
       kysely: '>=0.27.0'
@@ -7069,6 +7095,17 @@ snapshots:
   '@relaybus/postgres@0.4.0(@prisma/client@7.10.1(prisma@7.10.1(@types/node@22.20.5)(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3))(typescript@6.0.3))(drizzle-orm@0.45.4(@electric-sql/pglite@0.4.3)(@opentelemetry/api@1.10.0)(@prisma/client@7.10.1(prisma@7.10.1(@types/node@22.20.5)(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3))(typescript@6.0.3))(@types/pg@8.23.1)(knex@3.3.0(mysql2@3.24.4(@types/node@22.20.5))(pg@8.23.1))(kysely@0.29.7)(mysql2@3.24.4(@types/node@22.20.5))(pg@8.23.1)(postgres@3.4.7)(prisma@7.10.1(@types/node@22.20.5)(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3)))(knex@3.3.0(mysql2@3.24.4(@types/node@22.20.5))(pg@8.23.1))(kysely@0.29.7)(pg@8.23.1)(typeorm@1.1.2(mongodb@7.7.0)(mysql2@3.24.4(@types/node@22.20.5))(pg@8.23.1))':
     dependencies:
       '@relaybus/core': 0.4.0
+      pg: 8.23.1
+    optionalDependencies:
+      '@prisma/client': 7.10.1(prisma@7.10.1(@types/node@22.20.5)(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3))(typescript@6.0.3)
+      drizzle-orm: 0.45.4(@electric-sql/pglite@0.4.3)(@opentelemetry/api@1.10.0)(@prisma/client@7.10.1(prisma@7.10.1(@types/node@22.20.5)(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3))(typescript@6.0.3))(@types/pg@8.23.1)(knex@3.3.0(mysql2@3.24.4(@types/node@22.20.5))(pg@8.23.1))(kysely@0.29.7)(mysql2@3.24.4(@types/node@22.20.5))(pg@8.23.1)(postgres@3.4.7)(prisma@7.10.1(@types/node@22.20.5)(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3))
+      knex: 3.3.0(mysql2@3.24.4(@types/node@22.20.5))(pg@8.23.1)
+      kysely: 0.29.7
+      typeorm: 1.1.2(mongodb@7.7.0)(mysql2@3.24.4(@types/node@22.20.5))(pg@8.23.1)
+
+  '@relaybus/postgres@1.1.0(@prisma/client@7.10.1(prisma@7.10.1(@types/node@22.20.5)(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3))(typescript@6.0.3))(@relaybus/core@packages+core)(drizzle-orm@0.45.4(@electric-sql/pglite@0.4.3)(@opentelemetry/api@1.10.0)(@prisma/client@7.10.1(prisma@7.10.1(@types/node@22.20.5)(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3))(typescript@6.0.3))(@types/pg@8.23.1)(knex@3.3.0(mysql2@3.24.4(@types/node@22.20.5))(pg@8.23.1))(kysely@0.29.7)(mysql2@3.24.4(@types/node@22.20.5))(pg@8.23.1)(postgres@3.4.7)(prisma@7.10.1(@types/node@22.20.5)(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3)))(knex@3.3.0(mysql2@3.24.4(@types/node@22.20.5))(pg@8.23.1))(kysely@0.29.7)(pg@8.23.1)(typeorm@1.1.2(mongodb@7.7.0)(mysql2@3.24.4(@types/node@22.20.5))(pg@8.23.1))':
+    dependencies:
+      '@relaybus/core': link:packages/core
       pg: 8.23.1
     optionalDependencies:
       '@prisma/client': 7.10.1(prisma@7.10.1(@types/node@22.20.5)(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3))(typescript@6.0.3)

@@ -6,6 +6,12 @@ import { LaneLeaseTokenFormat } from '@relaybus/core/internal';
  */
 export const LANE_COUNT = 256;
 
+/** The scope of lanes 0 to 255, which every store used before scopes existed. */
+export const DEFAULT_LANE_SCOPE = 'default';
+
+/** Highest lane id: a lanes collection holds at most 127 scopes besides the default one. */
+export const MAXIMUM_LANE = 32_767;
+
 const FNV_OFFSET_BASIS = 0x811c9dc5;
 const FNV_PRIME = 0x01000193;
 const utf8 = new TextEncoder();
@@ -40,9 +46,9 @@ export interface LaneLease {
   readonly claims: number;
 }
 
-/** Lease tokens of this store: epochs and claim generations of up to 15 digits. */
+/** Lease tokens of this store: lanes of every scope, epochs and claim generations of up to 15 digits. */
 const LEASE_TOKENS = new LaneLeaseTokenFormat({
-  laneCount: LANE_COUNT,
+  laneCount: MAXIMUM_LANE + 1,
   epochDigits: 15,
   claimsDigits: 15,
 });

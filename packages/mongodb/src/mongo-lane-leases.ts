@@ -1,6 +1,7 @@
 import type { ClaimRequest } from '@relaybus/core';
 import type { AnyBulkWriteOperation } from 'mongodb';
 import type { DeliveryDocument, LaneDocument } from './documents.js';
+import { LANE_COUNT } from './lanes.js';
 import type { MongoQueries } from './mongo-queries.js';
 import { atCount, type MongoStoreState, type ScopeLane } from './mongo-store-state.js';
 
@@ -15,7 +16,7 @@ export class MongoLaneLeases {
   }
 
   /**
-   * Up to `laneCount` lanes nobody holds under a live lease that have a due,
+   * Up to `laneCount` lanes of the store's lane scope nobody holds under a live lease that have a due,
    * ready delivery of the requested handlers, the lane with the oldest such
    * delivery first, leaving out `passed`. One round trip: the oldest delivery
    * of each lane is one index probe on the server. A lane whose due deliveries
@@ -30,7 +31,7 @@ export class MongoLaneLeases {
       .aggregate<{ _id: number }>([
         {
           $match: {
-            _id: { $nin: passed },
+            _id: { $nin: passed, ...this.#scopeLanes() },
             $or: [{ leaseExpiresAt: null }, { leaseExpiresAt: { $lte: request.now } }],
           },
         },
@@ -61,6 +62,17 @@ export class MongoLaneLeases {
       ])
       .toArray();
     return lanes.map((lane) => lane._id);
+  }
+
+  /**
+   * The lanes the store claims from: those of its lane scope and, for a scope other than the default,
+   * the default lanes too. A lane is taken only while it has due deliveries of the requested handlers,
+   * so a store of another scope takes a default lane only to finish the deliveries its service wrote
+   * there before it moved to its scope.
+   */
+  #scopeLanes(): { $lt: number; $not: { $gte: number; $lt: number } } {
+    const first = this.#state.laneScope.firstLane;
+    return { $lt: first + LANE_COUNT, $not: { $gte: LANE_COUNT, $lt: first } };
   }
 
   /**

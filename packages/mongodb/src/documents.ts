@@ -110,6 +110,10 @@ export interface DeliveryDocument {
  */
 export interface LaneDocument {
   readonly _id: number;
+  /** Lane scope of a lane outside the default scope (ids 256 and up); absent for lanes 0 to 255. */
+  readonly scope?: string;
+  /** The scope again, on the first lane of a scope's block only; unique (see `MongoLaneScope`). */
+  readonly scopeHead?: string;
   /** Fencing token. Grows every time the lane is taken, never when it is freed. */
   readonly epoch: number;
   readonly owner: string | null;
@@ -242,17 +246,20 @@ export function toEnvelope(document: EventDocument): EventEnvelope {
   };
 }
 
-/** A new pending delivery of `event`, placed in the lane of the event's key (or id). */
+/** A new pending delivery of `event`, placed in the lane of the event's key (or id) within the store's lane scope. */
 export function toDeliveryDocument(
   delivery: NewDelivery,
   {
     event,
     ordering,
     now,
+    firstLane = 0,
   }: {
     readonly event: Pick<EventEnvelope, 'id' | 'type'>;
     readonly ordering: { readonly key: string | null; readonly sequence: number | null };
     readonly now: Date;
+    /** First lane of the store's lane scope; 0 for the default scope. */
+    readonly firstLane?: number;
   },
 ): DeliveryDocument {
   return {
@@ -263,7 +270,7 @@ export function toDeliveryDocument(
     ...(ordering.key === null || ordering.sequence === null
       ? {}
       : { key: ordering.key, sequence: ordering.sequence }),
-    laneId: laneOf(ordering.key, event.id),
+    laneId: firstLane + laneOf(ordering.key, event.id),
     status: 'pending',
     lane: 'ready',
     attempts: 0,

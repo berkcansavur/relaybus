@@ -30,6 +30,7 @@ import { PostgresAppend } from './postgres-append.js';
 import { PostgresClaims } from './postgres-claim.js';
 import { PostgresCompletion } from './postgres-completion.js';
 import { OwnedConnections } from './owned-connections.js';
+import { PostgresLaneScope } from './postgres-lane-scope.js';
 import { PostgresMaintenance } from './postgres-maintenance.js';
 import { PostgresSetup } from './postgres-setup.js';
 import type { PostgresStoreState } from './postgres-store-state.js';
@@ -91,6 +92,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
   readonly #completion: PostgresCompletion<TTransaction>;
   readonly #maintenance: PostgresMaintenance<TTransaction>;
   readonly #setup: PostgresSetup<TTransaction>;
+  readonly #laneScope: PostgresLaneScope<TTransaction>;
   readonly #owned = new OwnedConnections();
 
   constructor(options: PostgresEventStoreOptions<TTransaction>) {
@@ -131,6 +133,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     this.#completion = new PostgresCompletion(state);
     this.#maintenance = new PostgresMaintenance(state);
     this.#setup = new PostgresSetup(state, options);
+    this.#laneScope = new PostgresLaneScope(executor, names);
   }
 
   /**
@@ -145,6 +148,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
    */
   async setup(): Promise<void> {
     await this.#setup.run();
+    await this.#laneScope.ensure();
   }
 
   /** Every level PostgreSQL has (it runs `read uncommitted` as `read committed`, which the bus does not offer). */
@@ -240,7 +244,9 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
     entries: readonly AppendEntry[],
     now: Date,
   ): Promise<AppendResult> {
-    return this.#appender.append(transaction, { entries, now });
+    return this.#laneScope
+      .ensure(transaction)
+      .then(() => this.#appender.append(transaction, { entries, now }));
   }
 
   /**
@@ -256,7 +262,7 @@ export class PostgresEventStore<TTransaction = PoolClient> implements EventStore
    * must satisfy.
    */
   claim(request: ClaimRequest): Promise<ClaimedDelivery[]> {
-    return this.#claims.claim(request);
+    return this.#laneScope.ensure().then(() => this.#claims.claim(request));
   }
 
   extendLease(lease: LeaseReference, leaseExpiresAt: Date): Promise<boolean> {

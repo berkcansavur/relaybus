@@ -2,6 +2,7 @@ import type { ClaimRequest } from '@relaybus/core';
 import type { Filter } from 'mongodb';
 import { type ClaimScan, orderingIdentity } from './claim-scan.js';
 import type { DeliveryDocument } from './documents.js';
+import { LANE_COUNT } from './lanes.js';
 import type { MongoStoreState, ScopeLane } from './mongo-store-state.js';
 
 const MINIMUM_CANDIDATE_BATCH_SIZE = 32;
@@ -34,7 +35,8 @@ export class MongoOrdering {
    * still a pending document) and (b) no other delivery of them runs. Running
    * deliveries of a key live in the key's lane, which this owner holds, so the
    * running keys (loaded once from the held lanes) and this claim's own picks
-   * are all of them.
+   * are all of them; a scoped store also looks at the other lane of a key
+   * (see `#noteRunningInOtherLanes`).
    *
    * Candidates are read in pages with a limit, so no cursor is left open, and
    * the predecessors of the keys of a page are looked up in parallel, one
@@ -79,7 +81,10 @@ export class MongoOrdering {
     for (let offset = 0; offset < page.length;) {
       const slice = page.slice(offset, offset + request.limit - picked.length);
       offset += slice.length;
-      await this.#notePredecessors(slice, scan);
+      await Promise.all([
+        this.#notePredecessors(slice, scan),
+        this.#noteRunningInOtherLanes(slice, keys),
+      ]);
       for (const candidate of slice) {
         if (isClaimable(candidate, { scan, blockedKeys: keys })) {
           picked.push(candidate);
@@ -119,6 +124,52 @@ export class MongoOrdering {
         scan.noteOpen(orderingId, predecessor ?? candidate.sequence!);
       }),
     );
+  }
+
+  /**
+   * Adds to `keys` the keys of `page` that run in the other lane of their key. Only a scoped store
+   * has one: a key's deliveries written before the service moved to its scope are in a default lane,
+   * later ones in the matching lane of the block. The predecessor lookup already spans both lanes,
+   * but a running delivery of a later sequence (an earlier one was requeued meanwhile) is listed only
+   * in its own lane, which this owner may not hold.
+   */
+  async #noteRunningInOtherLanes(
+    page: readonly DeliveryDocument[],
+    keys: Set<string>,
+  ): Promise<void> {
+    const firstLane = this.#state.laneScope.firstLane;
+    if (firstLane === 0) {
+      return;
+    }
+    const otherLanes = new Set(
+      page.flatMap((candidate) =>
+        candidate.key === undefined
+          ? []
+          : [
+              candidate.laneId < LANE_COUNT
+                ? candidate.laneId + firstLane
+                : candidate.laneId - firstLane,
+            ],
+      ),
+    );
+    if (otherLanes.size === 0) {
+      return;
+    }
+    const lanes = await this.#state.lanes
+      .find({ _id: { $in: [...otherLanes] } }, { projection: { inFlight: 1 } })
+      .toArray();
+    const listed = lanes.flatMap((lane) => lane.inFlight);
+    if (listed.length === 0) {
+      return;
+    }
+    const running = await this.#state.deliveries
+      .find({ _id: { $in: listed }, status: 'pending' }, { projection: { handler: 1, key: 1 } })
+      .toArray();
+    for (const delivery of running) {
+      if (delivery.key !== undefined) {
+        keys.add(orderingIdentity(delivery.handler, delivery.key));
+      }
+    }
   }
 
   /**

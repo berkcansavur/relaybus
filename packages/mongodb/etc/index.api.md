@@ -51,6 +51,7 @@ export interface MongoEventStoreOptions {
     readonly database?: string;
     // @deprecated (undocumented)
     readonly generateIdentifier?: IdentifierGenerator;
+    readonly laneScope?: string;
     readonly logger?: RelayBusLogger;
     readonly purgeBatchSize?: number;
     readonly transactionOptions?: TransactionOptions;
@@ -59,7 +60,7 @@ export interface MongoEventStoreOptions {
 // Warnings were encountered during analysis:
 //
 // dist/index.d.ts:4:1 - (ae-undocumented) Missing documentation for "MongoEventStoreOptions".
-// dist/index.d.ts:32:5 - (ae-undocumented) Missing documentation for "generateIdentifier".
+// dist/index.d.ts:41:5 - (ae-undocumented) Missing documentation for "generateIdentifier".
 
 // (No @packageDocumentation comment for this package)
 

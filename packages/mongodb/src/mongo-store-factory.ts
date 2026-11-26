@@ -1,9 +1,12 @@
 import { createUuidV7 } from '@relaybus/core';
 import { HandedOutLedger, PositiveInteger } from '@relaybus/core/internal';
 import type { TransactionOptions } from 'mongodb';
+import type { LaneDocument } from './documents.js';
 import type { MongoEventStoreOptions } from './mongo-event-store.js';
 import type { MongoStoreState } from './mongo-store-state.js';
-import { assertCollectionPrefix, assertDatabaseName } from './naming.js';
+import { DEFAULT_LANE_SCOPE } from './lanes.js';
+import { MongoLaneScope } from './mongo-lane-scope.js';
+import { assertCollectionPrefix, assertDatabaseName, assertLaneScope } from './naming.js';
 
 const DEFAULT_TRANSACTION_OPTIONS: TransactionOptions = {
   readConcern: { level: 'snapshot' },
@@ -19,6 +22,8 @@ export function createMongoStoreState(options: MongoEventStoreOptions): MongoSto
   if (options.database !== undefined) {
     assertDatabaseName(options.database);
   }
+  const laneScope = options.laneScope ?? DEFAULT_LANE_SCOPE;
+  assertLaneScope(laneScope);
   const purgeBatchSize = PositiveInteger.of(
     options.purgeBatchSize ?? DEFAULT_PURGE_BATCH_SIZE,
     'purgeBatchSize',
@@ -29,13 +34,15 @@ export function createMongoStoreState(options: MongoEventStoreOptions): MongoSto
     readPreference: 'primary',
     writeConcern: { w: 'majority' },
   } as const;
+  const lanes = database.collection<LaneDocument>(`${prefix}lanes`, collectionOptions);
   const state: MongoStoreState = {
     client: options.client,
     database,
     events: database.collection(`${prefix}events`, collectionOptions),
     deliveries: database.collection(`${prefix}deliveries`, collectionOptions),
     keySequences: database.collection(`${prefix}key_sequences`, collectionOptions),
-    lanes: database.collection(`${prefix}lanes`, collectionOptions),
+    lanes,
+    laneScope: new MongoLaneScope(lanes, laneScope === DEFAULT_LANE_SCOPE ? undefined : laneScope),
     completions: database.collection(`${prefix}completed_deliveries`, collectionOptions),
     completionHistory: options.completionHistory ?? false,
     transactionOptions: options.transactionOptions ?? DEFAULT_TRANSACTION_OPTIONS,

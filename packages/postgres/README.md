@@ -137,17 +137,18 @@ const store = new PostgresEventStore({ executor: createPrismaExecutor(prisma), p
 
 ## Options
 
-| Option                                   | Default               | Meaning                                                                                                            |
-| ---------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `pool` / `connectionString` / `executor` | required, exactly one | How to reach the database. With `executor`, `pool` may be given too (see above).                                   |
-| `poolConfig`                             | none                  | Extra `pg` pool settings when `connectionString` is used.                                                          |
-| `schema`                                 | `'public'`            | Schema of the tables. Created by `setup()` when it is not `public`.                                                |
-| `tablePrefix`                            | `'relaybus_'`         | Tables are `<prefix>events`, `<prefix>deliveries`, `<prefix>key_sequences`, `<prefix>lanes`.                       |
-| `completionHistory`                      | `false`               | Keep an append-only record of completed deliveries (`<prefix>completed_deliveries`). Same value in every process.  |
-| `purgeBatchSize`                         | `1000`                | Deliveries deleted per transaction by `purge`.                                                                     |
-| `logger`                                 | `console`             | Receives idle-connection errors of a pool the store created itself.                                                |
-| `preparedStatements`                     | `true`                | Prepare the statements the store repeats once per connection. `false` behind PgBouncer < 1.21 in transaction mode. |
-| `wakeUp`                                 | `'notify'`            | `'notify'`: coalesced `NOTIFY` + `LISTEN` wake other processes. `'poll'`: no notifications, other processes poll.  |
+| Option                                   | Default               | Meaning                                                                                                                                 |
+| ---------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `pool` / `connectionString` / `executor` | required, exactly one | How to reach the database. With `executor`, `pool` may be given too (see above).                                                        |
+| `poolConfig`                             | none                  | Extra `pg` pool settings when `connectionString` is used.                                                                               |
+| `schema`                                 | `'public'`            | Schema of the tables. Created by `setup()` when it is not `public`.                                                                     |
+| `tablePrefix`                            | `'relaybus_'`         | Tables are `<prefix>events`, `<prefix>deliveries`, `<prefix>key_sequences`, `<prefix>lanes`.                                            |
+| `completionHistory`                      | `false`               | Keep an append-only record of completed deliveries (`<prefix>completed_deliveries`). Same value in every process.                       |
+| `purgeBatchSize`                         | `1000`                | Deliveries deleted per transaction by `purge`.                                                                                          |
+| `logger`                                 | `console`             | Receives idle-connection errors of a pool the store created itself.                                                                     |
+| `preparedStatements`                     | `true`                | Prepare the statements the store repeats once per connection. `false` behind PgBouncer < 1.21 in transaction mode.                      |
+| `wakeUp`                                 | `'notify'`            | `'notify'`: coalesced `NOTIFY` + `LISTEN` wake other processes. `'poll'`: no notifications, other processes poll.                       |
+| `laneScope`                              | `'default'`           | Lanes of the service when several services share the tables; see [Lane scopes](#lane-scopes). Same value in every process of a service. |
 
 **Pool errors.** A pool created from `connectionString` gets an `error` listener that logs through `logger`
 (`[PostgresEventStore](connect) Idle connection failed ...`); `pg` then replaces the dead connection, so a failover
@@ -189,6 +190,74 @@ own: it orders by `created_at`, so on a large `deliveries` table combine it with
 to the dead or pending rows, or add the index you need. `deliveries.id` uses the `C` collation so id tie-breaks are the
 same on every database. The tables are created with aggressive autovacuum settings
 (`autovacuum_vacuum_scale_factor = 0.02`): deleted deliveries leave dead tuples that autovacuum reclaims.
+
+## Lane scopes
+
+Services that share one set of tables (one `tablePrefix`) also share its 256 lanes: a worker that leases a lane holds
+every delivery of it, so a busy service can hold lanes that another service's deliveries hash to, and that service
+waits until the lease ends. `laneScope` gives a service lanes of its own. The default scope `'default'` keeps lanes
+0-255, exactly as before. Any other scope (1-63 characters of `a-z`, `0-9`, `_ . : -`, starting with a letter or digit)
+gets a block of 256 lanes of its own, allocated once on first use, after the highest lane in use, under an advisory
+lock, so concurrent processes agree on one block. Up to 127 scopes fit next to the default one. Deliveries a scoped
+store writes go to its block, and its workers lease lanes of its block only, so services of different scopes never wait
+for each other's leases.
+
+- Every process of a service uses the same `laneScope`.
+- A scoped store also claims from the default lanes, but only deliveries of its own handlers, so deliveries the service
+  wrote before it moved to its scope still run. Every delivery a scoped store writes goes to its block. Per-key order
+  holds across the move for the scoped workers: a keyed delivery waits while a delivery of the same handler and key in
+  the matching lane of the other side (default lane or block) is pending with a lower sequence or is running. A worker of
+  the default scope (or of 1.1.0 and older) looks at the default lanes only, so while such workers still claim the
+  service's handlers (a rolling restart that sets the scope), order across the two lanes of a key is not guaranteed:
+  when your handlers need it, give the scope to a new service from its start, or change it in one step (stop, then
+  start). Moving back to `'default'` does not drain the block: drain it first (no pending
+  deliveries of the service), then switch. While leftovers of the move remain, the scoped workers may hold the default
+  lanes they are in, as any worker would.
+- A dead delivery of the default lanes that is requeued while a later delivery of its key is due in the block can run
+  next to it when two workers claim those two lanes at the same moment: requeue such leftovers once the block has no
+  pending deliveries of their key.
+- Allocating the block takes a connection of its own (it runs under an advisory lock in its own transaction). With a
+  pool of one connection, call `setup()` (or allocate the block beforehand, see below) before publishing inside a
+  transaction. Once the block exists, a publish inside a transaction looks it up in that transaction.
+- Statistics, `listDeliveries`, `requeue`, `purge` and notifications stay table-wide.
+- Roll out in two steps: first run 1.2.0 or newer in every process with the default scope (1.1.0 and older scan all
+  lanes and reject lease tokens of lanes above 255), then set `laneScope`.
+
+`setup()` prepares the lane table for scopes. With `setupStore: false`, have the database owner run the upgrade below
+once (change the schema and prefix to yours). It is additive and online-safe: existing lanes and deliveries stay as
+they are (every existing lane is in the default scope), processes of earlier versions keep working next to it, and the
+lane table is locked only for the instant the column is added. It needs no `GRANT`, `ALTER ... OWNER` or `SET ROLE`.
+A store with the default scope does not need it.
+
+```sql
+SET lock_timeout = '5s'; -- run again if it times out
+
+ALTER TABLE "public"."relaybus_lanes" ADD COLUMN IF NOT EXISTS scope text NOT NULL DEFAULT 'default';
+
+DO $relaybus_lane_scopes$
+DECLARE
+  lane_check text;
+BEGIN
+  FOR lane_check IN
+    SELECT conname FROM pg_constraint
+    WHERE conrelid = to_regclass('"public"."relaybus_lanes"') AND contype = 'c'
+      AND pg_get_constraintdef(oid) LIKE '%< 256%'
+  LOOP
+    EXECUTE format('ALTER TABLE "public"."relaybus_lanes" DROP CONSTRAINT %I', lane_check);
+  END LOOP;
+END
+$relaybus_lane_scopes$;
+```
+
+A store whose role may not insert into the lane table can use a block the owner allocated beforehand:
+
+```sql
+INSERT INTO "public"."relaybus_lanes" (lane, scope)
+SELECT (start.first + block_lane)::smallint, 'orders'
+FROM (SELECT GREATEST(max(lane)::int + 1, 256) AS first FROM "public"."relaybus_lanes") AS start
+CROSS JOIN generate_series(0, 255) AS block_lane
+WHERE NOT EXISTS (SELECT 1 FROM "public"."relaybus_lanes" WHERE scope = 'orders');
+```
 
 ## Upgrading from 0.1.0
 

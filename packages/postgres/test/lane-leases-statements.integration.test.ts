@@ -31,8 +31,8 @@ describe('takeover of a lane that changed while the statement waited', () => {
             ? // Waits, after the statement took its snapshot and before it locks the lane, for the test.
               sql
                 .replace(
-                  'WHERE free.lease_expires_at IS NULL',
-                  'WHERE (SELECT pg_advisory_xact_lock_shared(7777) IS NOT NULL) AND (free.lease_expires_at IS NULL',
+                  'WHERE (free.lease_expires_at IS NULL',
+                  'WHERE (SELECT pg_advisory_xact_lock_shared(7777) IS NOT NULL) AND ((free.lease_expires_at IS NULL',
                 )
                 .replace(
                   'ORDER BY oldest.available_at, oldest.id',

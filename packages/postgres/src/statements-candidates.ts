@@ -1,4 +1,5 @@
 import type { PostgresNames } from './names.js';
+import { blockedInOtherLane } from './sql-fragments.js';
 import {
   CLAIM_SCAN_WINDOW,
   HANDLER_PREDICATE,
@@ -51,6 +52,12 @@ export class CandidateStatements {
     return this.#fastCandidates(spec) + this.#slowCandidates(spec);
   }
 
+  /** ` AND NOT` {@link blockedInOtherLane} for a store of a lane scope, else nothing. */
+  #notBlockedInOtherLane(alias: string, sequence: string): string {
+    const blocked = blockedInOtherLane(this.#names, { alias, sequence });
+    return blocked === null ? '' : ` AND NOT ${blocked}`;
+  }
+
   /** The fast window of each lane and the claimable deliveries in it (`<prefix>_window`, `<prefix>_fast`). */
   #fastCandidates({ prefix, scope, running, limit }: CandidateSpec): string {
     const deliveries = this.#names.deliveries;
@@ -83,7 +90,7 @@ export class CandidateStatements {
         SELECT 1 FROM ${deliveries} AS earlier
         WHERE earlier.lane = head.lane AND earlier.handler = head.handler AND earlier.key = head.key
           AND earlier.status = 'pending' AND earlier.key IS NOT NULL AND earlier.sequence < head.sequence
-      ) AND ${notRunning(running, 'head')}
+      ) AND ${notRunning(running, 'head')}${this.#notBlockedInOtherLane('head', 'head.sequence')}
   ) AS picked
   ORDER BY picked.available_at, picked.id
   LIMIT ${limit}
@@ -132,7 +139,10 @@ export class CandidateStatements {
   SELECT heads.id, heads.lane, heads.available_at
   FROM ${prefix}_heads AS heads
   JOIN ${prefix}_saturated AS scope ON scope.lane = heads.lane
-  WHERE heads.available_at <= $1::timestamptz AND heads.id <> ALL (scope.in_flight) AND ${notRunning(running, 'heads')}
+  WHERE heads.available_at <= $1::timestamptz AND heads.id <> ALL (scope.in_flight) AND ${notRunning(running, 'heads')}${this.#notBlockedInOtherLane(
+    'heads',
+    `(SELECT own.sequence FROM ${this.#names.deliveries} AS own WHERE own.id = heads.id)`,
+  )}
   ORDER BY heads.available_at, heads.id
   LIMIT ${limit}
 `;

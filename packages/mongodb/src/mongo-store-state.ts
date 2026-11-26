@@ -12,6 +12,7 @@ import {
   createTransactionsUnsupportedError,
   isTransactionsUnsupportedError,
 } from './mongo-errors.js';
+import type { MongoLaneScope } from './mongo-lane-scope.js';
 
 /** A lane a claim holds: already held before it, or taken by it. */
 export interface ScopeLane {
@@ -41,6 +42,8 @@ export type MongoStoreState = {
   readonly keySequences: Collection<KeySequenceDocument>;
   readonly lanes: Collection<LaneDocument>;
   readonly completions: Collection<CompletedDeliveryDocument>;
+  /** The lanes this store leases and places its deliveries in. */
+  readonly laneScope: MongoLaneScope;
   readonly completionHistory: boolean;
   readonly transactionOptions: TransactionOptions;
   readonly purgeBatchSize: number;
