@@ -168,6 +168,26 @@ describe('lane scopes', () => {
     expect(requeued!.event.id).toBe(first.id);
   });
 
+  it('claims a keyed delivery of a default lane while an unkeyed one runs in the matching lane of the block', async () => {
+    const { store: old, database } = await createStore();
+    const scopedStore = scoped(database, 'orders');
+    // An unkeyed delivery must not block the key 'undefined' of its handler.
+    const key = 'undefined';
+    let unkeyed = createEnvelope();
+    while (laneOf(null, unkeyed.id) !== laneOf(key, '')) {
+      unkeyed = createEnvelope();
+    }
+    await publish(scopedStore, unkeyed, 'orders.handler');
+    const [running] = await claim(scopedStore, ['orders.handler'], 'worker-a');
+    expect(running!.event.id).toBe(unkeyed.id);
+    expect((await laneIds(database)).get(unkeyed.id)).toBe(laneOf(key, '') + 256);
+
+    const keyed = createEnvelope({ key });
+    await publish(old, keyed, 'orders.handler');
+    const [claimed] = await claim(scopedStore, ['orders.handler'], 'worker-b');
+    expect(claimed!.event.id).toBe(keyed.id);
+  });
+
   it('allocates the block of a first publish inside a transaction that read before, in one attempt', async () => {
     const { database, events } = await createStore();
     const store = scoped(database, 'orders');
