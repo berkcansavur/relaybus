@@ -30,3 +30,5 @@ export function expectWithinBudget(id: string, measured: number): void {
     .soft(measured, `${id}: measured ${measured} ${entry.unit}, budget ${entry.budget}`)
     .toBeLessThanOrEqual(entry.budget);
 }
+
+export const timingTestsEnabled = process.env['RELAYBUS_TIMING_TESTS'] === '1';
