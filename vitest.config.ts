@@ -59,6 +59,10 @@ const integration = {
   testTimeout: 120_000,
   hookTimeout: 180_000,
   globalSetup: ['./vitest.global-setup.ts'],
+  // Published packages that older-version tests run next to this workspace import `@relaybus/core`
+  // as a peer, which resolves to this workspace: inline them, so it resolves to the sources and
+  // the tests do not depend on a build.
+  server: { deps: { inline: [/@relaybus\+postgres@1\.1\.0/] } },
 };
 
 export default defineConfig({
