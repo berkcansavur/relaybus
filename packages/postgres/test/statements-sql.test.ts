@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { DeliveryQuery } from '@relaybus/core';
 import { resolvePostgresNames, type PostgresSchemaOptions } from '../src/names.js';
-import { setLaneBlockStart } from '../src/sql-fragments.js';
+import { laneBlockStart, setLaneBlockStart } from '../src/sql-fragments.js';
 import { createPostgresSchemaStatements, version040SchemaMarker } from '../src/schema.js';
 import { PostgresStatements } from '../src/statements.js';
 
@@ -59,6 +59,14 @@ describe('statement SQL', () => {
 
   it.each(Object.entries(configurations))('creates the same schema with %s', (_label, options) => {
     expect(createPostgresSchemaStatements(options)).toMatchSnapshot();
+  });
+});
+
+describe('the first lane of a scope', () => {
+  it('is unknown to statements before the block is looked up', () => {
+    expect(() => laneBlockStart(resolvePostgresNames({ laneScope: 'orders' }))).toThrow(
+      "lane scope 'orders' has no block yet",
+    );
   });
 });
 

@@ -215,6 +215,44 @@ describe('lane scopes', () => {
     expect(await claim(billing, ['billing.handler'], 'billing-worker')).toHaveLength(1);
   });
 
+  it('claims unkeyed deliveries of its block', async () => {
+    const { database } = await createStore();
+    const store = scoped(database, 'orders');
+    const event = createEnvelope();
+    await publish(store, event, 'orders.handler');
+    expect(await drain(store, 'orders.handler', 'worker')).toEqual([event.id]);
+  });
+
+  it('rejects a scope when the lane numbers have no room for its block, and allocates once there is', async () => {
+    const { database } = await createStore();
+    const { lanes } = collections(database);
+    await lanes.insertOne({ _id: 32_600, scope: 'filler' });
+    const store = scoped(database, 'orders');
+    await expect(claim(store, ['orders.handler'], 'worker')).rejects.toThrow(/no room/);
+
+    await lanes.deleteOne({ _id: 32_600 });
+    expect(await claim(store, ['orders.handler'], 'worker')).toEqual([]);
+    expect((await blocks(database)).get('orders')).toEqual({ lanes: 256, first: 256, last: 511 });
+  });
+
+  it('passes on errors of the allocation other than a block taken by another store', async () => {
+    const { database } = await createStore();
+    const { lanes } = collections(database);
+    await client.db(database).command({
+      collMod: lanes.collectionName,
+      validator: { scopeHead: { $exists: false } },
+    });
+    await expect(claim(scoped(database, 'orders'), ['orders.handler'], 'worker')).rejects.toThrow(
+      /validation/i,
+    );
+  });
+
+  it('allocates the first block above the default lanes before they are seeded', async () => {
+    const database = uniqueDatabaseName();
+    expect(await claim(scoped(database, 'orders'), ['orders.handler'], 'worker')).toEqual([]);
+    expect((await blocks(database)).get('orders')).toEqual({ lanes: 256, first: 256, last: 511 });
+  });
+
   it('rejects a scope that is not a plain name', () => {
     expect(() => scoped(uniqueDatabaseName(), 'Orders With Spaces')).toThrow();
     expect(() => scoped(uniqueDatabaseName(), '')).toThrow();

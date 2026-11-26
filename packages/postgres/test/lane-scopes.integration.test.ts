@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDelivery, createEnvelope } from '@relaybus/testing';
-import type { ClaimedDelivery, EventEnvelope } from '@relaybus/core';
+import { ConfigurationError, type ClaimedDelivery, type EventEnvelope } from '@relaybus/core';
 // The published 1.1.0 package: lanes 0-255 only, no scope column.
 import { PostgresEventStore as Version110Store } from 'relaybus-postgres-1.1.0';
 import { PostgresEventStore } from '../src/index.js';
@@ -473,6 +473,50 @@ describe('lane scopes', () => {
     const orders = current(schema, 'orders');
     expect(await claim(orders, ['orders.handler'], 'orders-worker')).toHaveLength(0);
     expect(await claim(billing, ['billing.handler'], 'billing-worker')).toHaveLength(1);
+  });
+
+  it('rejects a scope whose lanes are not one block of 256', async () => {
+    const schema = uniqueSchema();
+    await current(schema).setup();
+    await database.pool.query(
+      `INSERT INTO "${schema}".relaybus_lanes (lane, scope) VALUES (300, 'orders'), (301, 'orders')`,
+    );
+    await expect(claim(current(schema, 'orders'), ['orders.handler'], 'worker')).rejects.toThrow(
+      ConfigurationError,
+    );
+  });
+
+  it('rejects a scope when the lane numbers have no room for its block, and allocates once there is', async () => {
+    const schema = uniqueSchema();
+    await current(schema).setup();
+    await database.pool.query(
+      `INSERT INTO "${schema}".relaybus_lanes (lane, scope) VALUES (32600, 'filler')`,
+    );
+    const store = current(schema, 'orders');
+    await expect(claim(store, ['orders.handler'], 'worker')).rejects.toThrow(/no room/);
+
+    await database.pool.query(`DELETE FROM "${schema}".relaybus_lanes WHERE scope = 'filler'`);
+    expect(await claim(store, ['orders.handler'], 'worker')).toEqual([]);
+    expect((await scopeBlocks(schema)).get('orders')).toEqual({
+      lanes: 256,
+      first: 256,
+      last: 511,
+    });
+  });
+
+  it('asks for the upgrade when the lane table has no scope column', async () => {
+    const schema = uniqueSchema();
+    await version110(schema).setup();
+    await expect(claim(current(schema, 'orders'), ['orders.handler'], 'worker')).rejects.toThrow(
+      /no scope column/,
+    );
+  });
+
+  it('passes on other errors of the block lookup', async () => {
+    const store = current(uniqueSchema(), 'orders');
+    await expect(claim(store, ['orders.handler'], 'worker')).rejects.not.toThrow(
+      ConfigurationError,
+    );
   });
 
   it('rejects a scope that is not a plain name', () => {
